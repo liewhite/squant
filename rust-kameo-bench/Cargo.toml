@@ -1,0 +1,18 @@
+[package]
+name = "kameo-bench"
+version = "0.1.0"
+edition = "2021"
+
+# 仅作基准用途，库本身为空，依赖全放 dev-dependencies。
+[dev-dependencies]
+kameo = "0.20"
+tokio = { version = "1", features = ["full"] }
+criterion = { version = "0.8", features = ["async_tokio"] }
+
+[[bench]]
+name = "actor_bench"
+harness = false
+
+[profile.release]
+lto = true
+codegen-units = 1
