@@ -1,6 +1,7 @@
 ThisBuild / scalaVersion := "3.7.4"
 
 lazy val root = (project in file("."))
+  .enablePlugins(JmhPlugin)
   .settings(
     name := "ox-actor-demo",
     libraryDependencies += "com.softwaremill.ox" %% "core" % "1.0.4",
