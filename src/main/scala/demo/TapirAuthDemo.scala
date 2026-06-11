@@ -13,15 +13,23 @@ import sttp.tapir.server.{PartialServerEndpoint, ServerEndpoint}
 import sttp.tapir.server.nima.NimaServerInterpreter
 import sttp.tapir.swagger.bundle.SwaggerInterpreter
 
-/** tapir + Helidon Nima 演示：header 鉴权逻辑只写一次，v1/v2/v3 三个 endpoint 复用。
+/** tapir + Helidon Nima 演示：三层树状 endpoint 结构 + 模块化 security middleware。
   *
-  * 关键点是 [[secureEndpoint]]：securityIn 声明了鉴权 header（会自动出现在 OpenAPI 文档里），
-  * serverSecurityLogic 完成校验并产出 AuthedUser。业务 endpoint 从它派生，
-  * serverLogic 的入参类型就是 AuthedUser —— 不鉴权拿不到 user，编译期保证不会漏。
+  * {{{
+  * apiRoot (/api)                      ← 第一层：纯 Endpoint 树根
+  * ├── adminBranch (/api/admin)        ← 第二层：挂 ApiTokenAuth + ClientIp 两个 middleware
+  * │   ├── GET /api/admin/v1..v3       ← 第三层：叶子，serverLogic 入参是 RequestContext
+  * └── userBranch (/api/user)          ← 第二层：公开分支，不挂 security
+  *     └── GET /api/user/v1..v3        ← 第三层：叶子，无鉴权
+  * }}}
+  *
+  * endpoint 描述是不可变值，每个中间 val 都是可继续分叉的树节点；
+  * serverSecurityLogic 在每条根→叶路径上只能出现一次，security 由派生源头静态决定。
   *
   * 运行：sbt "runMain demo.TapirAuthDemo"
   * 文档：http://localhost:8080/docs
-  * 验证：curl -H "X-Api-Token: demo-secret" http://localhost:8080/api/v1
+  * 验证：curl http://localhost:8080/api/user/v1
+  *      curl -H "X-Api-Token: demo-secret" http://localhost:8080/api/admin/v1
   */
 object TapirAuthDemo:
 
@@ -66,34 +74,41 @@ object TapirAuthDemo:
         .orElse(s.remote.map(_.getAddress.getHostAddress))
         .getOrElse("unknown")
 
-  // ── 组装点：serverSecurityLogic 每条派生路径只能调一次，两个 middleware 在此拼成 RequestContext ──
-  private val secureEndpoint: PartialServerEndpoint[(String, ClientIp.Source), RequestContext, Unit, ApiError, Unit, Any, Identity] =
-    endpoint
+  // ── 第一层：公共前缀 /api，纯 Endpoint 值，整棵树的根 ──
+  private val apiRoot = endpoint.in("api")
+
+  // ── 第二层 admin 分支：组装两个 middleware（serverSecurityLogic 每条路径只能调一次），再长出 /admin ──
+  private val adminBranch: PartialServerEndpoint[(String, ClientIp.Source), RequestContext, Unit, ApiError, Unit, Any, Identity] =
+    apiRoot
       .securityIn(ApiTokenAuth.input)
       .securityIn(ClientIp.input)
       .errorOut(statusCode(StatusCode.Unauthorized).and(jsonBody[ApiError]))
       .serverSecurityLogic[RequestContext, Identity] { (token, ipSource) =>
         ApiTokenAuth.check(token).map(RequestContext(_, ClientIp.resolve(ipSource)))
       }
+      .in("admin")
 
-  // v1 是公开 endpoint：不从 secureEndpoint 派生就不带鉴权，文档中也没有 security 标记
-  private val v1 = endpoint.get
-    .in("api" / "v1")
-    .out(stringBody)
-    .serverLogicSuccess[Identity](_ => "hello")
+  // ── 第二层 user 分支：公开，不挂 security，文档中也没有 security 标记 ──
+  private val userBranch = apiRoot.in("user")
 
-  // v2/v3 只写业务逻辑，鉴权和上下文提取由 secureEndpoint 统一提供
-  private val v2 = secureEndpoint.get
-    .in("api" / "v2")
-    .out(jsonBody[Greeting])
-    .serverLogicSuccess(ctx => _ => Greeting("v2", ctx.user.name, ctx.clientIp, "hello from v2"))
+  private val versions = List("v1", "v2", "v3")
 
-  private val v3 = secureEndpoint.get
-    .in("api" / "v3")
-    .out(jsonBody[Greeting])
-    .serverLogicSuccess(ctx => _ => Greeting("v3", ctx.user.name, ctx.clientIp, "hello from v3"))
+  // ── 第三层：每个分支各长出 v1/v2/v3 三个叶子 ──
+  private val adminEndpoints: List[ServerEndpoint[Any, Identity]] = versions.map { v =>
+    adminBranch.get
+      .in(v)
+      .out(jsonBody[Greeting])
+      .serverLogicSuccess(ctx => _ => Greeting(v, ctx.user.name, ctx.clientIp, s"hello from admin $v"))
+  }
 
-  private val apiEndpoints: List[ServerEndpoint[Any, Identity]] = List(v1, v2, v3)
+  private val userEndpoints: List[ServerEndpoint[Any, Identity]] = versions.map { v =>
+    userBranch.get
+      .in(v)
+      .out(stringBody)
+      .serverLogicSuccess[Identity](_ => s"hello from user $v")
+  }
+
+  private val apiEndpoints: List[ServerEndpoint[Any, Identity]] = adminEndpoints ++ userEndpoints
 
   private val docsEndpoints =
     SwaggerInterpreter().fromServerEndpoints[Identity](apiEndpoints, "tapir-nima-auth-demo", "1.0.0")
