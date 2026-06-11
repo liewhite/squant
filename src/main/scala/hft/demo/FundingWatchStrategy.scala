@@ -48,7 +48,7 @@ final class FundingWatchStrategy(
       bbo <- symbolState.bbo(Exchange.Binance)
       if funding.dailyRate > dailyRateThreshold
       if !symbolState.hasPendingOrders
-      if symbolState.positionSize(Exchange.Binance) == 0.0
+      if symbolState.position(Exchange.Binance).forall(_.isEmpty)
       qty <- orderQty.get(symbol)
     yield
       val order = Order(

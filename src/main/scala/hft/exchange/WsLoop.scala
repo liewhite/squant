@@ -8,28 +8,27 @@ import sttp.client4.ws.SyncWebSocket
 import sttp.client4.ws.sync.*
 import sttp.ws.WebSocketFrame
 
-/** 服务端关闭连接 (收到 Close 帧)，触发重连 */
+/** 服务端关闭连接 (收到 Close 帧) */
 private final class WsServerClosedException(reason: String) extends RuntimeException(reason)
 
-/** 通用 WebSocket 重连循环。
+/** 通用 WebSocket 连接泵 —— fail-fast，不做重连。
   *
-  * 基于 sttp 同步 WebSocket，每条连接占用两个虚拟线程：
+  * 错误处理哲学：私有流断线期间的推送无法回放，任何"重连恢复"都会造成静默的状态发散；
+  * 因此连接异常 (建连失败/服务端关闭/发送失败/消息解析失败) 一律向上传播，令 fork 失败、
+  * 整个引擎作用域级联终止，由进程重启后的启动对齐保证状态正确。
+  *
+  * 每条连接占用两个虚拟线程：
   *   - 发送线程: 消费 outgoing channel，是连接的唯一写入者 (Pong 响应也经由该 channel)
-  *   - 接收线程: 阻塞读取帧，文本帧回调 onText
-  *
-  * 任一线程出错即拆除整条连接，退避后重连，重连成功先回调 onConnect (用于恢复订阅)。
+  *   - 接收线程: 阻塞读取帧，重组分片后将文本回调 onText
   */
 object WsLoop:
   private val logger = LoggerFactory.getLogger(getClass)
 
-  /** 在当前作用域 fork 一个常驻的自动重连 WS 循环。
+  /** 在当前作用域 fork 连接泵。连接在 fork 内建立，url 求值失败同样令作用域终止。
     *
-    * @param name             连接名 (日志用)
-    * @param url              每次 (重) 连接时求值，可在其中完成动态准备 (如获取 listenKey)
-    * @param outgoing         出站帧 channel；重连后未发出的帧不补发，由 onConnect 恢复订阅状态
-    * @param onText           收到文本帧的回调，在接收线程上执行
-    * @param onConnect        连接建立后、收发开始前的回调，向 outgoing 投递恢复订阅帧
-    * @param reconnectDelayMs 重连退避间隔
+    * @param url      连接时求值，可在其中完成动态准备 (如获取 listenKey)
+    * @param outgoing 出站帧 channel；连接建立前入队的帧会在建立后立即发送
+    * @param onText   收到完整文本消息的回调，在接收线程上执行，抛出的异常向上传播
     */
   def run(
       name: String,
@@ -37,23 +36,16 @@ object WsLoop:
       url: () => String,
       outgoing: Channel[WebSocketFrame],
       onText: String => Unit,
-      onConnect: () => Unit,
-      reconnectDelayMs: Long = 3000,
   )(using Ox): Unit =
     fork {
-      while true do
-        try
-          val target = url()
-          logger.info(s"[$name] connecting: $target")
-          basicRequest
-            .get(uri"$target")
-            .response(asWebSocketAlways(pump(name, _, outgoing, onText, onConnect)))
-            .send(backend)
-        catch
-          case e: InterruptedException => throw e // 作用域取消，正常退出
-          case e: Exception =>
-            logger.warn(s"[$name] connection lost: ${e.getMessage}, reconnecting in ${reconnectDelayMs}ms")
-        Thread.sleep(reconnectDelayMs)
+      val target = url()
+      logger.info(s"[$name] connecting: $target")
+      basicRequest
+        .get(uri"$target")
+        .response(asWebSocketAlways(pump(name, _, outgoing, onText)))
+        .send(backend)
+      // pump 是无限循环，只能以异常退出；走到这里说明连接以未建模的方式结束
+      throw IllegalStateException(s"[$name] websocket terminated unexpectedly")
     }
     ()
 
@@ -63,10 +55,8 @@ object WsLoop:
       ws: SyncWebSocket,
       outgoing: Channel[WebSocketFrame],
       onText: String => Unit,
-      onConnect: () => Unit,
   ): Unit =
     logger.info(s"[$name] connected")
-    onConnect()
     supervised:
       // 发送线程: 连接的唯一写入者
       fork:
@@ -86,4 +76,4 @@ object WsLoop:
           case _: WebSocketFrame.Pong             => ()
           case _: WebSocketFrame.Binary           => ()
           case WebSocketFrame.Close(code, reason) =>
-            throw WsServerClosedException(s"server closed: code=$code reason=$reason")
+            throw WsServerClosedException(s"[$name] server closed: code=$code reason=$reason")

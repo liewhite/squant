@@ -10,7 +10,10 @@ import sttp.client4.DefaultSyncBackend
   * 以 dry-run 模式接入 Binance 公开行情 (无需 API key)：
   *   - WS 订阅 BTCUSDT/ETHUSDT 的 bookTicker 与 markPrice 流
   *   - FundingWatchStrategy 在日化资金费率超阈值时产出下单信号
-  *   - dry-run 下信号只打日志不下单；pending 订单 5 秒无确认被时钟清理，可观察完整闭环
+  *   - dry-run 下信号只打日志不下单，并以 OrderUpdate(Error) 回流清理 pending，可观察完整闭环
+  *
+  * Fail-fast: 框架不做任何错误恢复 (包括 WS 重连)，任何异常都终止进程，
+  * 由外层 (systemd/k8s) 重新拉起，重启后的启动对齐保证状态正确。
   *
   * 配置环境变量 BINANCE_API_KEY / BINANCE_API_SECRET 可接入私有流与真实下单
   * (此时应去掉 dryRun)。

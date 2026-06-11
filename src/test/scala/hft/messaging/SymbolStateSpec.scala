@@ -58,21 +58,24 @@ class SymbolStateSpec extends munit.FunSuite:
     assert(state.hasPendingOrders)
     assertEquals(state.pendingOrders.head.order.clientOrderId, "external-1")
 
-  test("超时清理只移除 Created 状态的订单，已确认挂单不动"):
+  test("Created 订单超时未确认 -> 结果不确定，抛错终止"):
     val state = SymbolState(symbol)
     state.addPendingOrder(newOrder("created"), t0)
+    intercept[RuntimeException] {
+      state.failOnTimedOutOrders(now = t0 + 6000, timeoutMs = 5000)
+    }
+
+  test("已确认挂单不参与超时校验"):
+    val state = SymbolState(symbol)
     state.addPendingOrder(newOrder("confirmed"), t0)
     state.apply(orderUpdate("confirmed", OrderStatus.Pending))
+    state.failOnTimedOutOrders(now = t0 + 60000, timeoutMs = 5000) // 不抛
 
-    val removed = state.removeTimedOutOrders(now = t0 + 6000, timeoutMs = 5000)
-    assertEquals(removed, 1)
-    assertEquals(state.pendingOrders.map(_.order.clientOrderId).toList, List("confirmed"))
-
-  test("超时未到不清理; timeoutMs=0 关闭清理"):
+  test("超时未到不抛; timeoutMs=0 关闭校验"):
     val state = SymbolState(symbol)
     state.addPendingOrder(newOrder("c1"), t0)
-    assertEquals(state.removeTimedOutOrders(t0 + 1000, timeoutMs = 5000), 0)
-    assertEquals(state.removeTimedOutOrders(t0 + 60000, timeoutMs = 0), 0)
+    state.failOnTimedOutOrders(t0 + 1000, timeoutMs = 5000) // 不抛
+    state.failOnTimedOutOrders(t0 + 60000, timeoutMs = 0)   // 不抛
 
   test("Fill 事件按方向乐观更新仓位，无仓位时创建"):
     val state = SymbolState(symbol)
@@ -93,11 +96,12 @@ class SymbolStateSpec extends munit.FunSuite:
     state.apply(IncomeEvent.at(t0, EventData.PositionUpdate(initial.copy(size = 9.0))))
     assertEqualsDouble(state.positionSize(Exchange.Binance), 1.0, 1e-12)
 
-  test("symbol 不匹配的事件被忽略"):
+  test("symbol 不匹配只能是路由 bug -> 抛错终止"):
     val state = SymbolState(symbol)
     val other = BBO(Exchange.Binance, "ETHUSDT", 1.0, 1.0, 2.0, 1.0, t0)
-    state.apply(IncomeEvent.at(t0, EventData.BboUpdate(other)))
-    assertEquals(state.bbo(Exchange.Binance), None)
+    intercept[RuntimeException] {
+      state.apply(IncomeEvent.at(t0, EventData.BboUpdate(other)))
+    }
 
   test("hasPendingSide 区分方向"):
     val state = SymbolState(symbol)

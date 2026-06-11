@@ -39,13 +39,16 @@ class StateManagerSpec extends munit.FunSuite:
     assertEquals(state.symbolState("ETHUSDT").flatMap(_.bbo(Exchange.Binance)), Some(bbo))
     assertEquals(state.symbolState("BTCUSDT").flatMap(_.bbo(Exchange.Binance)), None)
 
-  test("Clock 事件驱动超时订单清理"):
+  test("Clock 事件驱动超时校验: 超时未确认订单 -> 抛错终止"):
     val state = StateManager(List("BTCUSDT"), orderTimeoutMs = 5000)
     state.addPendingOrder(newOrder("BTCUSDT", "c1")) // createdAt = nowMs
     assert(state.hasPendingOrders("BTCUSDT"))
-    // localTs 远超 createdAt + timeout
-    state.apply(IncomeEvent(0, nowMs + 60_000, EventData.Clock))
-    assert(!state.hasPendingOrders("BTCUSDT"))
+    // 未超时不抛
+    state.apply(IncomeEvent(0, nowMs + 1000, EventData.Clock))
+    // localTs 远超 createdAt + timeout -> 结果不确定，终止
+    intercept[RuntimeException] {
+      state.apply(IncomeEvent(0, nowMs + 60_000, EventData.Clock))
+    }
 
   test("向未注册 symbol 下单立即暴露配置错误"):
     val state = StateManager(List("BTCUSDT"), orderTimeoutMs = 5000)

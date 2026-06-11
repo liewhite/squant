@@ -59,15 +59,16 @@ final class Executor(
         outcomeBus.publish(cancel)
     }
 
-  /** 币本位数量 -> 合约张数，价格/数量按交易所精度取整 */
+  /** 币本位数量 -> 合约张数，价格/数量按交易所精度取整。
+    * 缺少 SymbolMeta 说明策略交易了未预加载的 symbol，是配置错误，立即终止
+    */
   private def convertOrder(order: Order): Order =
-    symbolMetas.get((order.exchange, order.symbol)) match
-      case None =>
-        logger.warn(s"SymbolMeta not found, order not converted: ${order.exchange} ${order.symbol}")
-        order
-      case Some(meta) =>
-        val quantity = meta.roundSizeDown(meta.coinToQty(order.quantity))
-        val orderType = order.orderType match
-          case OrderType.Market           => OrderType.Market
-          case OrderType.Limit(price, tif) => OrderType.Limit(meta.roundPrice(price), tif)
-        order.copy(quantity = quantity, orderType = orderType)
+    val meta = symbolMetas.getOrElse(
+      (order.exchange, order.symbol),
+      sys.error(s"SymbolMeta not found for ${order.exchange} ${order.symbol}, cannot convert order"),
+    )
+    val quantity = meta.roundSizeDown(meta.coinToQty(order.quantity))
+    val orderType = order.orderType match
+      case OrderType.Market            => OrderType.Market
+      case OrderType.Limit(price, tif) => OrderType.Limit(meta.roundPrice(price), tif)
+    order.copy(quantity = quantity, orderType = orderType)

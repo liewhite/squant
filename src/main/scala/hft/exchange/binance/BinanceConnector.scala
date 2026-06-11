@@ -11,7 +11,6 @@ import sttp.client4.WebSocketSyncBackend
 import sttp.ws.WebSocketFrame
 
 import java.util.concurrent.atomic.AtomicInteger
-import scala.collection.mutable
 
 import BinanceCodec.*
 import BinanceCodec.given
@@ -22,8 +21,10 @@ import BinanceCodec.given
   *   - `/public/ws` 高频公共数据: bookTicker -> BBO
   *   - `/market/ws` 常规行情: markPrice\@1s -> MarkPrice + IndexPrice + FundingRate
   *   - `/private/ws/<listenKey>` 用户数据流 (配置凭证时): ORDER_TRADE_UPDATE ->
-  *     OrderUpdate/Fill，ACCOUNT_UPDATE -> Balance/Position；listenKey 每 30 分钟
-  *     自动续期，重连时重新获取
+  *     OrderUpdate/Fill，ACCOUNT_UPDATE -> Balance/Position
+  *
+  * Fail-fast：连接断开、消息解析失败、未知事件类型/订单状态、listenKey 续期失败，
+  * 一律抛出异常终止引擎作用域——不重连、不丢弃，避免任何静默的状态发散。
   */
 final class BinanceConnector(
     client: BinanceClient,
@@ -39,50 +40,37 @@ final class BinanceConnector(
     case Public extends Route("/public/ws") // 高频公共市场数据
     case Market extends Route("/market/ws") // 常规行情数据
 
-  /** 每个公共路由一条出站 channel (即一条连接) */
+  /** 每个公共路由一条出站 channel (即一条连接)；建连前入队的订阅帧会在建连后发送 */
   private val outgoing: Map[Route, Channel[WebSocketFrame]] =
     Route.values.map(_ -> Channel.unlimited[WebSocketFrame]).toMap
   private val privateOut = Channel.unlimited[WebSocketFrame]
-  /** 已订阅集合，synchronized 保护 (subscribe 与重连恢复可能并发) */
-  private val subscribed = mutable.Set.empty[SubscriptionKind]
   private val requestId = AtomicInteger(0)
   private var bus: EventBus[IncomeEvent] = scala.compiletime.uninitialized
 
   override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit =
     bus = incomeBus
     Route.values.foreach { route =>
-      WsLoop.run(
-        s"binance${route.path.stripSuffix("/ws")}",
-        backend,
-        () => s"$wsBaseUrl${route.path}",
-        outgoing(route),
-        onPublicText,
-        () => restoreSubscriptions(route),
-      )
+      WsLoop.run(s"binance${route.path.stripSuffix("/ws")}", backend, () => s"$wsBaseUrl${route.path}", outgoing(route), onPublicText)
     }
     if client.hasCredentials then
-      WsLoop.run("binance/private", backend, privateStreamUrl, privateOut, onPrivateText, () => ())
+      WsLoop.run("binance/private", backend, privateStreamUrl, privateOut, onPrivateText)
       fork {
         while true do
           Thread.sleep(30 * 60 * 1000)
-          client.keepAliveListenKey().left.foreach(e => logger.warn(s"listenKey keepalive failed: ${e.message}"))
+          client.keepAliveListenKey() match
+            case Right(()) => logger.info("listenKey keepalive ok")
+            case Left(e) =>
+              // 续期失败意味着私有流将在 60 分钟内被服务端断开 (推送丢失)，立即终止
+              throw IllegalStateException(s"listenKey keepalive failed: ${e.message}")
       }
       ()
 
-  override def subscribe(kinds: Set[SubscriptionKind]): Unit = synchronized {
-    subscribed ++= kinds
+  override def subscribe(kinds: Set[SubscriptionKind]): Unit =
     kinds.groupBy(routeOf).foreach { (route, routeKinds) =>
       sendSubscribe(route, routeKinds.map(streamName))
     }
-  }
 
-  /** 重连后恢复该路由的全部订阅 */
-  private def restoreSubscriptions(route: Route): Unit = synchronized {
-    val streams = subscribed.toSet.filter(routeOf(_) == route).map(streamName)
-    sendSubscribe(route, streams)
-  }
-
-  /** 每次 (重) 连接私有流前重新获取 listenKey；失败抛异常由 WsLoop 退避重试 */
+  /** 连接私有流前获取 listenKey；失败抛异常终止 */
   private def privateStreamUrl(): String =
     client.createListenKey() match
       case Right(key) => s"$wsBaseUrl/private/ws/$key"
@@ -106,16 +94,14 @@ final class BinanceConnector(
       logger.info(s"subscribing on ${route.path}: $streams")
       outgoing(route).send(WebSocketFrame.text(message))
 
-  // ==================== 公共流解析 ====================
+  // ==================== 公共流解析 (解析失败/未知事件 -> 异常上抛终止) ====================
 
   private def onPublicText(text: String): Unit =
-    try
-      readFromString[WsEnvelope](text).e match
-        case "bookTicker"      => publishBookTicker(readFromString[BookTickerMsg](text))
-        case "markPriceUpdate" => publishMarkPrice(readFromString[MarkPriceMsg](text))
-        case _                 => () // 订阅 ack 等控制消息
-    catch
-      case e: JsonReaderException => logger.warn(s"Failed to parse public message: ${e.getMessage}; text=$text")
+    readFromString[WsEnvelope](text).e match
+      case "bookTicker"      => publishBookTicker(readFromString[BookTickerMsg](text))
+      case "markPriceUpdate" => publishMarkPrice(readFromString[MarkPriceMsg](text))
+      case ""                => () // SUBSCRIBE ack: {"result":null,"id":N}，确定可忽略
+      case other             => throw IllegalStateException(s"Unexpected public event '$other': $text")
 
   private def publishBookTicker(msg: BookTickerMsg): Unit =
     val bbo = BBO(
@@ -146,19 +132,19 @@ final class BinanceConnector(
       )
     )
 
-  // ==================== 私有流解析 ====================
+  // ==================== 私有流解析 (任何不理解的消息 -> 异常上抛终止) ====================
 
   private def onPrivateText(text: String): Unit =
-    try
-      readFromString[WsEnvelope](text).e match
-        case "ORDER_TRADE_UPDATE" => publishOrderUpdate(readFromString[OrderTradeUpdateMsg](text))
-        case "ACCOUNT_UPDATE"     => publishAccountUpdate(readFromString[AccountUpdateMsg](text))
-        case "listenKeyExpired" =>
-          // 抛出异常令接收循环退出，WsLoop 重连时会重新获取 listenKey
-          throw IllegalStateException("listenKey expired")
-        case _ => ()
-    catch
-      case e: JsonReaderException => logger.warn(s"Failed to parse private message: ${e.getMessage}; text=$text")
+    readFromString[WsEnvelope](text).e match
+      case "ORDER_TRADE_UPDATE" => publishOrderUpdate(readFromString[OrderTradeUpdateMsg](text))
+      case "ACCOUNT_UPDATE"     => publishAccountUpdate(readFromString[AccountUpdateMsg](text))
+      // 确定可安全忽略的事件:
+      // - TRADE_LITE: 成交信息与 ORDER_TRADE_UPDATE 重复推送
+      // - ACCOUNT_CONFIG_UPDATE: 杠杆/保证金模式变更，不影响订单与仓位核算
+      case "TRADE_LITE" | "ACCOUNT_CONFIG_UPDATE" => ()
+      case "listenKeyExpired" =>
+        throw IllegalStateException("listenKey expired, private stream about to drop pushes")
+      case other => throw IllegalStateException(s"Unhandled private event '$other': $text")
 
   private def publishOrderUpdate(msg: OrderTradeUpdateMsg): Unit =
     val o = msg.o
@@ -169,11 +155,8 @@ final class BinanceConnector(
       case "FILLED"           => OrderStatus.Filled
       case "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" => OrderStatus.Cancelled
       case "REJECTED"         => OrderStatus.Rejected("rejected by exchange")
-      case other =>
-        // 未知状态不能映射为终态：误删 pending 会让本地失去订单跟踪、放大敞口。
-        // 保守侧处理：告警并丢弃，pending 滞留可被观察到并人工介入
-        logger.warn(s"Unknown order status '$other', event dropped: $o")
-        return
+      // 未知状态意味着无法解释交易所的订单状态机，继续运行只会静默发散
+      case other => throw IllegalStateException(s"Unknown order status '$other': $o")
     val update = OrderUpdate(
       orderId = o.i.toString,
       clientOrderId = Some(o.c),

@@ -83,33 +83,32 @@ final class SymbolState(val symbol: Symbol):
   def removePendingOrder(clientOrderId: String): Unit =
     _pendingOrders.remove(clientOrderId)
 
-  /** 清理超时订单，返回移除数量。
+  /** 校验不存在超时未确认的订单，违反即抛错终止。
     *
-    * 仅清理 Created 状态超过 timeoutMs 的订单 (交易所未确认，视为丢失)。
-    * 已确认的挂单 (Pending/PartiallyFilled) 由策略决定何时撤单，不做超时清理。
+    * Created 状态超过 timeoutMs：REST 已设置更短的超时，正常情况下下单要么明确成功
+    * (私有流推送确认) 要么明确失败 (Error 事件清理 pending)，走到这里说明订单结果
+    * **不确定**——清理后重下会造成敞口翻倍，唯一安全的做法是终止，由重启后的启动对齐恢复。
+    * 已确认挂单 (Pending/PartiallyFilled) 由策略决定何时撤单，不参与校验。
     */
-  def removeTimedOutOrders(now: Timestamp, timeoutMs: Long): Int =
-    if timeoutMs <= 0 then 0
-    else
-      val expired = _pendingOrders.filter { (_, p) =>
-        p.status == OrderStatus.Created && now - p.createdAt > timeoutMs
+  def failOnTimedOutOrders(now: Timestamp, timeoutMs: Long): Unit =
+    if timeoutMs > 0 then
+      _pendingOrders.find((_, p) => p.status == OrderStatus.Created && now - p.createdAt > timeoutMs).foreach {
+        (clientId, p) =>
+          sys.error(
+            s"[$symbol] order unconfirmed after ${now - p.createdAt}ms (timeout=${timeoutMs}ms), outcome UNKNOWN: " +
+              s"clientOrderId=$clientId exchange=${p.order.exchange}"
+          )
       }
-      expired.foreach { (clientId, p) =>
-        logger.warn(
-          s"[$symbol] order timed out (no exchange confirmation), removing: " +
-            s"clientOrderId=$clientId exchange=${p.order.exchange} elapsedMs=${now - p.createdAt}"
-        )
-        _pendingOrders.remove(clientId)
-      }
-      expired.size
 
   // ==================== 事件处理 ====================
 
-  /** 更新状态。事件 symbol 与本 state 不一致时忽略 */
+  /** 更新状态。事件已由 Executor 按 (exchange, symbol) 过滤，
+    * symbol 不一致只能是路由 bug，立即终止
+    */
   def apply(event: IncomeEvent): Unit =
     event.symbol match
       case Some(s) if s != symbol =>
-        logger.warn(s"Event symbol mismatch, ignoring: expected=$symbol actual=$s")
+        sys.error(s"Event symbol mismatch (routing bug): expected=$symbol actual=$s")
       case None => () // 账户级事件在 per-symbol 状态中不处理
       case _ =>
         event.data match

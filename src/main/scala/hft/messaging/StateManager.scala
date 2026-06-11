@@ -56,7 +56,7 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long):
     case EventData.AccountInfoUpdate(exchange, info) =>
       accountInfos(exchange) = info
     case EventData.Clock =>
-      states.values.foreach(_.removeTimedOutOrders(event.localTs, orderTimeoutMs))
+      states.values.foreach(_.failOnTimedOutOrders(event.localTs, orderTimeoutMs))
     case _ =>
       // Symbol 事件: 委托对应 SymbolState 处理。
       // 事件已由 Executor 按 (exchange, symbol) 过滤，symbol 必然已注册，

@@ -38,13 +38,35 @@ Clock ───────────┼─> incomeBus ─> Executor (Strategy
 
 ## 核心设计
 
+### 错误处理哲学: fail-fast，不做任何"没有把握"的恢复
+
+正确性模型：**启动对齐必须成功 + 信任交易所推送不丢 + 一切异常逐层上抛、进程报错退出**，
+由外层 (systemd/k8s) 重新拉起，重启后的启动对齐保证状态一致。不做快照覆盖式对账——
+快照与 WS 推送存在时序竞争 (覆盖后收到覆盖前的 Fill 会双重计数)，无法做对。
+
+具体体现：
+
+- **不重连**: WS 断开 (含服务端 24h 强断、listenKey 过期/续期失败) 直接终止。
+  私有流断线期间的推送无法回放，"重连恢复"等于静默的状态发散。
+- **不丢弃**: 消息解析失败、未知事件类型、未知订单状态，一律抛错。静默丢弃一条
+  私有流消息等于丢一笔成交。
+- **不确定即终止**: 下单/撤单遇到网络错误或超时，订单是否成立**不确定**，立即终止；
+  只有交易所明确拒绝 (HTTP 4xx) 才作为正常业务结果以 OrderUpdate(Error) 回流策略。
+  REST 超时 (3s) 必须小于订单超时 (orderTimeoutMs)，使 Created 订单超时未确认
+  成为"不可能事件"——一旦发生即假设被破坏，终止。
+- **配置错误即终止**: 缺 SymbolMeta、缺 client/connector、启动对齐失败 (除"未配置
+  凭证"这一确定安全的例外) 都在装配/首次使用时抛错。
+
+ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内的 fork，异常到达 fork
+边界即级联取消整个作用域并从 main 抛出，进程以非零码退出。
+
 ### 两个核心 trait
 
 接入一个新交易所 = 实现 `ExchangeClient` + `ExchangeConnector`，框架其余部分零修改：
 
 - `ExchangeClient`: 同步 REST (下单/撤单/查持仓/查挂单/元数据)，错误以 `Either[ExchangeError, A]` 显式返回。
 - `ExchangeConnector`: 维护 WS 长连接，把原始推送解析为统一 `IncomeEvent` 发布到总线；
-  断线自动重连并恢复订阅；配置凭证时自动接入私有流。
+  配置凭证时自动接入私有流；遵循 fail-fast 契约 (断线/解析失败即抛错终止)。
 
 编写一个新策略 = 实现 `Strategy` (声明订阅 + 纯函数式 `onEvent`)。
 
@@ -53,16 +75,19 @@ Clock ───────────┼─> incomeBus ─> Executor (Strategy
 - 所有组件都是 `supervised` 作用域内的虚拟线程 fork，任一组件崩溃级联终止整个作用域 (对应 kameo spawn_link)。
 - 每个策略一个 `Executor`，独占虚拟线程串行消费事件，策略与状态无锁。
 - `WsLoop` 每条连接两个虚拟线程: 发送线程是连接唯一写入者 (Pong 回应也经出站 channel)，
-  接收线程重组分片文本帧后回调；任一侧出错拆除整条连接，退避重连。
+  接收线程重组分片文本帧后回调；任一侧出错即异常上抛终止 (不重连)。
 - `OutcomeProcessor` 每个 REST 调用 fork 独立虚拟线程，下单互不阻塞。
 
 ### 订单生命周期
 
 1. 策略产出 `PlaceOrders` (币本位数量)
 2. Executor 生成 `clientOrderId`，以原始币本位登记 pending，按 `SymbolMeta` 转换精度后发布
-3. OutcomeProcessor 调 REST 下单；失败以 `OrderUpdate(Error)` 回流
-4. 私有流推送 `OrderUpdate`/`Fill` 更新 pending 与仓位 (Fill 乐观更新)
-5. Clock 事件驱动超时清理: `Created` 状态超过 `orderTimeoutMs` 未获确认即视为丢失移除
+3. OutcomeProcessor 调 REST 下单；交易所明确拒绝 (4xx) 以 `OrderUpdate(Error)` 回流，
+   结果不确定 (网络/超时/5xx) 直接终止
+4. 私有流推送 `OrderUpdate`/`Fill` 更新 pending 与仓位 (Fill 乐观更新)；
+   撤单终态同样以私有流推送为准，框架不合成确认事件
+5. Clock 事件驱动超时校验: `Created` 状态超过 `orderTimeoutMs` 未获确认 = 结果不确定，
+   抛错终止 (REST 超时更短，正常情况下到不了这里)
 
 ### 启动顺序保证 (addStrategies)
 
@@ -78,8 +103,9 @@ Clock ───────────┼─> incomeBus ─> Executor (Strategy
   - `/public/ws`: bookTicker → BBO
   - `/market/ws`: markPrice@1s → MarkPrice + IndexPrice + FundingRate (一条消息拆三个事件)
   - `/private/ws/<listenKey>`: ORDER_TRADE_UPDATE → OrderUpdate/Fill, ACCOUNT_UPDATE → Balance/Position；
-    listenKey 每 30 分钟续期，重连时重新获取
+    listenKey 每 30 分钟续期，续期失败/过期即终止
 - 注意: 未路由的旧端点 `wss://fstream.binance.com/ws` 不再推送 markPrice 等 `/market` 路由的数据。
+- Binance 每 24 小时强制断开连接——fail-fast 模型下进程至少每日重启一次，需外层自动拉起。
 
 ## 运行演示与测试
 

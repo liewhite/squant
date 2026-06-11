@@ -74,3 +74,16 @@ class ExecutorFlowSpec extends munit.FunSuite:
       incomeBus.publish(IncomeEvent.local(EventData.Clock))
 
       assert(outcomes.receive().isInstanceOf[OutcomeEvent.PlaceOrders])
+
+  test("策略交易的 symbol 缺少 SymbolMeta -> 配置错误，作用域终止"):
+    intercept[RuntimeException] {
+      supervised:
+        val incomeBus = EventBus[IncomeEvent]()
+        val outcomeBus = EventBus[OutcomeEvent]()
+        val outcomes = outcomeBus.subscribe()
+
+        // 空 metas: 策略下单时 convertOrder 抛错 -> executor fork 失败 -> 作用域级联终止
+        Executor(ClockOrderStrategy(), Map.empty, outcomeBus).run(incomeBus.subscribe())
+        incomeBus.publish(IncomeEvent.local(EventData.Clock))
+        outcomes.receive() // 阻塞至 fork 失败取消作用域
+    }

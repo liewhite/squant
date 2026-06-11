@@ -9,6 +9,7 @@ import sttp.model.{Method, Uri}
 import java.nio.charset.StandardCharsets.UTF_8
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
+import scala.concurrent.duration.*
 
 import BinanceCodec.*
 import BinanceCodec.given
@@ -166,13 +167,25 @@ final class BinanceClient(
 
   private def request(method: Method, url: String, apiKey: Option[String]): Either[ExchangeError, String] =
     try
-      val base = basicRequest.method(method, Uri.unsafeParse(url)).response(asStringAlways)
+      val base = basicRequest
+        .method(method, Uri.unsafeParse(url))
+        // 显式短超时: 必须小于策略的 orderTimeoutMs，让"超时"与"请求丢失"语义对齐
+        .readTimeout(3.seconds)
+        .response(asStringAlways)
       val response = apiKey.fold(base)(k => base.header("X-MBX-APIKEY", k)).send(backend)
       if response.code.isSuccess then Right(response.body)
       else Left(ExchangeError.Http(response.code.code, response.body))
     catch
-      case e: InterruptedException => throw e
-      case e: Exception            => Left(ExchangeError.Network(s"$method $url: ${e.getMessage}"))
+      // 作用域取消 (可能被 sttp 包裹) 必须重抛，不能误判为网络错误
+      case e: Exception if isInterrupt(e) => throw e
+      case e: Exception                   => Left(ExchangeError.Network(s"$method $url: ${e.getMessage}"))
+
+  /** 异常 cause 链中是否包含线程中断 (ox 作用域取消的信号) */
+  private def isInterrupt(t: Throwable): Boolean =
+    Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(10).exists {
+      case _: InterruptedException | _: java.io.InterruptedIOException => true
+      case _                                                           => false
+    }
 
   private def parse[T: JsonValueCodec](body: String): Either[ExchangeError, T] =
     try Right(readFromString[T](body))

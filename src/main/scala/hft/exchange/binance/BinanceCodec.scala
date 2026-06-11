@@ -119,5 +119,9 @@ private[binance] object BinanceCodec:
   given positionRisksCodec: JsonValueCodec[List[PositionRisk]] = JsonCodecMaker.make
   given JsonValueCodec[ListenKeyResp] = JsonCodecMaker.make
 
-  /** API 返回的数字字符串，缺失/非法时取 0 (上游字段缺失语义即为零值) */
-  extension (s: String) def asDouble: Double = s.toDoubleOption.getOrElse(0.0)
+  /** API 返回的数字字符串。非法即抛错终止——静默归零会造成无法察觉的状态错误。
+    * (字段缺失时 codec 默认值为 "0"，解析为 0.0，语义即零值)
+    */
+  extension (s: String)
+    def asDouble: Double =
+      s.toDoubleOption.getOrElse(throw IllegalStateException(s"Invalid number from Binance API: '$s'"))

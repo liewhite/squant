@@ -67,50 +67,57 @@ final class Engine private (
 
     // 4. 订阅行情
     allSubscriptions.groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
-      connectors.get(exchange) match
-        case Some(connector) => connector.subscribe(kinds)
-        case None            => logger.error(s"No connector for exchange $exchange, subscriptions skipped")
+      connectors
+        .getOrElse(exchange, throw IllegalStateException(s"No connector configured for exchange $exchange"))
+        .subscribe(kinds)
     }
 
     logger.info(s"${strategies.size} strategies added")
 
+  private def requireClient(exchange: Exchange): ExchangeClient =
+    clients.getOrElse(exchange, throw IllegalStateException(s"No client configured for exchange $exchange"))
+
+  /** 启动对齐必须成功 (fail-fast)，唯一的例外是未配置凭证：
+    * 无账户即无仓位/挂单需要对齐，跳过是确定安全的 (公开数据演示/研究模式)
+    */
   private def publishInitialPositions(exchangeSymbols: Set[(Exchange, Symbol)]): Unit =
     exchangeSymbols.groupMap(_._1)(_._2).foreach { (exchange, symbols) =>
-      clients.get(exchange).foreach { client =>
-        client.fetchPositions() match
-          case Left(e) =>
-            logger.warn(s"Failed to fetch initial positions on $exchange, proceeding without: ${e.message}")
-          case Right(positions) =>
-            val bySymbol = positions.map(p => p.symbol -> p).toMap
-            symbols.foreach { symbol =>
-              val pos = bySymbol.getOrElse(symbol, Position.empty(exchange, symbol))
-              logger.info(s"Initial position loaded: $exchange $symbol size=${pos.size}")
-              incomeBus.publish(IncomeEvent.local(EventData.PositionUpdate(pos)))
-            }
-      }
+      requireClient(exchange).fetchPositions() match
+        case Left(ExchangeError.Auth(_)) =>
+          logger.info(s"No credentials for $exchange, skipping position alignment")
+        case Left(e) =>
+          throw IllegalStateException(s"Failed to fetch initial positions from $exchange: ${e.message}")
+        case Right(positions) =>
+          val bySymbol = positions.map(p => p.symbol -> p).toMap
+          symbols.foreach { symbol =>
+            val pos = bySymbol.getOrElse(symbol, Position.empty(exchange, symbol))
+            logger.info(s"Initial position loaded: $exchange $symbol size=${pos.size}")
+            incomeBus.publish(IncomeEvent.local(EventData.PositionUpdate(pos)))
+          }
     }
 
   private def publishExistingPendingOrders(exchangeSymbols: Set[(Exchange, Symbol)]): Unit =
     exchangeSymbols.foreach { (exchange, symbol) =>
-      clients.get(exchange).foreach { client =>
-        client.fetchPendingOrders(symbol) match
-          case Left(e) =>
-            logger.warn(s"Failed to fetch pending orders on $exchange $symbol, proceeding without: ${e.message}")
-          case Right(updates) =>
-            if updates.nonEmpty then
-              logger.info(s"Fetched ${updates.size} existing pending orders: $exchange $symbol")
-            updates.foreach { update =>
-              // REST 返回的数量是合约张数，转换为币本位
-              val converted = symbolMetas.get((exchange, symbol)) match
-                case Some(meta) =>
-                  update.copy(
-                    quantity = meta.qtyToCoin(update.quantity),
-                    filledQuantity = meta.qtyToCoin(update.filledQuantity),
-                  )
-                case None => update
-              incomeBus.publish(IncomeEvent.local(EventData.OrderUpdated(converted)))
-            }
-      }
+      requireClient(exchange).fetchPendingOrders(symbol) match
+        case Left(ExchangeError.Auth(_)) =>
+          logger.info(s"No credentials for $exchange, skipping pending order alignment")
+        case Left(e) =>
+          throw IllegalStateException(s"Failed to fetch pending orders from $exchange $symbol: ${e.message}")
+        case Right(updates) =>
+          if updates.nonEmpty then
+            logger.info(s"Fetched ${updates.size} existing pending orders: $exchange $symbol")
+          updates.foreach { update =>
+            // REST 返回的数量是合约张数，转换为币本位
+            val meta = symbolMetas.getOrElse(
+              (exchange, symbol),
+              throw IllegalStateException(s"SymbolMeta not found for $exchange $symbol"),
+            )
+            val converted = update.copy(
+              quantity = meta.qtyToCoin(update.quantity),
+              filledQuantity = meta.qtyToCoin(update.filledQuantity),
+            )
+            incomeBus.publish(IncomeEvent.local(EventData.OrderUpdated(converted)))
+          }
     }
 
 object Engine:
