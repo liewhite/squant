@@ -25,8 +25,6 @@ import sttp.tapir.swagger.bundle.SwaggerInterpreter
   */
 object TapirAuthDemo:
 
-  private val ApiToken = "demo-secret"
-
   case class AuthedUser(name: String)
 
   /** security 阶段产出的请求上下文：身份 + 客户端 IP，业务 endpoint 的入参类型 */
@@ -39,24 +37,43 @@ object TapirAuthDemo:
   private given JsonValueCodec[ApiError] = JsonCodecMaker.make
   private given JsonValueCodec[Greeting] = JsonCodecMaker.make
 
-  // X-Forwarded-For 是普通 header input，会出现在 OpenAPI 文档中；
-  // extractFromRequest 是 server-only input，文档解释器自动忽略，用作直连时的兜底
-  private def resolveClientIp(xff: Option[String], remote: Option[InetSocketAddress]): String =
-    xff.flatMap(_.split(',').headOption.map(_.trim).filter(_.nonEmpty))
-      .orElse(remote.map(_.getAddress.getHostAddress))
-      .getOrElse("unknown")
+  // ── middleware 1：API token 鉴权。input 声明（含文档）+ 校验逻辑自包含，可单独复用 ──
+  private object ApiTokenAuth:
+    private val ApiToken = "demo-secret"
 
-  // 鉴权 + 请求上下文提取的唯一出处：所有需要鉴权的 endpoint 都从这里派生
-  private val secureEndpoint
-      : PartialServerEndpoint[(String, Option[String], Option[InetSocketAddress]), RequestContext, Unit, ApiError, Unit, Any, Identity] =
+    val input: EndpointInput[String] =
+      auth.apiKey(header[String]("X-Api-Token")).description("访问令牌，demo 固定为 demo-secret")
+
+    def check(token: String): Either[ApiError, AuthedUser] =
+      if token == ApiToken then Right(AuthedUser("demo-user"))
+      else Left(ApiError(401, "invalid X-Api-Token"))
+
+  // ── middleware 2：client IP 提取。mapTo[Source] 把内部输入结构封在模块内，对外只暴露单一类型 ──
+  private object ClientIp:
+    case class Source(xff: Option[String], remote: Option[InetSocketAddress])
+
+    // X-Forwarded-For 是普通 header input，进 OpenAPI 文档；
+    // extractFromRequest 是 server-only input，文档解释器自动忽略，直连时兜底
+    val input: EndpointInput[Source] =
+      header[Option[String]]("X-Forwarded-For")
+        .description("代理传递的客户端 IP 链，取第一个")
+        .and(extractFromRequest(_.connectionInfo.remote))
+        .mapTo[Source]
+
+    def resolve(s: Source): String =
+      s.xff
+        .flatMap(_.split(',').headOption.map(_.trim).filter(_.nonEmpty))
+        .orElse(s.remote.map(_.getAddress.getHostAddress))
+        .getOrElse("unknown")
+
+  // ── 组装点：serverSecurityLogic 每条派生路径只能调一次，两个 middleware 在此拼成 RequestContext ──
+  private val secureEndpoint: PartialServerEndpoint[(String, ClientIp.Source), RequestContext, Unit, ApiError, Unit, Any, Identity] =
     endpoint
-      .securityIn(auth.apiKey(header[String]("X-Api-Token")).description("访问令牌，demo 固定为 demo-secret"))
-      .securityIn(header[Option[String]]("X-Forwarded-For").description("代理传递的客户端 IP 链，取第一个"))
-      .securityIn(extractFromRequest(_.connectionInfo.remote))
+      .securityIn(ApiTokenAuth.input)
+      .securityIn(ClientIp.input)
       .errorOut(statusCode(StatusCode.Unauthorized).and(jsonBody[ApiError]))
-      .serverSecurityLogic[RequestContext, Identity] { (token, xff, remote) =>
-        if token == ApiToken then Right(RequestContext(AuthedUser("demo-user"), resolveClientIp(xff, remote)))
-        else Left(ApiError(401, "invalid X-Api-Token"))
+      .serverSecurityLogic[RequestContext, Identity] { (token, ipSource) =>
+        ApiTokenAuth.check(token).map(RequestContext(_, ClientIp.resolve(ipSource)))
       }
 
   // v1 是公开 endpoint：不从 secureEndpoint 派生就不带鉴权，文档中也没有 security 标记
