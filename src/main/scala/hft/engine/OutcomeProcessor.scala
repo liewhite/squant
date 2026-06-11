@@ -33,8 +33,8 @@ final class OutcomeProcessor(
     case OutcomeEvent.PlaceOrders(orders, comment) =>
       // 关联订单独立并行下单：IOC 订单本身接受部分成交，敞口由策略层 rebalance 兜底
       orders.foreach(placeOrder(_, comment))
-    case OutcomeEvent.CancelOrder(exchange, symbol, orderId) =>
-      cancelOrder(exchange, symbol, orderId)
+    case OutcomeEvent.CancelOrder(exchange, symbol, orderId, clientOrderId) =>
+      cancelOrder(exchange, symbol, orderId, clientOrderId)
 
   private def placeOrder(order: Order, comment: String)(using Ox): Unit =
     clients.get(order.exchange) match
@@ -59,7 +59,9 @@ final class OutcomeProcessor(
           }
           ()
 
-  private def cancelOrder(exchange: Exchange, symbol: Symbol, orderId: OrderId)(using Ox): Unit =
+  private def cancelOrder(exchange: Exchange, symbol: Symbol, orderId: OrderId, clientOrderId: String)(using
+      Ox
+  ): Unit =
     clients.get(exchange) match
       case None => logger.error(s"No client found for cancel_order: $exchange")
       case Some(client) =>
@@ -72,7 +74,7 @@ final class OutcomeProcessor(
                 // 撤单成功，反馈 Cancelled 状态让 SymbolState 移除 pending order
                 val update = OrderUpdate(
                   orderId = orderId,
-                  clientOrderId = Some(orderId),
+                  clientOrderId = Some(clientOrderId),
                   exchange = exchange,
                   symbol = symbol,
                   side = Side.Long, // 撤单事件中 side 无实际意义

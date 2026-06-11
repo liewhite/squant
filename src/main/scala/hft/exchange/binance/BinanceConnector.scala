@@ -167,9 +167,13 @@ final class BinanceConnector(
       case "NEW"              => OrderStatus.Pending
       case "PARTIALLY_FILLED" => OrderStatus.PartiallyFilled(o.z.asDouble)
       case "FILLED"           => OrderStatus.Filled
-      case "CANCELED" | "EXPIRED" => OrderStatus.Cancelled
+      case "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" => OrderStatus.Cancelled
       case "REJECTED"         => OrderStatus.Rejected("rejected by exchange")
-      case other              => OrderStatus.Error(s"unknown status: $other")
+      case other =>
+        // 未知状态不能映射为终态：误删 pending 会让本地失去订单跟踪、放大敞口。
+        // 保守侧处理：告警并丢弃，pending 滞留可被观察到并人工介入
+        logger.warn(s"Unknown order status '$other', event dropped: $o")
+        return
     val update = OrderUpdate(
       orderId = o.i.toString,
       clientOrderId = Some(o.c),

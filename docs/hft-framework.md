@@ -81,10 +81,11 @@ Clock ───────────┼─> incomeBus ─> Executor (Strategy
     listenKey 每 30 分钟续期，重连时重新获取
 - 注意: 未路由的旧端点 `wss://fstream.binance.com/ws` 不再推送 markPrice 等 `/market` 路由的数据。
 
-## 运行演示
+## 运行演示与测试
 
 ```bash
-sbt "runMain hft.demo.HftDemo"
+sbt "runMain hft.demo.HftDemo"   # dry-run 演示
+sbt test                          # 单元测试 (domain 精度/费率、订单生命周期、Executor 链路)
 ```
 
 dry-run 模式接入 Binance 公开行情 (无需 API key)，可观察完整闭环：

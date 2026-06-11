@@ -16,7 +16,8 @@ lazy val root = (project in file("."))
     libraryDependencies ++= Seq(
       "com.softwaremill.sttp.client4" %% "core" % "4.0.25",
       "org.slf4j" % "slf4j-api" % "2.0.17",
-      "org.slf4j" % "slf4j-simple" % "2.0.17"
+      "org.slf4j" % "slf4j-simple" % "2.0.17",
+      "org.scalameta" %% "munit" % "1.1.1" % Test
     ),
     // ox 基于虚拟线程(Project Loom)，fork 出独立 JVM 运行，输出更干净
     fork := true,
