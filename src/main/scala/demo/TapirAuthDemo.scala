@@ -59,12 +59,13 @@ object TapirAuthDemo:
         else Left(ApiError(401, "invalid X-Api-Token"))
       }
 
-  // 三个业务 endpoint 只写业务逻辑，鉴权和上下文提取由 secureEndpoint 统一提供
-  private val v1 = secureEndpoint.get
+  // v1 是公开 endpoint：不从 secureEndpoint 派生就不带鉴权，文档中也没有 security 标记
+  private val v1 = endpoint.get
     .in("api" / "v1")
-    .out(jsonBody[Greeting])
-    .serverLogicSuccess(ctx => _ => Greeting("v1", ctx.user.name, ctx.clientIp, "hello from v1"))
+    .out(stringBody)
+    .serverLogicSuccess[Identity](_ => "hello")
 
+  // v2/v3 只写业务逻辑，鉴权和上下文提取由 secureEndpoint 统一提供
   private val v2 = secureEndpoint.get
     .in("api" / "v2")
     .out(jsonBody[Greeting])
