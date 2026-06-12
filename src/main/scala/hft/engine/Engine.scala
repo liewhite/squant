@@ -40,8 +40,9 @@ final class Engine private (
     *   1. 创建 Executor 并订阅 income 总线 —— 之后发布的事件不会丢
     *   2. REST 查询初始持仓并发布 —— 避免策略基于缺失仓位决策；
     *      交易所未返回的 symbol 显式推 size=0，保证 SymbolState 一定收到初始值
-    *   3. REST 查询现有挂单并发布 —— 策略接管启动前的遗留订单
-    *   4. 向交易所订阅行情 —— 市场数据从此处开始流动
+    *   3. REST 查询账户信息 (净值/名义价值) 并发布 —— 风控类决策 (杠杆率) 依赖
+    *   4. REST 查询现有挂单并发布 —— 策略接管启动前的遗留订单
+    *   5. 向交易所订阅行情 —— 市场数据从此处开始流动
     */
   def addStrategies(strategies: Seq[Strategy]): Unit =
     if strategies.isEmpty then return
@@ -62,10 +63,13 @@ final class Engine private (
     // 2. 初始持仓
     publishInitialPositions(exchangeSymbols)
 
-    // 3. 现有挂单
+    // 3. 初始账户信息
+    exchangeSymbols.map(_._1).foreach(exchange => publishAccountInfoFrom(requireClient(exchange)))
+
+    // 4. 现有挂单
     publishExistingPendingOrders(exchangeSymbols)
 
-    // 4. 订阅行情
+    // 5. 订阅行情
     allSubscriptions.groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
       connectors
         .getOrElse(exchange, throw IllegalStateException(s"No connector configured for exchange $exchange"))
@@ -76,6 +80,20 @@ final class Engine private (
 
   private def requireClient(exchange: Exchange): ExchangeClient =
     clients.getOrElse(exchange, throw IllegalStateException(s"No client configured for exchange $exchange"))
+
+  /** REST 查询账户信息并发布 AccountInfoUpdate。
+    * 返回 false 表示该交易所未配置凭证 (无账户即无需刷新，确定安全)；其余失败致命
+    */
+  private def publishAccountInfoFrom(client: ExchangeClient): Boolean =
+    client.fetchAccountInfo() match
+      case Right(info) =>
+        incomeBus.publish(IncomeEvent.local(EventData.AccountInfoUpdate(client.exchange, info)))
+        true
+      case Left(ExchangeError.Auth(_)) =>
+        logger.info(s"No credentials for ${client.exchange}, skipping account info")
+        false
+      case Left(e) =>
+        throw IllegalStateException(s"Failed to fetch account info from ${client.exchange}: ${e.message}")
 
   /** 启动对齐必须成功 (fail-fast)，唯一的例外是未配置凭证：
     * 无账户即无仓位/挂单需要对齐，跳过是确定安全的 (公开数据演示/研究模式)
@@ -124,12 +142,16 @@ object Engine:
   private val logger = LoggerFactory.getLogger(classOf[Engine])
 
   /** 启动引擎：预加载交易对元数据 (失败即终止启动)、装配事件总线、
-    * 启动信号处理器 / 时钟 / 各交易所连接器。
+    * 启动信号处理器 / 时钟 / 账户信息刷新 / 各交易所连接器。
+    *
+    * @param accountRefreshMs 账户信息 (净值/名义价值) REST 刷新间隔；
+    *                         净值随行情持续变动，无对应 WS 推送，周期拉取保证风控数据新鲜
     */
   def start(
       gateways: Seq[ExchangeGateway],
       dryRun: Boolean = false,
       clockIntervalMs: Long = 1000,
+      accountRefreshMs: Long = 10_000,
   )(using Ox): Engine =
     val clients = gateways.map(g => g.client.exchange -> g.client).toMap
     val connectors = gateways.map(g => g.connector.exchange -> g.connector).toMap
@@ -159,5 +181,15 @@ object Engine:
 
     connectors.values.foreach(_.start(incomeBus))
 
+    val engine = Engine(clients, connectors, symbolMetas, incomeBus, outcomeBus)
+
+    // 账户信息周期刷新: 未配置凭证的交易所在首次拉取后退出轮询 (确定安全的例外)
+    fork {
+      var polled = clients.values.toVector
+      while polled.nonEmpty do
+        Thread.sleep(accountRefreshMs)
+        polled = polled.filter(engine.publishAccountInfoFrom)
+    }
+
     logger.info("Engine started")
-    Engine(clients, connectors, symbolMetas, incomeBus, outcomeBus)
+    engine

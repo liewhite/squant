@@ -32,9 +32,9 @@ Clock ───────────┼─> incomeBus ─> Executor (Strategy
 | `messaging` | `IncomeEvent`、`EventBus`、`SymbolState`/`StateManager` (策略视角的聚合状态) |
 | `exchange` | 核心抽象: `ExchangeClient` (REST trait)、`ExchangeConnector` (WS trait)、`SubscriptionKind`、`WsLoop` (通用重连泵) |
 | `engine` | `Engine` (装配/生命周期)、`Executor` (策略运行器)、`OutcomeProcessor` (信号执行) |
-| `strategy` | `Strategy` trait + `OutcomeEvent` |
+| `strategy` | `Strategy` trait + `OutcomeEvent`；`BboMakerStrategy` (BBO 外被动做市 + 杠杆率风控) |
 | `exchange/binance` | Binance USDⓈ-M 实现 (REST 签名、公共/私有 WS、jsoniter 编解码) |
-| `demo` | `HftDemo` 入口 + `FundingWatchStrategy` 演示策略 |
+| `demo` | `HftDemo` (公开行情演示) / `MakerDemo` (做市策略) 入口 + `FundingWatchStrategy` 演示策略 |
 
 ## 核心设计
 
@@ -93,8 +93,12 @@ ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内
 
 1. Executor 订阅总线 (之后的事件不丢)
 2. REST 查初始持仓并发布 (未返回的 symbol 显式推 size=0)
-3. REST 查现有挂单并发布 (接管遗留订单)
-4. 向交易所订阅行情 (数据从此开始流动)
+3. REST 查账户信息 (净值/名义价值) 并发布 (杠杆率等风控决策依赖)
+4. REST 查现有挂单并发布 (接管遗留订单)
+5. 向交易所订阅行情 (数据从此开始流动)
+
+账户净值随行情持续变动且无对应 WS 推送，Engine 以周期 REST 刷新
+(`accountRefreshMs`，默认 10s) 持续发布 `AccountInfoUpdate` 保证风控数据新鲜。
 
 ## Binance 接入说明
 
@@ -110,8 +114,11 @@ ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内
 ## 运行演示与测试
 
 ```bash
-sbt "runMain hft.demo.HftDemo"   # dry-run 演示
-sbt test                          # 单元测试 (domain 精度/费率、订单生命周期、Executor 链路)
+sbt "runMain hft.demo.HftDemo"    # 公开行情 dry-run 演示 (无需 API key)
+sbt test                          # 单元测试 (domain 精度/费率、订单生命周期、Executor 链路、策略行为)
+
+# BBO 做市策略 (需 API key；默认 dry-run，LIVE=1 真实下单)
+BINANCE_API_KEY=.. BINANCE_API_SECRET=.. sbt "runMain hft.demo.MakerDemo"
 ```
 
 dry-run 模式接入 Binance 公开行情 (无需 API key)，可观察完整闭环：
