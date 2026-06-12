@@ -26,9 +26,12 @@ object WsLoop:
 
   /** 在当前作用域 fork 连接泵。连接在 fork 内建立，url 求值失败同样令作用域终止。
     *
-    * @param url      连接时求值，可在其中完成动态准备 (如获取 listenKey)
-    * @param outgoing 出站帧 channel；连接建立前入队的帧会在建立后立即发送
-    * @param onText   收到完整文本消息的回调，在接收线程上执行，抛出的异常向上传播
+    * @param url           连接时求值，可在其中完成动态准备 (如获取 listenKey)
+    * @param outgoing      出站帧 channel；连接建立前入队的帧会在建立后立即发送
+    * @param onText        收到完整文本消息的回调，在接收线程上执行，抛出的异常向上传播
+    * @param idleTimeoutMs 空闲超时: 超过该时长未收到任何帧即抛错。TCP 半开连接不产生
+    *                      任何错误，是"无错误可抛"的静默停滞——watchdog 把它转化为可抛的
+    *                      错误。Binance 服务端每 ~3 分钟 ping 一次，活连接必有帧
     */
   def run(
       name: String,
@@ -36,35 +39,47 @@ object WsLoop:
       url: () => String,
       outgoing: Channel[WebSocketFrame],
       onText: String => Unit,
+      idleTimeoutMs: Long = 5 * 60 * 1000,
   )(using Ox): Unit =
     fork {
       val target = url()
       logger.info(s"[$name] connecting: $target")
       basicRequest
         .get(uri"$target")
-        .response(asWebSocketAlways(pump(name, _, outgoing, onText)))
+        .response(asWebSocketAlways(pump(name, _, outgoing, onText, idleTimeoutMs)))
         .send(backend)
       // pump 是无限循环，只能以异常退出；走到这里说明连接以未建模的方式结束
       throw IllegalStateException(s"[$name] websocket terminated unexpectedly")
     }
     ()
 
-  /** 单条连接的收发泵，连接断开时以异常退出 */
+  /** 单条连接的收发泵，连接断开/空闲超时时以异常退出 */
   private def pump(
       name: String,
       ws: SyncWebSocket,
       outgoing: Channel[WebSocketFrame],
       onText: String => Unit,
+      idleTimeoutMs: Long,
   ): Unit =
     logger.info(s"[$name] connected")
+    val lastFrameNanos = java.util.concurrent.atomic.AtomicLong(System.nanoTime())
     supervised:
       // 发送线程: 连接的唯一写入者
       fork:
         while true do ws.send(outgoing.receive())
+      // 空闲 watchdog: 接收线程阻塞在 receive 上无法自察，由旁路线程检测
+      fork:
+        while true do
+          Thread.sleep(idleTimeoutMs / 4)
+          val idleMs = (System.nanoTime() - lastFrameNanos.get()) / 1_000_000
+          if idleMs > idleTimeoutMs then
+            throw IllegalStateException(s"[$name] no frame received for ${idleMs}ms, connection presumed dead")
       // 接收循环 (当前线程)；文本消息可能分片到达，重组到 finalFragment 后回调
       val fragments = StringBuilder()
       while true do
-        ws.receive() match
+        val frame = ws.receive()
+        lastFrameNanos.set(System.nanoTime())
+        frame match
           case WebSocketFrame.Text(payload, finalFragment, _) =>
             if finalFragment && fragments.isEmpty then onText(payload)
             else

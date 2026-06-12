@@ -56,6 +56,10 @@ final class OutcomeProcessor(
             logger.info(
               s"Order accepted: ${order.exchange} ${order.symbol} orderId=$orderId clientOrderId=${order.clientOrderId}"
             )
+          case Left(e @ ExchangeError.Http(status, _)) if status == 429 || status == 418 =>
+            // 限频/封禁: 说明"订单生命周期自然限速"的假设已被打破，
+            // 按拒单回流会形成"拒单->重挂->更多请求"的重试风暴，必须终止
+            throw IllegalStateException(s"Rate limited by exchange, aborting: ${describe(order)} error=${e.message}")
           case Left(e @ ExchangeError.Http(status, _)) if status >= 400 && status < 500 =>
             // 交易所明确拒绝，订单确定未成立 -> 回流策略
             logger.warn(s"Order rejected: ${describe(order)} error=${e.message}")

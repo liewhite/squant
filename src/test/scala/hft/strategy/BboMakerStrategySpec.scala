@@ -108,6 +108,26 @@ class BboMakerStrategySpec extends munit.FunSuite:
     val second = feed(strategy, state, bboEvent(50000.0, 50001.0))
     assert(second.collect { case c: OutcomeEvent.CancelOrder => c }.isEmpty)
 
+  test("部分成交的挂单同样参与价格维护 (撤掉剩余部分)"):
+    val (strategy, state) = (newStrategy(), newState())
+    inject(state, EventData.AccountInfoUpdate(Exchange.Binance, AccountInfo(1000.0, 0.0)))
+    inject(state, EventData.MarkPriceUpdate(MarkPrice(Exchange.Binance, symbol, 50000.0, t0)))
+
+    val stale = Order("", Exchange.Binance, symbol, Side.Long, OrderType.Limit(49000.0, TimeInForce.PostOnly), 0.002, false, "b1")
+    registerPending(state, stale, "b1")
+    inject(
+      state,
+      EventData.OrderUpdated(
+        OrderUpdate("ex-1", Some("b1"), Exchange.Binance, symbol, Side.Long, OrderStatus.PartiallyFilled(0.001), 49000.0, 0.002, 0.001, 0.001, t0)
+      ),
+    )
+
+    val signals = feed(strategy, state, bboEvent(50000.0, 50001.0))
+    assertEquals(
+      signals.collect { case c: OutcomeEvent.CancelOrder => c },
+      Vector(OutcomeEvent.CancelOrder(Exchange.Binance, symbol, "ex-1")),
+    )
+
   test("未确认 (Created) 的挂单不撤 (尚无交易所 orderId)"):
     val (strategy, state) = (newStrategy(), newState())
     inject(state, EventData.AccountInfoUpdate(Exchange.Binance, AccountInfo(1000.0, 0.0)))
