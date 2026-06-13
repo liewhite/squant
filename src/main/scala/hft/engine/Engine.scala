@@ -1,14 +1,23 @@
 package hft.engine
 
 import hft.domain.*
-import hft.exchange.{ExchangeClient, ExchangeConnector, SubscriptionKind}
+import hft.exchange.{AccountStream, ExchangeClient, MarketDataStream, SubscriptionKind}
 import hft.messaging.{EventBus, EventData, IncomeEvent}
 import hft.strategy.{OutcomeEvent, Strategy}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
 
-/** 一个交易所的接入单元: REST 客户端 + WS 连接器 */
-final case class ExchangeGateway(client: ExchangeClient, connector: ExchangeConnector)
+/** 一个交易所的接入单元: REST 客户端 + 公共行情流 + 可选私有账户流。
+  *
+  * 私有账户流可缺省 (无凭证的研究模式)，也可由虚拟柜台 (模拟盘) 提供——
+  * 此时 client / marketData / accountStream 可指向同一个 SimulatedExchange，
+  * 策略对真实还是模拟无感知。
+  */
+final case class ExchangeGateway(
+    client: ExchangeClient,
+    marketData: MarketDataStream,
+    accountStream: Option[AccountStream] = None,
+)
 
 /** 引擎：装配并管理所有组件的生命周期。
   *
@@ -25,7 +34,7 @@ final case class ExchangeGateway(client: ExchangeClient, connector: ExchangeConn
   */
 final class Engine private (
     clients: Map[Exchange, ExchangeClient],
-    connectors: Map[Exchange, ExchangeConnector],
+    marketStreams: Map[Exchange, MarketDataStream],
     symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     incomeBus: EventBus[IncomeEvent],
     outcomeBus: EventBus[OutcomeEvent],
@@ -71,8 +80,8 @@ final class Engine private (
 
     // 5. 订阅行情
     allSubscriptions.groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
-      connectors
-        .getOrElse(exchange, throw IllegalStateException(s"No connector configured for exchange $exchange"))
+      marketStreams
+        .getOrElse(exchange, throw IllegalStateException(s"No market data stream configured for exchange $exchange"))
         .subscribe(kinds)
     }
 
@@ -154,7 +163,8 @@ object Engine:
       accountRefreshMs: Long = 10_000,
   )(using Ox): Engine =
     val clients = gateways.map(g => g.client.exchange -> g.client).toMap
-    val connectors = gateways.map(g => g.connector.exchange -> g.connector).toMap
+    val marketStreams = gateways.map(g => g.marketData.exchange -> g.marketData).toMap
+    val accountStreams = gateways.flatMap(g => g.accountStream.map(a => a.exchange -> a)).toMap
 
     // 预加载所有交易所的 symbol metas，任一失败 → 启动失败快速退出
     val symbolMetas: Map[(Exchange, Symbol), SymbolMeta] =
@@ -179,9 +189,12 @@ object Engine:
         incomeBus.publish(IncomeEvent.local(EventData.Clock))
     }
 
-    connectors.values.foreach(_.start(incomeBus))
+    // 先启动账户流 (订阅 income 总线、建立私有连接)，再启动公共行情流——
+    // 虚拟柜台同时扮演两者时，start 幂等，两次调用只生效一次
+    accountStreams.values.foreach(_.start(incomeBus))
+    marketStreams.values.foreach(_.start(incomeBus))
 
-    val engine = Engine(clients, connectors, symbolMetas, incomeBus, outcomeBus)
+    val engine = Engine(clients, marketStreams, symbolMetas, incomeBus, outcomeBus)
 
     // 账户信息周期刷新: 未配置凭证的交易所在首次拉取后退出轮询 (确定安全的例外)
     fork {

@@ -2,7 +2,7 @@ package hft.demo
 
 import hft.domain.Exchange
 import hft.engine.{Engine, ExchangeGateway}
-import hft.exchange.binance.{BinanceClient, BinanceConnector, BinanceCredentials}
+import hft.exchange.binance.{BinanceAccountStream, BinanceClient, BinanceCredentials, BinanceMarketStream}
 import hft.strategy.BboMakerStrategy
 import ox.supervised
 import sttp.client4.DefaultSyncBackend
@@ -30,10 +30,11 @@ import sttp.client4.DefaultSyncBackend
   supervised:
     val backend = DefaultSyncBackend()
     val client = BinanceClient(backend, Some(credentials))
-    val connector = BinanceConnector(client, backend)
+    val market = BinanceMarketStream(backend)
+    val account = BinanceAccountStream(client, backend)
 
     val engine = Engine.start(
-      gateways = Vector(ExchangeGateway(client, connector)),
+      gateways = Vector(ExchangeGateway(client, market, Some(account))),
       dryRun = !live,
     )
 
