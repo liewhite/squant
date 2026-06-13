@@ -4,3 +4,6 @@ target/
 .bloop/
 project/project/
 project/target/
+
+# 模拟盘成交记录 (运行产物)
+*.csv

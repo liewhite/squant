@@ -6,6 +6,7 @@ import hft.messaging.{EventBus, EventData, IncomeEvent}
 import hft.strategy.{OutcomeEvent, Strategy}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
+import ox.channels.Source
 
 /** 一个交易所的接入单元: REST 客户端 + 公共行情流 + 可选私有账户流。
   *
@@ -40,6 +41,12 @@ final class Engine private (
     outcomeBus: EventBus[OutcomeEvent],
 )(using Ox):
   private val logger = LoggerFactory.getLogger(classOf[Engine])
+
+  /** 订阅 income 总线 (只读观察)，用于在策略**之外**消费事件 (如成交记录、监控)，
+    * 策略因此无需承担写文件等副作用。返回独立 Source；调用方负责在自己的作用域内 fork 消费。
+    * 须在关心的事件产生前订阅 (通常紧随 Engine.start、addStrategy 之前)。
+    */
+  def subscribeIncome(): Source[IncomeEvent] = incomeBus.subscribe()
 
   def addStrategy(strategy: Strategy): Unit = addStrategies(Vector(strategy))
 

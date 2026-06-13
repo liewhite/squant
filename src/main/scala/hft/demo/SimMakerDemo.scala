@@ -3,10 +3,14 @@ package hft.demo
 import hft.domain.Exchange
 import hft.engine.{Engine, ExchangeGateway}
 import hft.exchange.binance.{BinanceClient, BinanceMarketStream}
-import hft.sim.{SimConfig, SimulatedExchange}
+import hft.sim.{FillRecorder, SimConfig, SimulatedExchange}
 import hft.strategy.BboMakerStrategy
 import ox.supervised
 import sttp.client4.DefaultSyncBackend
+
+import java.nio.file.Path
+import java.time.LocalDateTime
+import java.time.format.DateTimeFormatter
 
 /** 模拟盘 (纸面交易) 入口：接入 **真实** Binance 公共行情，用虚拟柜台撮合，无需任何凭证。
   *
@@ -42,12 +46,17 @@ import sttp.client4.DefaultSyncBackend
       dryRun = false, // 虚拟柜台即沙箱, 真实"下单"到模拟撮合
     )
 
+    // 策略之外的旁路观察者: 订阅成交事件写 CSV + 累计已实现利润 (须在成交产生前订阅)。
+    // 文件名带启动时间戳, 每次运行独占一个文件, 避免跨运行累计列重置/并发追加交错
+    val stamp = LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss"))
+    FillRecorder(Path.of(s"sim-fills-$stamp.csv")).run(engine.subscribeIncome())
+
     engine.addStrategy(
       BboMakerStrategy(
         targetExchange = Exchange.Binance,
-        symbol = "BTCUSDT",
-        offsetRatio = 0.0001, // bbo 外 0.01%
-        orderSize = 0.002,
+        symbol = "COAIUSDT",
+        offsetRatio = 0.0003, // bbo 外 0.01%
+        orderSize = 10,
         maxLeverage = 2.0,
       )
     )
