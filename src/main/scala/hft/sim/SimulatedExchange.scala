@@ -69,7 +69,9 @@ final class SimulatedExchange(
   private val started = AtomicBoolean(false)
   private val rawBus = EventBus[IncomeEvent]()
 
-  /** 延迟调度器：仅负责把命令/发布推迟到点 (不触碰状态)。daemon 单线程 */
+  /** 延迟调度器：仅负责把命令/发布推迟到点 (不触碰状态)。
+    * **单线程是顺序保证的承重墙**——等延迟事件按提交序 FIFO 投递, 把 actor 的输出序原样透过延迟传出;
+    * 勿改为多线程 (会破坏等延迟事件的投递序)。daemon, 进程退出即回收 */
   private val scheduler: ScheduledExecutorService =
     Executors.newSingleThreadScheduledExecutor { r =>
       val t = Thread(r, "sim-exchange-scheduler"); t.setDaemon(true); t
@@ -87,7 +89,7 @@ final class SimulatedExchange(
 
   /** 启动柜台。幂等：Engine 经 accountStream 与 marketData 两个角色各调用一次，只生效一次 */
   override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit =
-    require(strategyBus == null || (strategyBus eq incomeBus), "SimulatedExchange started with two different buses")
+    require((strategyBus eq null) || (strategyBus eq incomeBus), "SimulatedExchange started with two different buses")
     strategyBus = incomeBus
     if started.compareAndSet(false, true) then
       // 上游真实行情发布到内部 rawBus；转发线程把行情即时投入 mailbox (撮合用实时行情)

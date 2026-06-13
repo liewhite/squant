@@ -15,9 +15,9 @@ final case class RestingOrder(
 
 /** 虚拟柜台的全部状态 (账本 + 挂单簿 + 最新行情)，不可变。
   *
-  * 所有撮合逻辑都是 [[SimState]] 上的纯转移函数 `(SimState, 命令) => (SimState, 回流事件)`，
-  * 脱离线程/锁/延迟即可同步单测。[[SimulatedExchange]] 仅作为单 actor 的薄壳：把命令串行喂给
-  * 这些转移函数、并把回流事件按延迟投递给策略。
+  * 所有撮合逻辑都是 [[SimState]] 上的确定性转移 `(SimState, 命令) => (SimState, 回流事件)`
+  * (仅回流事件的本地时间戳取自 nowMs，不影响撮合与状态)，脱离线程/锁/延迟即可同步单测。
+  * [[SimulatedExchange]] 仅作为单 actor 的薄壳：把命令串行喂给这些转移函数、并把回流事件按延迟投递给策略。
   */
 final case class SimState(
     ledger: Ledger,
@@ -68,18 +68,25 @@ final case class SimState(
           case None =>
             (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected("no market data for market order"), 0.0, ts)))
       case OrderType.Limit(limit, tif) =>
-        // 到达即可成交 (marketable) 与 resting 越价用同一判定, 二者自洽
-        val marketable = bboOpt.exists(Matcher.crosses(order.side, limit, _))
-        def takerFill = fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, Matcher.touchPrice(order.side, bboOpt.get), order.quantity, ts)
+        // 到达即可成交时的对手价 (None = 不可成交)。可成交性与 resting 越价用同一判定
+        // (Matcher.crosses) 二者自洽；价与可成交性同源, 无需 .get
+        val takerPrice: Option[Price] =
+          bboOpt.filter(Matcher.crosses(order.side, limit, _)).map(Matcher.touchPrice(order.side, _))
+        def takerFill(price: Price) = fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, price, order.quantity, ts)
         tif match
           case TimeInForce.PostOnly =>
-            if marketable then (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected("post-only would take liquidity"), limit, ts)))
-            else rest(exchange, order, orderId, limit, ts)
+            takerPrice match
+              case Some(_) => (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected("post-only would take liquidity"), limit, ts)))
+              case None    => rest(exchange, order, orderId, limit, ts)
           case TimeInForce.GTC =>
-            if marketable then takerFill else rest(exchange, order, orderId, limit, ts)
+            takerPrice match
+              case Some(p) => takerFill(p)
+              case None    => rest(exchange, order, orderId, limit, ts)
           case TimeInForce.IOC | TimeInForce.FOK =>
             // 无深度模型, 可成交即全量成交, 否则整单取消 (不 resting)
-            if marketable then takerFill else (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Cancelled, limit, ts)))
+            takerPrice match
+              case Some(p) => takerFill(p)
+              case None    => (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Cancelled, limit, ts)))
 
   /** 撤单到达撮合：仍在簿则移除并回报 Cancelled；已成交 (不在簿) 则无事发生 */
   def onCancelArrived(exchange: Exchange, orderId: OrderId): (SimState, Vector[IncomeEvent]) =
