@@ -137,9 +137,9 @@ final class SimulatedExchange(
     Right(orderId)
 
   override def cancelOrder(symbol: Symbol, orderId: OrderId): Either[ExchangeError, Unit] =
-    // 撤单请求时订单已不在挂单簿 -> 模拟 Binance -2011 (已成交/已撤)，由 OutcomeProcessor 容忍。
+    // 撤单请求时订单已不在挂单簿 -> OrderNotFound (已成交/已撤)，由 OutcomeProcessor 容忍。
     // 读快照判定；在途期间真撤由 CancelArrived 在 actor 线程内裁决 (届时成交则 remove 落空, 不再发 Cancelled)
-    if !state.resting.contains(orderId) then Left(ExchangeError.Http(400, """{"code":-2011,"msg":"Unknown order sent."}"""))
+    if !state.resting.contains(orderId) then Left(ExchangeError.OrderNotFound(s"order $orderId not in book"))
     else
       after(config.orderToExchangeDelayMs) { mailbox.send(Command.CancelArrived(orderId)) }
       Right(())

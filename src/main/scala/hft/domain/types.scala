@@ -34,5 +34,8 @@ enum ExchangeError(val message: String):
   case Parse(reason: String) extends ExchangeError(reason)
   /** 鉴权失败 / 缺少凭证 */
   case Auth(reason: String) extends ExchangeError(reason)
+  /** 订单不存在 (已成交/已撤/未知)：撤单时常见且非致命，终态由私有流推送。
+    * 各交易所在自己的边界把专属错误码 (如 Binance -2011) 归一到此类型 */
+  case OrderNotFound(reason: String) extends ExchangeError(reason)
   /** 其它错误 */
   case Other(reason: String) extends ExchangeError(reason)

@@ -131,8 +131,8 @@ class SimulatedExchangeSpec extends munit.FunSuite:
 
       assert(orderStatuses(q).contains(OrderStatus.Cancelled))
       assert(sim.fetchPendingOrders(sym).toOption.get.isEmpty)
-      // 已撤订单再次撤单 -> -2011
-      assert(sim.cancelOrder(sym, oid).isLeft)
+      // 已撤订单再次撤单 -> OrderNotFound
+      assert(sim.cancelOrder(sym, oid) match { case Left(_: ExchangeError.OrderNotFound) => true; case _ => false })
       sim.shutdown()
 
   test("交易所->策略延迟: 成交回报延迟到达策略侧"):

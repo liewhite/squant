@@ -80,9 +80,9 @@ final class OutcomeProcessor(
           case Right(()) =>
             // 终态 (Cancelled) 以私有流推送为准
             logger.info(s"Cancel accepted: $exchange $symbol $orderId")
-          case Left(ExchangeError.Http(_, body)) if body.contains("-2011") =>
-            // Binance -2011 Unknown order: 订单已成交/已撤销，终态同样由私有流推送
-            logger.info(s"Order already gone (-2011): $exchange $symbol $orderId")
+          case Left(ExchangeError.OrderNotFound(reason)) =>
+            // 订单已成交/已撤销，终态同样由私有流推送，撤单失败非致命
+            logger.info(s"Order already gone: $exchange $symbol $orderId ($reason)")
           case Left(e) =>
             throw IllegalStateException(s"Cancel outcome UNKNOWN, aborting: $exchange $symbol $orderId error=${e.message}")
       }
