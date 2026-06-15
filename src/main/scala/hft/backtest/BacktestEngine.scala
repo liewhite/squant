@@ -113,27 +113,28 @@ final class BacktestEngine(
     result
   end run
 
+  /** 应用一次撮合转移：落地新状态，并把回流事件按 ex->strat 延迟入队投递给策略。
+    * 三个撮合入口 (行情注入 / 下单到达 / 撤单到达) 的唯一公共形态——与实盘
+    * [[hft.sim.SimulatedExchange.process]] 同构 (那里是 actor 串行, 这里是虚拟时间入队)。
+    */
+  private def applyMatching(transfer: (SimState, Vector[IncomeEvent])): Unit =
+    val (next, replies) = transfer
+    state = next
+    replies.foreach(r => schedule(now + config.exchangeToStrategyDelayMs, Action.Deliver(r)))
+
   /** 注入一条历史行情：推进时间、撮合、回流按延迟入队投递。 */
   private def ingest(ev: IncomeEvent): Unit =
     now = ev.exchangeTs
     marketEvents += 1
-    val (next, replies) = state.onMarket(exchange, ev)
-    state = next
-    replies.foreach(r => schedule(now + config.exchangeToStrategyDelayMs, Action.Deliver(r)))
+    applyMatching(state.onMarket(exchange, ev))
 
   private def runQueued(): Unit =
     val s = pq.dequeue()
     now = s.time
     s.action match
-      case Action.Deliver(ev) => deliver(ev)
-      case Action.OrderArrive(order, id) =>
-        val (next, replies) = state.onOrderArrived(exchange, order, id)
-        state = next
-        replies.foreach(r => schedule(now + config.exchangeToStrategyDelayMs, Action.Deliver(r)))
-      case Action.CancelArrive(id) =>
-        val (next, replies) = state.onCancelArrived(exchange, id)
-        state = next
-        replies.foreach(r => schedule(now + config.exchangeToStrategyDelayMs, Action.Deliver(r)))
+      case Action.Deliver(ev)            => deliver(ev)
+      case Action.OrderArrive(order, id) => applyMatching(state.onOrderArrived(exchange, order, id))
+      case Action.CancelArrive(id)       => applyMatching(state.onCancelArrived(exchange, id))
       case Action.Clock =>
         deliver(IncomeEvent(now, now, EventData.Clock))
         deliver(accountInfoEvent(now)) // 周期刷新净值, 等价实盘 Engine 的 accountRefresh
