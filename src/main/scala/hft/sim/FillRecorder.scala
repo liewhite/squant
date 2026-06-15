@@ -25,31 +25,44 @@ final class FillRecorder(csvPath: Path):
   private val logger = LoggerFactory.getLogger(classOf[FillRecorder])
 
   @volatile private var ledger = Ledger.empty(0.0)
+  @volatile private var writer: Option[BufferedWriter] = None
 
   /** 累计已实现利润 (跨 symbol)。供外部观察/日志 */
   def cumulativeRealizedPnl: Double = ledger.cash
 
-  /** 启动消费循环：过滤 FillUpdate，写 CSV。在调用方作用域 fork 一条常驻虚拟线程。
-    * 打开文件失败不致命——记录降级为"仅内存累计"，绝不拖垮核心。
-    */
-  def run(events: Source[IncomeEvent])(using Ox): Unit =
-    val writer: Option[BufferedWriter] =
-      try Some(openWriter())
-      catch
-        case NonFatal(e) =>
-          logger.error(s"failed to open CSV $csvPath, recording to file disabled", e)
-          None
-    fork {
-      try
-        while true do
-          events.receive().data match
-            case EventData.FillUpdate(fill) => onFill(writer, fill)
-            case _                          => ()
-      finally writer.foreach(closeQuietly)
-    }
-    logger.info(s"FillRecorder started, writing to ${csvPath.toAbsolutePath}")
+  /** 打开 CSV writer (幂等)。打开失败不致命——记录降级为"仅内存累计"，绝不拖垮核心。 */
+  def open(): Unit =
+    if writer.isEmpty then
+      writer =
+        try Some(openWriter())
+        catch
+          case NonFatal(e) =>
+            logger.error(s"failed to open CSV $csvPath, recording to file disabled", e)
+            None
+      logger.info(s"FillRecorder started, writing to ${csvPath.toAbsolutePath}")
 
-  private def onFill(writer: Option[BufferedWriter], fill: Fill): Unit =
+  /** 关闭 writer (幂等)。 */
+  def close(): Unit =
+    writer.foreach(closeQuietly)
+    writer = None
+
+  /** 同步观察一个事件：仅消费 FillUpdate 写 CSV + 累计利润。
+    * 供实盘 fork 循环与回测单线程循环共用——本身无并发设施，调用方决定线程模型。
+    */
+  def onEvent(ev: IncomeEvent): Unit = ev.data match
+    case EventData.FillUpdate(fill) => onFill(fill)
+    case _                          => ()
+
+  /** 启动消费循环：在调用方作用域 fork 一条常驻虚拟线程，对每个事件调用 [[onEvent]]。 */
+  def run(events: Source[IncomeEvent])(using Ox): Unit =
+    open()
+    fork {
+      try while true do onEvent(events.receive())
+      finally close()
+    }
+    ()
+
+  private def onFill(fill: Fill): Unit =
     val (next, row) = FillRecorder.record(ledger, fill)
     ledger = next // 内存累计先行: 写盘失败也不影响 cumulativeRealizedPnl
     writer.foreach { w =>

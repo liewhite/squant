@@ -7,3 +7,6 @@ project/target/
 
 # 模拟盘成交记录 (运行产物)
 *.csv
+
+# 回测历史数据缓存 (运行产物, 联网下载)
+data-cache/

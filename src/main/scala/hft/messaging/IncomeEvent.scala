@@ -6,6 +6,8 @@ import hft.domain.*
 enum EventData:
   case FundingRateUpdate(rate: FundingRate)
   case BboUpdate(bbo: BBO)
+  /** 公共成交印记 (市场匿名成交，仅作策略信号，不参与撮合) */
+  case MarketTradeUpdate(trade: MarketTrade)
   case MarkPriceUpdate(markPrice: MarkPrice)
   case IndexPriceUpdate(indexPrice: IndexPrice)
   case PositionUpdate(position: Position)
@@ -32,6 +34,7 @@ final case class IncomeEvent(
   def symbol: Option[Symbol] = data match
     case EventData.FundingRateUpdate(r) => Some(r.symbol)
     case EventData.BboUpdate(b)         => Some(b.symbol)
+    case EventData.MarketTradeUpdate(t) => Some(t.symbol)
     case EventData.MarkPriceUpdate(m)   => Some(m.symbol)
     case EventData.IndexPriceUpdate(i)  => Some(i.symbol)
     case EventData.PositionUpdate(p)    => Some(p.symbol)
@@ -44,6 +47,7 @@ final case class IncomeEvent(
   def exchange: Option[Exchange] = data match
     case EventData.FundingRateUpdate(r)  => Some(r.exchange)
     case EventData.BboUpdate(b)          => Some(b.exchange)
+    case EventData.MarketTradeUpdate(t)  => Some(t.exchange)
     case EventData.MarkPriceUpdate(m)    => Some(m.exchange)
     case EventData.IndexPriceUpdate(i)   => Some(i.exchange)
     case EventData.PositionUpdate(p)     => Some(p.exchange)

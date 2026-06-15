@@ -81,6 +81,18 @@ final case class OrderUpdate(
     timestamp: Timestamp,
 )
 
+/** 公共成交印记 (市场上的匿名成交，非本账户成交)。
+  * isBuyerMaker=true 表示买方是挂单方 -> 本笔为主动卖出 (taker 卖)。仅作策略可见的市场信号，不参与撮合。
+  */
+final case class MarketTrade(
+    exchange: Exchange,
+    symbol: Symbol,
+    price: Price,
+    qty: Quantity,
+    isBuyerMaker: Boolean,
+    timestamp: Timestamp,
+)
+
 /** 成交事件 (用于乐观更新仓位) */
 final case class Fill(
     exchange: Exchange,
