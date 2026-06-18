@@ -24,6 +24,9 @@ final case class BsGreeksConfig(
     riskFreeRate: Double = 0.0,
     spotHolding: Double = 0.0,
     emitIntervalMs: Long = 1000,
+    /** 剩余期限下限 (天)：临近到期按此钳制，避免到期日 ATM gamma/theta 奇点 (T->0 时发散)。
+      * 末段不再衰减 (保留约 minTenorDays 的时间价值)，对长周期影响可忽略。 */
+    minTenorDays: Double = 1.0,
 )
 
 object BsGreeksSource:
@@ -77,16 +80,20 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
   private def shouldEmit(now: Timestamp, lastEmit: Timestamp): Boolean =
     lastEmit == Long.MinValue || now - lastEmit >= config.emitIntervalMs
 
+  /** 剩余年限，带下限钳制 (避免到期日 gamma/theta 奇点) */
+  private def tYears(now: Timestamp): Double =
+    math.max((config.expiry - now) / BlackScholes.MillisPerYear, config.minTenorDays / DaysPerYear)
+
   /** 跨式在 (s, now) 的理论价值 */
   private def straddleValue(s: Double, now: Timestamp): Double =
-    val tY = (config.expiry - now) / BlackScholes.MillisPerYear
+    val tY = tYears(now)
     val call = BlackScholes.greeks(OptionRight.Call, s, strike, tY, config.impliedVol, config.riskFreeRate).price
     val put = BlackScholes.greeks(OptionRight.Put, s, strike, tY, config.impliedVol, config.riskFreeRate).price
     config.straddles * (call + put)
 
   /** 跨式聚合为账户级 Greeks (单位: theta 每日、vega 对 1%，与通道约定一致) */
   private def greeksAt(s: Double, now: Timestamp): Greeks =
-    val tY = (config.expiry - now) / BlackScholes.MillisPerYear
+    val tY = tYears(now)
     val call = BlackScholes.greeks(OptionRight.Call, s, strike, tY, config.impliedVol, config.riskFreeRate)
     val put = BlackScholes.greeks(OptionRight.Put, s, strike, tY, config.impliedVol, config.riskFreeRate)
     val n = config.straddles

@@ -4,8 +4,8 @@ import hft.domain.*
 import hft.messaging.{EventData, IncomeEvent, StateManager}
 import hft.option.{BlackScholes, OptionRight}
 
-/** BS 合成 Greeks 源 (滚动 ATM 跨式) 单测：聚合、发射间隔门控、cashBal 一次、StateManager delta 修正、
-  * 期权腿 P&L 与滚动。 */
+/** BS 合成 Greeks 源 (单只 ATM 跨式，持有到期，不滚动) 单测：聚合、发射间隔门控、cashBal 一次、
+  * StateManager delta 修正、期权腿 P&L、临近到期 gamma 钳制。 */
 class BsGreeksSourceSpec extends munit.FunSuite:
   private val ex = Exchange.Okx
   private val sym = "BTCUSDT"
@@ -72,7 +72,20 @@ class BsGreeksSourceSpec extends munit.FunSuite:
     near(src.optionPnl(100.0, 0), 0.0) // 现价值 - 进场权利金
     assertEquals(src.strikePrice, 100.0)
 
-  test("期权腿: 价格大涨 -> 长跨式 P&L 转正 (call 增值盖过 put)"):
+  test("期权腿: 价格大涨 -> 长跨式 P&L 转正且量级合理 (接近内在价值增量)"):
     val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), config(straddles = 1.0, spot = 0.0))
     src.events().toVector
-    assert(src.optionPnl(130.0, day) > 0, s"pnl=${src.optionPnl(130.0, day)}") // 涨 30%, 跨式获利
+    val pnl = src.optionPnl(130.0, day)
+    assert(pnl > 0, s"pnl=$pnl")
+    // 涨到 130: call 至少值内在价值 30, 跨式现值 >= 30; 减进场权利金(双 ATM, IV 0.2, 30d 约 ~6.5) -> P&L 量级 ~20+
+    assert(pnl > 15.0 && pnl < 35.0, s"pnl=$pnl 量级异常")
+
+  test("临近到期 gamma 钳制到 minTenorDays 下限 (不发散)"):
+    // expiry=30d, minTenorDays 默认 1 天；首笔在 expiry 前 1 分钟 -> 剩余 << 1 天, 应被钳制到 1 天
+    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 30 * day - 60_000L))), config(straddles = 1.0, spot = 0.0))
+    val g = src.events().collect { case IncomeEvent(_, _, EventData.GreeksUpdate(gg)) => gg }.toVector.head
+    val tFloor = 1.0 / 365.0 // 钳制下限 = 1 天
+    val expected = BlackScholes.greeks(OptionRight.Call, 100.0, 100.0, tFloor, 0.2, 0.0).gamma +
+      BlackScholes.greeks(OptionRight.Put, 100.0, 100.0, tFloor, 0.2, 0.0).gamma
+    assert(g.gamma.isFinite, "gamma 不应发散")
+    near(g.gamma, expected) // 按 1 天 (而非分钟级) 计算 -> 有界
