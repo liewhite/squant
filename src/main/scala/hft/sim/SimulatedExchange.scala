@@ -20,6 +20,10 @@ final case class SimConfig(
     exchangeToStrategyDelayMs: Long = 50,
     orderToExchangeDelayMs: Long = 30,
     initialBalanceUsdt: Double = 10_000.0,
+    /** maker 手续费率 (resting 单被越价成交)，0.0002 = 0.02%。默认 0 = 不计费 */
+    makerFeeRate: Double = 0.0,
+    /** taker 手续费率 (到达即吃单成交)，0.0005 = 0.05%。默认 0 = 不计费 */
+    takerFeeRate: Double = 0.0,
 )
 
 /** 虚拟柜台 / 模拟撮合引擎 —— 单 actor 实现。
@@ -62,7 +66,7 @@ final class SimulatedExchange(
   // ---- actor 基础设施 ----
   private val mailbox = Channel.unlimited[Command]
   /** 唯一写者 = actor 线程；读者 = REST 查询线程。不可变快照 + @volatile 保证可见性 */
-  @volatile private var state: SimState = SimState.empty(config.initialBalanceUsdt)
+  @volatile private var state: SimState = SimState.empty(config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   @volatile private var strategyBus: EventBus[IncomeEvent] = scala.compiletime.uninitialized
 
   private val orderIdSeq = AtomicLong(1)

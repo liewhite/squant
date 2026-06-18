@@ -62,7 +62,7 @@ final class BacktestEngine(
   private given Ordering[Scheduled] = Ordering.by[Scheduled, (Timestamp, Long)](s => (s.time, s.seq)).reverse
   private val pq = mutable.PriorityQueue.empty[Scheduled]
 
-  private var state: SimState = SimState.empty(config.initialBalanceUsdt)
+  private var state: SimState = SimState.empty(config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   private var now: Timestamp = 0L
   private var seqGen: Long = 0L
   private var orderIdGen: Long = 0L

@@ -27,8 +27,10 @@ final case class Ledger(positions: Map[Symbol, Position], cash: Double):
     *   - 新开 / 同向加仓：加权平均成本
     *   - 反向平仓：平掉 min(本次, 持仓) 的已实现盈亏入现金
     *   - 反手：平掉原仓后，剩余在成交价重新开仓
+    *
+    * @param fee 本笔手续费 (>=0, 直接从现金扣除)。maker/taker 区分与费率换算由调用方 (SimState) 决定。
     */
-  def applyFill(exchange: Exchange, symbol: Symbol, side: Side, price: Price, qty: Quantity): Ledger =
+  def applyFill(exchange: Exchange, symbol: Symbol, side: Side, price: Price, qty: Quantity, fee: Double = 0.0): Ledger =
     val signed = side match
       case Side.Long  => qty
       case Side.Short => -qty
@@ -39,7 +41,7 @@ final case class Ledger(positions: Map[Symbol, Position], cash: Double):
       val newEntry =
         if math.abs(oldSize) < Position.Epsilon then price
         else (math.abs(oldSize) * pos.entryPrice + qty * price) / (math.abs(oldSize) + qty)
-      copy(positions = positions.updated(symbol, pos.copy(size = newSize, entryPrice = newEntry)))
+      copy(positions = positions.updated(symbol, pos.copy(size = newSize, entryPrice = newEntry)), cash = cash - fee)
     else
       val closeQty = math.min(qty, math.abs(oldSize))
       val dir = if oldSize > 0 then 1.0 else -1.0
@@ -48,7 +50,7 @@ final case class Ledger(positions: Map[Symbol, Position], cash: Double):
         if math.abs(signed) <= math.abs(oldSize) then
           if math.abs(newSize) < Position.Epsilon then 0.0 else pos.entryPrice
         else price // 反手: 剩余在成交价重开
-      Ledger(positions.updated(symbol, pos.copy(size = newSize, entryPrice = newEntry)), cash + realized)
+      Ledger(positions.updated(symbol, pos.copy(size = newSize, entryPrice = newEntry)), cash + realized - fee)
 
   /** 账户净值 = 现金 + 未实现盈亏 (markOf 提供各 symbol 的估值价格) */
   def equity(markOf: Symbol => Double): Double =

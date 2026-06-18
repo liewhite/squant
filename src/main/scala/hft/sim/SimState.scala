@@ -3,6 +3,11 @@ package hft.sim
 import hft.domain.*
 import hft.messaging.{EventData, IncomeEvent}
 
+/** 成交的流动性角色：maker (resting 单被越价成交) / taker (到达即吃单成交)，决定手续费率 */
+enum Liquidity:
+  case Maker
+  case Taker
+
 /** 挂单簿中的一张挂单 */
 final case class RestingOrder(
     orderId: OrderId,
@@ -24,6 +29,8 @@ final case class SimState(
     resting: Map[OrderId, RestingOrder],
     lastBbo: Map[Symbol, BBO],
     lastMark: Map[Symbol, Double],
+    makerFeeRate: Double = 0.0,
+    takerFeeRate: Double = 0.0,
 ):
   /** 估值价格：优先标记价格，退化为 BBO 中间价 */
   def markOf(symbol: Symbol): Double =
@@ -50,7 +57,7 @@ final case class SimState(
     crossed.foldLeft((this, Vector.empty[IncomeEvent])) { case ((st, evs), o) =>
       val (next, fillEvs) = st
         .copy(resting = st.resting - o.orderId)
-        .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, bbo.timestamp)
+        .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, bbo.timestamp, Liquidity.Maker)
       (next, evs ++ fillEvs)
     }
 
@@ -64,7 +71,7 @@ final case class SimState(
       case OrderType.Market =>
         bboOpt match
           case Some(bbo) =>
-            fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, Matcher.touchPrice(order.side, bbo), order.quantity, ts)
+            fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, Matcher.touchPrice(order.side, bbo), order.quantity, ts, Liquidity.Taker)
           case None =>
             (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected("no market data for market order"), 0.0, ts)))
       case OrderType.Limit(limit, tif) =>
@@ -72,7 +79,7 @@ final case class SimState(
         // (Matcher.crosses) 二者自洽；价与可成交性同源, 无需 .get
         val takerPrice: Option[Price] =
           bboOpt.filter(Matcher.crosses(order.side, limit, _)).map(Matcher.touchPrice(order.side, _))
-        def takerFill(price: Price) = fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, price, order.quantity, ts)
+        def takerFill(price: Price) = fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, price, order.quantity, ts, Liquidity.Taker)
         tif match
           case TimeInForce.PostOnly =>
             takerPrice match
@@ -116,8 +123,13 @@ final case class SimState(
       fillPrice: Price,
       qty: Quantity,
       ts: Timestamp,
+      liquidity: Liquidity,
   ): (SimState, Vector[IncomeEvent]) =
-    val next = copy(ledger = ledger.applyFill(exchange, symbol, side, fillPrice, qty))
+    val feeRate = liquidity match
+      case Liquidity.Maker => makerFeeRate
+      case Liquidity.Taker => takerFeeRate
+    val fee = fillPrice * qty * feeRate
+    val next = copy(ledger = ledger.applyFill(exchange, symbol, side, fillPrice, qty, fee))
     val update = OrderUpdate(orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, qty, qty, qty, ts)
     val f = Fill(exchange, symbol, side, fillPrice, qty, ts)
     (next, Vector(IncomeEvent.at(ts, EventData.OrderUpdated(update)), IncomeEvent.at(ts, EventData.FillUpdate(f))))
@@ -131,4 +143,5 @@ final case class SimState(
     )
 
 object SimState:
-  def empty(cash: Double): SimState = SimState(Ledger.empty(cash), Map.empty, Map.empty, Map.empty)
+  def empty(cash: Double, makerFeeRate: Double = 0.0, takerFeeRate: Double = 0.0): SimState =
+    SimState(Ledger.empty(cash), Map.empty, Map.empty, Map.empty, makerFeeRate, takerFeeRate)
