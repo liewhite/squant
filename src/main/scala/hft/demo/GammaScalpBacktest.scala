@@ -46,8 +46,12 @@ import java.time.{LocalDate, ZoneOffset}
   val start = args.lift(0).map(LocalDate.parse).getOrElse(end.minusDays(6))
   // maker 手续费率 (gamma scalp 的核心成本)，第 3 参覆盖以做"毛/净"对照。0.0002 = 0.02%
   val makerFeeRate = args.lift(2).map(_.toDouble).getOrElse(0.0002)
-  // 方向性间距偏移 (小时 MACD 柱>0 看多/<0 看空)，第 4 参覆盖以做 A/B：0=关(纯对称), 0.0005=开
+  // 方向性间距偏移幅度，第 4 参覆盖以做 A/B：0=关(纯对称), 0.0005=开
   val dirSkewRatio = args.lift(3).map(_.toDouble).getOrElse(0.0005)
+  // 方向模式，第 5 参：sign=只看柱符号(±1) / graded=颜色×趋势分级(±2，默认)
+  val biasMode = args.lift(4).map(_.toLowerCase) match
+    case Some("sign") => hft.strategy.MacdBiasMode.Sign
+    case _            => hft.strategy.MacdBiasMode.Graded
 
   val backend = DefaultSyncBackend()
   val publicClient = hft.exchange.binance.BinanceClient(backend, credentials = None)
@@ -89,6 +93,7 @@ import java.time.{LocalDate, ZoneOffset}
     deltaBand = deltaBand,
     baseOffsetRatio = baseOffsetRatio,
     dirSkewRatio = dirSkewRatio,
+    biasMode = biasMode,
   )
   val runner = StrategyRunner(strategy, symbolMetas)
 
@@ -132,7 +137,7 @@ import java.time.{LocalDate, ZoneOffset}
     println("==================== GammaScalp Backtest Result ====================")
     println(s"symbol         : $symbol  [$start .. $end] ($days days)")
     println(f"ATM strike     : $atmStrike%.2f  | IV=$impliedVol  straddles=$straddles  band=$deltaBand ETH")
-    println(f"对冲间距       : ${baseOffsetRatio * 100}%.2f%% ± ${dirSkewRatio * 100}%.2f%% (小时 MACD 方向偏移)")
+    println(f"对冲间距       : ${baseOffsetRatio * 100}%.2f%% ± ${dirSkewRatio * 100}%.2f%% (MACD 方向偏移, mode=$biasMode)")
     println(f"maker fee      : ${makerFeeRate * 100}%.3f%%  (PostOnly 对冲单)")
     println(f"start/end px    : $atmStrike%.2f -> $lastMid%.2f  (${(lastMid / atmStrike - 1) * 100}%+.2f%%)")
     println(s"market events  : ${result.marketEvents}")

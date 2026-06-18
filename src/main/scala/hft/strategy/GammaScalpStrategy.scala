@@ -7,6 +7,14 @@ import hft.messaging.{EventData, IncomeEvent, PendingOrder, StateManager, Symbol
 
 import scala.collection.mutable
 
+/** MACD 柱 -> 方向偏移强度的映射模式：
+  *   - [[MacdBiasMode.Sign]]   : 只看柱符号 (水上+1 / 水下-1)，幅度 1
+  *   - [[MacdBiasMode.Graded]] : 颜色×趋势分级 (同向最激进)，幅度 {-2..2}，见 [[hft.indicator.Macd.histBias]]
+  */
+enum MacdBiasMode:
+  case Sign
+  case Graded
+
 /** gamma scalping 策略 (long-gamma 的 maker 对冲，带 K 线 MACD 方向性间距偏移)。
   *
   * **trade-native，不依赖盘口**：只订阅逐笔 [[SubscriptionKind.Trade]]，以**最新真实成交价**为基准挂单。
@@ -49,6 +57,8 @@ final class GammaScalpStrategy(
     maxBars: Int = 200,
     /** "连续上升/下降"判定的周期数 (MACD 柱趋势)；颜色与趋势同向时偏移最激进 (强度 ±2) */
     macdTrendBars: Int = 2,
+    /** 方向偏移模式：Sign=只看柱符号(±1) / Graded=颜色×趋势分级(±2) */
+    biasMode: MacdBiasMode = MacdBiasMode.Graded,
 ) extends Strategy:
 
   /** 已发出撤单、尚未确认移除的订单，防止重复撤单 */
@@ -92,8 +102,13 @@ final class GammaScalpStrategy(
     * 逆势侧挂更近，**水上且连续上升 (或水下且连续下降) 最激进** (强度 2 = 偏移 2×dirSkewRatio)。
     * bias>0: 卖间距 base+bias·skew (更远)、买间距 base-bias·skew (更近)；bias<0 镜像。
     */
+  /** 当前方向偏移强度 (按 biasMode) */
+  private def currentBias: Int = biasMode match
+    case MacdBiasMode.Sign   => klines.macdDirection
+    case MacdBiasMode.Graded => klines.histBias(macdTrendBars)
+
   private def desiredHedge(refPrice: Price, netDelta: Double): Option[(Side, Quantity, Price)] =
-    val bias = klines.histBias(macdTrendBars)
+    val bias = currentBias
     // 偏移下限 0：bias·dirSkewRatio 过大时不致挂到价格另一侧而立即 would-take
     val sellOffset = math.max(0.0, baseOffsetRatio + bias * dirSkewRatio)
     val buyOffset = math.max(0.0, baseOffsetRatio - bias * dirSkewRatio)
@@ -140,7 +155,7 @@ final class GammaScalpStrategy(
                   clientOrderId = "",
                 )
               ),
-              f"gamma_hedge | $side%s netDelta=$netDelta%.4f qty=$qty%.4f px=$price%.4f bias=${klines.histBias(macdTrendBars)}",
+              f"gamma_hedge | $side%s netDelta=$netDelta%.4f qty=$qty%.4f px=$price%.4f bias=$currentBias",
             )
           )
 
