@@ -2,7 +2,7 @@ package hft.strategy
 
 import hft.domain.*
 import hft.exchange.SubscriptionKind
-import hft.indicator.KlineSeries
+import hft.indicator.{KlineSeries, Macd}
 import hft.messaging.{EventData, IncomeEvent, PendingOrder, StateManager, SymbolState}
 
 import scala.collection.mutable
@@ -44,19 +44,16 @@ final class GammaScalpStrategy(
     qtyToleranceRatio: Double = 0.2,
     /** 最小对冲数量 (币本位)，低于此不挂单避免碎单 */
     minHedgeQty: Quantity = 0.001,
-    /** K 线 MACD 参数 (由逐笔 trade 聚合)，用于方向偏移 */
+    /** K 线周期 (由逐笔 trade 聚合)，用于 MACD 方向偏移；默认 1 小时 */
     barIntervalMs: Long = 3_600_000,
     maxBars: Int = 200,
-    macdFast: Int = 12,
-    macdSlow: Int = 26,
-    macdSignal: Int = 9,
 ) extends Strategy:
 
   /** 已发出撤单、尚未确认移除的订单，防止重复撤单 */
   private val cancelling = mutable.Set.empty[OrderId]
 
-  /** 由逐笔 trade 聚合 K 线算 MACD，柱>0 看多 / <0 看空 -> 调整对冲间距方向偏移 */
-  private val klines = KlineSeries(barIntervalMs, maxBars, macdFast, macdSlow, macdSignal)
+  /** 由逐笔 trade 聚合 K 线算 MACD (混入 [[Macd]] trait)，柱>0 看多 / <0 看空 -> 调整对冲间距方向偏移 */
+  private val klines = new KlineSeries(barIntervalMs, maxBars) with Macd
 
   override def publicStreams: Map[Exchange, Set[SubscriptionKind]] =
     Map(exchange -> Set(SubscriptionKind.Trade(symbol)))

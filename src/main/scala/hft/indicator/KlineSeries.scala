@@ -13,42 +13,32 @@ final case class Candle(
     closed: Boolean,
 )
 
-/** 增量 K 线聚合 + 技术指标工具 (单线程访问，无需同步)。
+/** K 线聚合**基类** —— 只负责按 [[periodMs]] 把逐笔成交聚合成 K 线序列 (缓存最多 [[maxBars]] 根已收盘
+  * bar) + 一根盘中根，**不含任何指标**。
   *
-  * 不断喂入逐笔 (ts, price, qty)，按 [[periodMs]] 分桶维护 K 线序列 (最多缓存 [[maxBars]] 根已收盘 bar)：
-  *   - **最新一根是盘中的**：同周期内的成交持续刷新其 high/low/close/volume；
-  *   - **跨周期时**：把上一根 bar **固定** (closed=true) 连同其指标 EMA 基线冻结、存入已收盘序列，
-  *     再开一根新的盘中 bar 动态维护。
+  * 技术指标以**可叠加 trait** (stackable traits) 混入，覆写钩子 [[onBarClosed]] / [[onBarUpdated]]
+  * (须 `abstract override` 并调 `super`，从而沿 mix-in 链依次更新)：
+  * {{{
+  *   val klines = new KlineSeries(60_000, 200) with Macd with Kdj
+  *   klines.update(ts, price, qty)   // 先更新 K 线，再依次更新各指标
+  *   klines.macdDirection; klines.kdjValues
+  * }}}
   *
-  * 指标 (MACD) 对盘中根**动态**更新：以上一根收盘时冻结的 EMA 为基线，叠加当前盘中收盘价推算
-  * 当前 MACD/柱；盘中根收盘时该动态值即成为新的冻结基线。预热不足 (已收盘 bar 数 < slow+signal)
-  * 时 [[macdDirection]] 返回 0。
-  *
-  * 设计为可扩展：已收盘 K 线序列 ([[bars]]/[[closes]]) 对外可见，后续可在其上加更多指标。
+  * 钩子时序：跨周期时先把上一根 bar 收盘 (closed=true，已入序列) 再触发 [[onBarClosed]]，
+  * 随后总会以最新盘中根触发 [[onBarUpdated]] —— 指标据此"收盘固定 + 盘中动态"。
   */
-final class KlineSeries(
-    val periodMs: Long,
-    val maxBars: Int,
-    macdFast: Int = 12,
-    macdSlow: Int = 26,
-    macdSignal: Int = 9,
-):
+class KlineSeries(val periodMs: Long, val maxBars: Int):
   private val completed = mutable.ArrayDeque.empty[Candle]
   private var cur: Option[Candle] = None
 
-  // 冻结的 EMA 基线 (截至最近一根已收盘 bar)
-  private var fEmaFast = 0.0
-  private var fEmaSlow = 0.0
-  private var fEmaSignal = 0.0
-  private var closedCount = 0
+  /** 一根 bar 收盘 (跨周期固定)，此时该 bar 已在 [[bars]] 末尾。指标 trait 覆写以冻结其值。 */
+  protected def onBarClosed(bar: Candle): Unit = ()
 
-  // 盘中根的动态 MACD
-  private var dMacd = 0.0
-  private var dSignal = 0.0
-  private var dHist = 0.0
+  /** 盘中根刷新 (含刚开的新根)。指标 trait 覆写以动态更新其值。 */
+  protected def onBarUpdated(bar: Candle): Unit = ()
 
-  /** 喂入一笔成交 */
-  def update(ts: Long, price: Double, qty: Double = 0.0): Unit =
+  /** 喂入一笔成交：先更新 K 线，再触发指标钩子 (final，指标只覆写钩子而非此模板方法) */
+  final def update(ts: Long, price: Double, qty: Double = 0.0): Unit =
     val bucket = ts / periodMs
     cur match
       case None =>
@@ -56,9 +46,10 @@ final class KlineSeries(
       case Some(c) =>
         // 跨多个空缺周期 (成交稀疏) 只收盘上一根、不补空 bar：指标按"有成交的 bar"推进 (常见做法)
         if bucket > c.openTime / periodMs then
-          freeze(c.close)                 // 固定上一根 bar 的指标基线
-          completed += c.copy(closed = true)
+          val closedBar = c.copy(closed = true)
+          completed += closedBar
           while completed.size > maxBars do completed.removeHead()
+          onBarClosed(closedBar)
           cur = Some(Candle(bucket * periodMs, price, price, price, price, qty, closed = false))
         else
           cur = Some(c.copy(
@@ -67,43 +58,7 @@ final class KlineSeries(
             close = price,
             volume = c.volume + qty,
           ))
-    recomputeDynamic()
-
-  /** 收盘一根 bar：推进冻结 EMA 基线 (首根播种)。
-    *
-    * 注意 fEmaFast/fEmaSlow **先更新再相减**，故 `fEmaFast - fEmaSlow` 即该根收盘后的 MACD，
-    * 与 [[recomputeDynamic]] 在同一收盘价下算出的 dMacd 完全相同 —— 这保证盘中动态 histogram
-    * 在收盘价处等于冻结后的 histogram (KlineSeriesSpec 有对照参考实现的回归断言)。
-    */
-  private def freeze(close: Double): Unit =
-    if closedCount == 0 then
-      fEmaFast = close
-      fEmaSlow = close
-      fEmaSignal = 0.0 // macd@首根 = 0
-    else
-      fEmaFast = ema(fEmaFast, close, macdFast)
-      fEmaSlow = ema(fEmaSlow, close, macdSlow)
-      fEmaSignal = ema(fEmaSignal, fEmaFast - fEmaSlow, macdSignal)
-    closedCount += 1
-
-  /** 用冻结基线 + 盘中收盘价推算当前动态 MACD */
-  private def recomputeDynamic(): Unit =
-    cur.foreach { c =>
-      if closedCount == 0 then
-        dMacd = 0.0; dSignal = 0.0; dHist = 0.0
-      else
-        val df = ema(fEmaFast, c.close, macdFast)
-        val ds = ema(fEmaSlow, c.close, macdSlow)
-        dMacd = df - ds
-        dSignal = ema(fEmaSignal, dMacd, macdSignal)
-        dHist = dMacd - dSignal
-    }
-
-  private def ema(prev: Double, x: Double, period: Int): Double =
-    val k = 2.0 / (period + 1)
-    x * k + prev * (1 - k)
-
-  // ==================== 查询 ====================
+    cur.foreach(onBarUpdated)
 
   /** 已收盘 K 线 (最旧在前、最新在后)，最多 maxBars 根 */
   def bars: collection.Seq[Candle] = completed
@@ -111,20 +66,5 @@ final class KlineSeries(
   /** 盘中 (未收盘) K 线 */
   def current: Option[Candle] = cur
 
-  /** 已收盘 bar 的收盘价序列 (供其它指标计算) */
+  /** 已收盘 bar 的收盘价序列 */
   def closes: collection.Seq[Double] = completed.map(_.close)
-
-  /** 已收盘 bar 数 (预热进度) */
-  def closedBars: Int = closedCount
-
-  /** 当前 (含盘中根) MACD 柱值 */
-  def macdHistogram: Double = dHist
-  def macdLine: Double = dMacd
-  def macdSignalLine: Double = dSignal
-
-  /** 方向：+1 看多 (柱>0)、-1 看空 (柱<0)、0 预热不足或持平 */
-  def macdDirection: Int =
-    if closedCount < macdSlow + macdSignal then 0
-    else if dHist > 0 then 1
-    else if dHist < 0 then -1
-    else 0
