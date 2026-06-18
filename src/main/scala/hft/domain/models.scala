@@ -5,12 +5,14 @@ import java.util.UUID
 /** 交易所枚举 */
 enum Exchange:
   case Binance
+  case Okx
 
   /** 生成交易所合法的 client_order_id */
   def newClientOrderId: String =
     val hex = UUID.randomUUID().toString.replace("-", "")
     this match
       case Binance => s"0x$hex" // 34 字符, Binance 上限 36
+      case Okx     => hex // 32 字符纯字母数字, OKX clOrdId 上限 32
 
 /** 交易方向 */
 enum Side:
@@ -179,6 +181,25 @@ final case class IndexPrice(
     exchange: Exchange,
     symbol: Symbol,
     price: Price,
+    timestamp: Timestamp,
+)
+
+/** 账户级期权希腊字母 (按币种 ccy 聚合)。
+  *
+  * 这是该币种**所有期权持仓的净希腊字母**，而非单个合约——OKX `account/greeks` 直接返回此聚合值，
+  * 回测的 BS 合成源亦将单合约希腊字母按持仓聚合为同一形态，使策略对实盘/回测无感。
+  *
+  * delta 为**原始期权 delta**；总敞口需叠加现货/合约 delta，见 [[hft.messaging.StateManager.greeks]]
+  * 用 cashBal 做的修正。delta>0 表示该币种看多敞口。theta 为每日时间衰减，vega 对 1.0 (=100%) 波动率。
+  */
+final case class Greeks(
+    exchange: Exchange,
+    /** 币种, e.g. "BTC" / "ETH" (非 symbol "BTCUSDT") */
+    ccy: String,
+    delta: Double,
+    gamma: Double,
+    theta: Double,
+    vega: Double,
     timestamp: Timestamp,
 )
 

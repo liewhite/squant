@@ -17,6 +17,8 @@ enum EventData:
   case BalanceUpdate(balance: Balance)
   /** 账户信息 (净值 + 总持仓名义价值) */
   case AccountInfoUpdate(exchange: Exchange, info: AccountInfo)
+  /** 账户级期权希腊字母 (按币种聚合)。账户级事件，广播给所有策略，按 ccy 自取 */
+  case GreeksUpdate(greeks: Greeks)
   /** 时钟事件 (用于超时检测等定时任务) */
   case Clock
 
@@ -41,6 +43,8 @@ final case class IncomeEvent(
     case EventData.OrderUpdated(u)      => Some(u.symbol)
     case EventData.FillUpdate(f)        => Some(f.symbol)
     case EventData.BalanceUpdate(_)     => None
+    // Greeks 按 ccy 聚合，无对应 symbol；账户级广播
+    case EventData.GreeksUpdate(_)      => None
     case EventData.AccountInfoUpdate(_, _) | EventData.Clock => None
 
   /** 事件来源交易所 */
@@ -54,6 +58,7 @@ final case class IncomeEvent(
     case EventData.OrderUpdated(u)       => Some(u.exchange)
     case EventData.FillUpdate(f)         => Some(f.exchange)
     case EventData.BalanceUpdate(b)      => Some(b.exchange)
+    case EventData.GreeksUpdate(g)       => Some(g.exchange)
     case EventData.AccountInfoUpdate(e, _) => Some(e)
     case EventData.Clock                 => None
 

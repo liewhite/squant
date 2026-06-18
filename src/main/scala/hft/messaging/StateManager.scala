@@ -13,6 +13,10 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long):
     symbols.map(s => s -> SymbolState(s)).toMap
   private val balances: mutable.Map[Exchange, Double] = mutable.Map.empty
   private val accountInfos: mutable.Map[Exchange, AccountInfo] = mutable.Map.empty
+  /** 原始账户级希腊字母 (按 (交易所, 币种) 索引)，delta 未含现货修正 */
+  private val greeksRaw: mutable.Map[(Exchange, String), Greeks] = mutable.Map.empty
+  /** 各币种现金余额 (按 (交易所, 币种) 索引)，用于修正 greeks delta 的现货敞口 */
+  private val cashBalances: mutable.Map[(Exchange, String), Double] = mutable.Map.empty
 
   // ==================== 下单接口 ====================
 
@@ -44,6 +48,17 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long):
 
   def totalAccountNotional: Double = accountInfos.values.map(_.notional).sum
 
+  /** 账户级期权希腊字母 (含现货修正)。
+    *
+    * 返回的 delta = 原始期权 delta + 该币种现金余额 (cashBal)，即叠加现货敞口后的总 delta。
+    * 仅当 greeks 与 cashBal 均已到达时返回 Some——缺任一项都无法给出正确的总敞口 (与参考实现一致)。
+    */
+  def greeks(exchange: Exchange, ccy: String): Option[Greeks] =
+    for
+      g <- greeksRaw.get((exchange, ccy))
+      cashBal <- cashBalances.get((exchange, ccy))
+    yield g.copy(delta = g.delta + cashBal)
+
   def hasPendingOrders(symbol: Symbol): Boolean =
     states.get(symbol).exists(_.hasPendingOrders)
 
@@ -53,8 +68,12 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long):
   def apply(event: IncomeEvent): Unit = event.data match
     case EventData.BalanceUpdate(balance) =>
       if balance.asset == USDT then balances(balance.exchange) = balance.available
+      // 所有币种余额都缓存一份，供 greeks delta 的现货修正使用 (ccy 即 asset)
+      cashBalances((balance.exchange, balance.asset)) = balance.available
     case EventData.AccountInfoUpdate(exchange, info) =>
       accountInfos(exchange) = info
+    case EventData.GreeksUpdate(g) =>
+      greeksRaw((g.exchange, g.ccy)) = g
     case EventData.Clock =>
       states.values.foreach(_.failOnTimedOutOrders(event.localTs, orderTimeoutMs))
     case _ =>
