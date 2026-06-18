@@ -19,6 +19,10 @@ import hft.messaging.{EventData, IncomeEvent}
   *
   * 假定上游**没有真实 bookTicker**：真实 BBO 原样透传，若来源同时含真实 book + trades 会产生
   * 双重/冲突 L1 (本装饰器只用于无 bookTicker 的较新合约)。
+  *
+  * **可选/旁路功能** (非默认)：仅当策略写死依赖 BBO、而行情只有 trades 时才启用 (回测引擎的
+  * `synthesizeBbo` 开关)。它把 trade **替换**为零价差 BBO —— spread=0 是合成近似，会高估
+  * maker 成交。默认回测路径**不启用**，撮合直接用真实 trade ([[hft.sim.SimState.matchTrade]])。
   */
 final class TradePrintBboSource(underlying: MarketDataSource) extends MarketDataSource:
   override def events(): Iterator[IncomeEvent] =

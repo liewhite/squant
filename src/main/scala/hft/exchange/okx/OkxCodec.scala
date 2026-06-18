@@ -77,6 +77,9 @@ private[okx] object OkxCodec:
 
   final case class IndexTickerData(instId: String = "", idxPx: String = "0", ts: String = "0")
 
+  /** trades 频道：逐笔成交。side 为 taker 方向 ("buy"/"sell") */
+  final case class TradeData(instId: String = "", px: String = "0", sz: String = "0", side: String = "", ts: String = "0")
+
   // ==================== WebSocket: 私有频道数据 ====================
 
   final case class PositionData(
@@ -159,6 +162,7 @@ private[okx] object OkxCodec:
   given bboPush: JsonValueCodec[WsPush[BboData]] = JsonCodecMaker.make
   given markPush: JsonValueCodec[WsPush[MarkPriceData]] = JsonCodecMaker.make
   given indexPush: JsonValueCodec[WsPush[IndexTickerData]] = JsonCodecMaker.make
+  given tradePush: JsonValueCodec[WsPush[TradeData]] = JsonCodecMaker.make
   given positionPush: JsonValueCodec[WsPush[PositionData]] = JsonCodecMaker.make
   given accountPush: JsonValueCodec[WsPush[AccountData]] = JsonCodecMaker.make
   given orderPush: JsonValueCodec[WsPush[OrderPushData]] = JsonCodecMaker.make

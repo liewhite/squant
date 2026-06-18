@@ -12,6 +12,14 @@ object Matcher:
     case Side.Long  => bbo.askPrice <= limitPrice
     case Side.Short => bbo.bidPrice >= limitPrice
 
+  /** resting 单是否被一笔**真实成交**越过 (trade-print 撮合，严格不含相等)：
+    * 买单在成交价**跌破**挂单价时成交、卖单在成交价**升破**挂单价时成交。
+    * 相等不算 (价格只触及挂单价时通常排在队尾，未真正穿过)，是更保守的下界模型。
+    */
+  def tradeCrosses(side: Side, limitPrice: Price, tradePrice: Price): Boolean = side match
+    case Side.Long  => tradePrice < limitPrice
+    case Side.Short => tradePrice > limitPrice
+
   /** 主动成交 (taker) 的对手价：买单吃最优卖价，卖单吃最优买价 */
   def touchPrice(side: Side, bbo: BBO): Price = side match
     case Side.Long  => bbo.askPrice

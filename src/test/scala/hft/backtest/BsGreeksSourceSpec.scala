@@ -13,8 +13,8 @@ class BsGreeksSourceSpec extends munit.FunSuite:
   private class FixedSource(evs: Vector[IncomeEvent]) extends MarketDataSource:
     def events(): Iterator[IncomeEvent] = evs.iterator
 
-  private def bbo(bid: Price, ask: Price, ts: Timestamp): IncomeEvent =
-    IncomeEvent(ts, ts, EventData.BboUpdate(BBO(ex, sym, bid, 1.0, ask, 1.0, ts)))
+  private def trade(price: Price, ts: Timestamp): IncomeEvent =
+    IncomeEvent(ts, ts, EventData.MarketTradeUpdate(MarketTrade(ex, sym, price, 1.0, isBuyerMaker = false, ts)))
 
   // 1 年期 ATM call, 标的中间价=100
   private val expiry: Timestamp = BlackScholes.MillisPerYear.toLong
@@ -32,7 +32,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
   )
 
   test("聚合: 账户级 delta = 持仓量 × 单份 BS delta"):
-    val src = BsGreeksSource(FixedSource(Vector(bbo(99.9, 100.1, 0))), config(qty = 10.0, spot = 0.0))
+    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), config(qty = 10.0, spot = 0.0))
     val greeks = src.events().collect { case IncomeEvent(_, _, EventData.GreeksUpdate(g)) => g }.toVector
     assertEquals(greeks.size, 1)
     val single = BlackScholes.greeks(OptionRight.Call, 100.0, 100.0, 1.0, 0.2, 0.0)
@@ -42,18 +42,18 @@ class BsGreeksSourceSpec extends munit.FunSuite:
     assert(math.abs(greeks.head.theta - 10.0 * single.theta / 365.0) < 1e-9, s"theta=${greeks.head.theta}")
     assert(math.abs(greeks.head.vega - 10.0 * single.vega / 100.0) < 1e-9, s"vega=${greeks.head.vega}")
 
-  test("greeks 事件与触发 BBO 同 exchangeTs, 排在该 BBO 之后"):
-    val src = BsGreeksSource(FixedSource(Vector(bbo(99.9, 100.1, 1234))), config(qty = 1.0, spot = 0.0))
+  test("greeks 事件与触发 trade 同 exchangeTs, 排在该 trade 之后"):
+    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 1234))), config(qty = 1.0, spot = 0.0))
     val evs = src.events().toVector
     val gIdx = evs.indexWhere(_.data.isInstanceOf[EventData.GreeksUpdate])
-    assert(gIdx > 0, "greeks 应在 BBO 之后")
+    assert(gIdx > 0, "greeks 应在 trade 之后")
     assertEquals(evs(gIdx).exchangeTs, 1234L)
-    // 同一 exchangeTs 的触发 BBO 排在 greeks 之前 (中间可能夹首次 cashBal)
-    assert(evs.take(gIdx).exists(e => e.data.isInstanceOf[EventData.BboUpdate] && e.exchangeTs == 1234L))
+    // 同一 exchangeTs 的触发 trade 排在 greeks 之前 (中间可能夹首次 cashBal)
+    assert(evs.take(gIdx).exists(e => e.data.isInstanceOf[EventData.MarketTradeUpdate] && e.exchangeTs == 1234L))
 
   test("发射间隔门控: ts 0/500/1000, interval=1000 -> 仅 0 与 1000 发射"):
     val src = BsGreeksSource(
-      FixedSource(Vector(bbo(99.9, 100.1, 0), bbo(99.9, 100.1, 500), bbo(99.9, 100.1, 1000))),
+      FixedSource(Vector(trade(100.0, 0), trade(100.0, 500), trade(100.0, 1000))),
       config(qty = 1.0, spot = 0.0),
     )
     val greeksTs = src.events().collect { case IncomeEvent(ts, _, _: EventData.GreeksUpdate) => ts }.toVector
@@ -61,7 +61,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
 
   test("cashBal (Balance) 仅首次发布一次"):
     val src = BsGreeksSource(
-      FixedSource(Vector(bbo(99.9, 100.1, 0), bbo(99.9, 100.1, 1000), bbo(99.9, 100.1, 2000))),
+      FixedSource(Vector(trade(100.0, 0), trade(100.0, 1000), trade(100.0, 2000))),
       config(qty = 1.0, spot = 3.0),
     )
     val balances = src.events().collect { case IncomeEvent(_, _, EventData.BalanceUpdate(b)) => b }.toVector
@@ -70,7 +70,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
     assertEquals(balances.head.available, 3.0)
 
   test("经 StateManager: greeks().delta = 原始 delta + cashBal"):
-    val src = BsGreeksSource(FixedSource(Vector(bbo(99.9, 100.1, 0))), config(qty = 10.0, spot = 2.0))
+    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), config(qty = 10.0, spot = 2.0))
     val sm = StateManager(Iterable(sym), orderTimeoutMs = 0L)
     src.events().foreach(sm.apply)
     val corrected = sm.greeks(ex, ccy)

@@ -9,7 +9,7 @@ import hft.option.{BlackScholes, OptionPosition}
   * @param exchange        希腊字母事件标记的交易所 (策略据 (exchange, ccy) 查询)；回测中可设为
   *                        Exchange.Okx 以模拟实盘 OKX 账户 greeks，或与标的所在交易所一致
   * @param ccy             币种, e.g. "BTC"
-  * @param underlyingSymbol 读取标的价 S 的 BBO symbol (取中间价), e.g. "BTCUSDT"
+  * @param underlyingSymbol 读取标的价 S 的 symbol (取最新成交价), e.g. "BTCUSDT"
   * @param positions       期权持仓组合 (按持仓数量聚合为账户级希腊字母)
   * @param impliedVol      年化隐含波动率 (BS 输入假设)
   * @param riskFreeRate    无风险年化利率
@@ -31,10 +31,10 @@ final case class BsGreeksConfig(
 
 /** 回测用 BS 合成希腊字母数据源装饰器。
   *
-  * 监听上游标的 [[EventData.BboUpdate]]，按虚拟时间间隔用 Black-Scholes 计算各期权持仓的希腊字母、
-  * **按数量聚合为与 OKX `account/greeks` 同形态的 per-ccy 账户级 [[Greeks]]**，紧随该 BBO 以
-  * **相同 exchangeTs** 注入 [[EventData.GreeksUpdate]]。同时一次性注入现货 cashBal ([[EventData.BalanceUpdate]])，
-  * 使 [[hft.messaging.StateManager.greeks]] 的 delta 修正得以生效。
+  * 监听上游标的 [[EventData.MarketTradeUpdate]] (真实逐笔成交价 S)，按虚拟时间间隔用 Black-Scholes
+  * 计算各期权持仓的希腊字母、**按数量聚合为与 OKX `account/greeks` 同形态的 per-ccy 账户级 [[Greeks]]**，
+  * 紧随该 trade 以**相同 exchangeTs** 注入 [[EventData.GreeksUpdate]]。同时一次性注入现货 cashBal
+  * ([[EventData.BalanceUpdate]])，使 [[hft.messaging.StateManager.greeks]] 的 delta 修正得以生效。
   *
   * 由此回测与实盘喂入同一 Greeks 通道，策略代码对两者无感 (实盘走 OKX REST 轮询)。
   *
@@ -52,9 +52,9 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
 
     underlying.events().flatMap { ev =>
       ev.data match
-        case EventData.BboUpdate(b) if b.symbol == config.underlyingSymbol && shouldEmit(ev.exchangeTs, lastEmit) =>
+        case EventData.MarketTradeUpdate(t) if t.symbol == config.underlyingSymbol && shouldEmit(ev.exchangeTs, lastEmit) =>
           lastEmit = ev.exchangeTs
-          val greeksEv = ev.copy(data = EventData.GreeksUpdate(computeGreeks(b.midPrice, ev.exchangeTs)))
+          val greeksEv = ev.copy(data = EventData.GreeksUpdate(computeGreeks(t.price, ev.exchangeTs)))
           // cashBal 只在首次发布 (回测中现货持有量恒定)，使 greeks() 修正项就绪
           if balanceEmitted then Iterator(ev, greeksEv)
           else

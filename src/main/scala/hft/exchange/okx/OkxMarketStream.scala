@@ -59,6 +59,7 @@ final class OkxMarketStream(
     case SubscriptionKind.FundingRate(s) => s"""{"channel":"funding-rate","instId":"${toOkx(s, quote)}"}"""
     case SubscriptionKind.MarkPrice(s)   => s"""{"channel":"mark-price","instId":"${toOkx(s, quote)}"}"""
     case SubscriptionKind.IndexPrice(s)  => s"""{"channel":"index-tickers","instId":"${toOkxIndex(s, quote)}"}"""
+    case SubscriptionKind.Trade(s)       => s"""{"channel":"trades","instId":"${toOkx(s, quote)}"}"""
 
   // ==================== 公共流解析 (解析失败/错误事件 -> 异常上抛终止) ====================
 
@@ -71,6 +72,7 @@ final class OkxMarketStream(
         case "funding-rate" => readFromString[WsPush[FundingRateData]](text).data.foreach(publishFunding)
         case "mark-price"   => readFromString[WsPush[MarkPriceData]](text).data.foreach(publishMark)
         case "index-tickers" => readFromString[WsPush[IndexTickerData]](text).data.foreach(publishIndex)
+        case "trades"        => readFromString[WsPush[TradeData]](text).data.foreach(publishTrade)
         case other          => throw IllegalStateException(s"Unexpected OKX public channel '$other': $text")
 
   private def handleControl(env: OkxEnvelope, text: String): Unit = env.event match
@@ -107,6 +109,12 @@ final class OkxMarketStream(
     val sym = fromOkxIndex(d.instId).getOrElse(throw IllegalStateException(s"Unknown OKX index instId: '${d.instId}'"))
     val ts = d.ts.toLong
     bus.publish(IncomeEvent.at(ts, EventData.IndexPriceUpdate(IndexPrice(Exchange.Okx, sym, d.idxPx.asDouble, ts))))
+
+  private def publishTrade(d: TradeData): Unit =
+    val ts = d.ts.toLong
+    // OKX side = taker 方向: side=sell -> 买方是挂单方 (isBuyerMaker=true)
+    val trade = MarketTrade(Exchange.Okx, requireSymbol(d.instId), d.px.asDouble, d.sz.asDouble, d.side == "sell", ts)
+    bus.publish(IncomeEvent.at(ts, EventData.MarketTradeUpdate(trade)))
 
   private def publishFunding(d: FundingRateData): Unit =
     val ts = nowMs

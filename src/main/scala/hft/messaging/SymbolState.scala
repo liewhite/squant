@@ -21,6 +21,8 @@ final class SymbolState(val symbol: Symbol):
 
   val fundingRates: mutable.Map[Exchange, FundingRate] = mutable.Map.empty
   val bbos: mutable.Map[Exchange, BBO] = mutable.Map.empty
+  /** 最新公共成交印记 (trade-only 行情下作价格基准) */
+  val lastTrades: mutable.Map[Exchange, MarketTrade] = mutable.Map.empty
   val markPrices: mutable.Map[Exchange, MarkPrice] = mutable.Map.empty
   val indexPrices: mutable.Map[Exchange, IndexPrice] = mutable.Map.empty
   val positions: mutable.Map[Exchange, Position] = mutable.Map.empty
@@ -30,6 +32,9 @@ final class SymbolState(val symbol: Symbol):
   // ==================== 查询 ====================
 
   def bbo(exchange: Exchange): Option[BBO] = bbos.get(exchange)
+  def lastTrade(exchange: Exchange): Option[MarketTrade] = lastTrades.get(exchange)
+  /** 最新成交价 (trade-only 行情下的价格基准)，无成交记录返回 None */
+  def lastTradePrice(exchange: Exchange): Option[Price] = lastTrades.get(exchange).map(_.price)
   def markPrice(exchange: Exchange): Option[MarkPrice] = markPrices.get(exchange)
   def indexPrice(exchange: Exchange): Option[IndexPrice] = indexPrices.get(exchange)
   def fundingRate(exchange: Exchange): Option[FundingRate] = fundingRates.get(exchange)
@@ -114,6 +119,7 @@ final class SymbolState(val symbol: Symbol):
         event.data match
           case EventData.FundingRateUpdate(rate) => fundingRates(rate.exchange) = rate
           case EventData.BboUpdate(bbo)          => bbos(bbo.exchange) = bbo
+          case EventData.MarketTradeUpdate(t)    => lastTrades(t.exchange) = t
           case EventData.MarkPriceUpdate(mp)     => markPrices(mp.exchange) = mp
           case EventData.IndexPriceUpdate(ip)    => indexPrices(ip.exchange) = ip
           case EventData.PositionUpdate(pos)     => applyPosition(pos)

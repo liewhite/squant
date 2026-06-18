@@ -33,6 +33,16 @@ private[binance] object BinanceCodec:
       E: Long = 0,     // event time
   )
 
+  /** 归集成交 (aggTrade)：逐笔成交印记 */
+  final case class AggTradeMsg(
+      s: String = "",       // symbol
+      p: String = "0",      // price
+      q: String = "0",      // quantity
+      m: Boolean = false,   // 买方是否为挂单方 (true -> 主动卖出)
+      T: Long = 0,          // trade time
+      E: Long = 0,          // event time
+  )
+
   // ===== WebSocket: 私有流 (user data stream) =====
 
   final case class OrderTradeUpdateMsg(E: Long = 0, o: OrderData = OrderData())
@@ -110,6 +120,7 @@ private[binance] object BinanceCodec:
   given JsonValueCodec[WsEnvelope] = JsonCodecMaker.make
   given JsonValueCodec[BookTickerMsg] = JsonCodecMaker.make
   given JsonValueCodec[MarkPriceMsg] = JsonCodecMaker.make
+  given JsonValueCodec[AggTradeMsg] = JsonCodecMaker.make
   given JsonValueCodec[OrderTradeUpdateMsg] = JsonCodecMaker.make
   given JsonValueCodec[AccountUpdateMsg] = JsonCodecMaker.make
   given JsonValueCodec[ExchangeInfo] = JsonCodecMaker.make

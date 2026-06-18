@@ -1,6 +1,6 @@
 package hft.demo
 
-import hft.backtest.{BacktestEngine, BinanceHistoryDownloader, BinanceHistorySource, BsGreeksConfig, BsGreeksSource, LocalFsDataCache, TradePrintBboSource}
+import hft.backtest.{BacktestEngine, BinanceHistory, BsGreeksConfig, BsGreeksSource}
 import hft.domain.Exchange
 import hft.engine.StrategyRunner
 import hft.messaging.{EventData, IncomeEvent}
@@ -38,7 +38,8 @@ import java.time.{LocalDate, ZoneOffset}
   val expiryDays = 30L        // 期权到期 (远于回测窗口，使 greeks 稳定、gamma 不在到期日爆炸)
   val straddles = 10.0        // 长跨式张数 (N 个 call + N 个 put)
   val deltaBand = 0.1         // 净 delta 对称容忍带 (ETH)
-  val offsetRatio = 0.0002    // PostOnly 距 BBO 偏移
+  val baseOffsetRatio = 0.002  // 基础对冲间距 0.2% (PostOnly 距 BBO)
+  val dirSkewRatio = 0.0005    // 小时 MACD 方向偏移 ±0.05%
   val takerFeeRate = 0.0005
   val initialBalanceUsdt = 100_000.0
 
@@ -53,14 +54,13 @@ import java.time.{LocalDate, ZoneOffset}
     .fetchAllSymbolMetas()
     .fold(e => sys.error(s"fetch symbol metas failed: ${e.message}"), _.map(m => (m.exchange, m.symbol) -> m).toMap)
 
-  val cache = LocalFsDataCache(Path.of("data-cache"))
-  val downloader = BinanceHistoryDownloader(backend, cache)
-  def tradeSource() = TradePrintBboSource(BinanceHistorySource(downloader, Seq(symbol), start, end))
+  // 回测层负责原始数据下载/缓存/组装 (trade-native，不合成盘口)
+  def tradeSource() = BinanceHistory.source(backend, Seq(symbol), start, end)
 
-  // 以回测起点首个成交价作为 ATM 行权价 (peek 仅加载首日)
+  // 以回测起点首个真实成交价作为 ATM 行权价 (peek 仅加载首日)
   val atmStrike = tradeSource()
     .events()
-    .collectFirst { case IncomeEvent(_, _, EventData.BboUpdate(b)) => b.midPrice }
+    .collectFirst { case IncomeEvent(_, _, EventData.MarketTradeUpdate(t)) => t.price }
     .getOrElse(sys.error(s"no market data for $symbol [$start .. $end] (数据未上架或日期无效?)"))
 
   val expiryMs = start.plusDays(expiryDays).atStartOfDay.toInstant(ZoneOffset.UTC).toEpochMilli
@@ -86,7 +86,8 @@ import java.time.{LocalDate, ZoneOffset}
     symbol = symbol,
     ccy = ccy,
     deltaBand = deltaBand,
-    offsetRatio = offsetRatio,
+    baseOffsetRatio = baseOffsetRatio,
+    dirSkewRatio = dirSkewRatio,
   )
   val runner = StrategyRunner(strategy, symbolMetas)
 
@@ -98,8 +99,8 @@ import java.time.{LocalDate, ZoneOffset}
   var lastTs = expiryMs
   val priceObserver: IncomeEvent => Unit = ev =>
     ev.data match
-      case EventData.BboUpdate(b) => lastMid = b.midPrice; lastTs = b.timestamp
-      case _                      => ()
+      case EventData.MarketTradeUpdate(t) => lastMid = t.price; lastTs = t.timestamp
+      case _                              => ()
   try
     val engine = BacktestEngine(
       exchange = Exchange.Binance,
@@ -130,6 +131,7 @@ import java.time.{LocalDate, ZoneOffset}
     println("==================== GammaScalp Backtest Result ====================")
     println(s"symbol         : $symbol  [$start .. $end] ($days days)")
     println(f"ATM strike     : $atmStrike%.2f  | IV=$impliedVol  straddles=$straddles  band=$deltaBand ETH")
+    println(f"对冲间距       : ${baseOffsetRatio * 100}%.2f%% ± ${dirSkewRatio * 100}%.2f%% (小时 MACD 方向偏移)")
     println(f"maker fee      : ${makerFeeRate * 100}%.3f%%  (PostOnly 对冲单)")
     println(f"start/end px    : $atmStrike%.2f -> $lastMid%.2f  (${(lastMid / atmStrike - 1) * 100}%+.2f%%)")
     println(s"market events  : ${result.marketEvents}")

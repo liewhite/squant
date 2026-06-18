@@ -11,12 +11,15 @@ enum SubscriptionKind:
   case BBO(symbol: Symbol)
   case MarkPrice(symbol: Symbol)
   case IndexPrice(symbol: Symbol)
+  /** 公共成交印记 (逐笔成交)，作策略信号 (如 K 线/动量)，不参与撮合 */
+  case Trade(symbol: Symbol)
 
   def subscribedSymbol: Symbol = this match
     case FundingRate(s) => s
     case BBO(s)         => s
     case MarkPrice(s)   => s
     case IndexPrice(s)  => s
+    case Trade(s)       => s
 
 /** 交易所客户端统一接口，仅封装 REST 交互。
   *

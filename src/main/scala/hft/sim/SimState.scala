@@ -29,12 +29,17 @@ final case class SimState(
     resting: Map[OrderId, RestingOrder],
     lastBbo: Map[Symbol, BBO],
     lastMark: Map[Symbol, Double],
+    lastTrade: Map[Symbol, Double] = Map.empty,
     makerFeeRate: Double = 0.0,
     takerFeeRate: Double = 0.0,
 ):
-  /** 估值价格：优先标记价格，退化为 BBO 中间价 */
+  /** 估值价格：标记价 > BBO 中间价 > 最新成交价 (trade-only 行情用最新成交价估值) */
   def markOf(symbol: Symbol): Double =
-    lastMark.getOrElse(symbol, lastBbo.get(symbol).map(_.midPrice).getOrElse(0.0))
+    lastMark
+      .get(symbol)
+      .orElse(lastBbo.get(symbol).map(_.midPrice))
+      .orElse(lastTrade.get(symbol))
+      .getOrElse(0.0)
 
   // ==================== 上游行情到达 (实时, 用于撮合) ====================
 
@@ -49,6 +54,11 @@ final case class SimState(
         (next, ev +: fills)
       case EventData.MarkPriceUpdate(mp) =>
         (copy(lastMark = lastMark.updated(mp.symbol, mp.price)), Vector(ev))
+      case EventData.MarketTradeUpdate(t) =>
+        // trade-print 撮合：真实成交价严格越过挂单价即成交 (无 bbo 行情时的撮合来源)
+        val withTrade = copy(lastTrade = lastTrade.updated(t.symbol, t.price))
+        val (next, fills) = withTrade.matchTrade(exchange, t)
+        (next, ev +: fills)
       case _ => (this, Vector(ev))
 
   /** BBO 越过挂单价的全部挂单成交 (maker 成交价取挂单价) */
@@ -58,6 +68,16 @@ final case class SimState(
       val (next, fillEvs) = st
         .copy(resting = st.resting - o.orderId)
         .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, bbo.timestamp, Liquidity.Maker)
+      (next, evs ++ fillEvs)
+    }
+
+  /** 真实成交严格越过挂单价的全部挂单成交 (maker 成交价取挂单价) */
+  private def matchTrade(exchange: Exchange, t: MarketTrade): (SimState, Vector[IncomeEvent]) =
+    val crossed = resting.values.filter(o => o.symbol == t.symbol && Matcher.tradeCrosses(o.side, o.limitPrice, t.price)).toVector
+    crossed.foldLeft((this, Vector.empty[IncomeEvent])) { case ((st, evs), o) =>
+      val (next, fillEvs) = st
+        .copy(resting = st.resting - o.orderId)
+        .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, t.timestamp, Liquidity.Maker)
       (next, evs ++ fillEvs)
     }
 
@@ -144,4 +164,4 @@ final case class SimState(
 
 object SimState:
   def empty(cash: Double, makerFeeRate: Double = 0.0, takerFeeRate: Double = 0.0): SimState =
-    SimState(Ledger.empty(cash), Map.empty, Map.empty, Map.empty, makerFeeRate, takerFeeRate)
+    SimState(Ledger.empty(cash), Map.empty, Map.empty, Map.empty, Map.empty, makerFeeRate, takerFeeRate)

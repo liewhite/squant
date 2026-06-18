@@ -1,0 +1,35 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "type": "scala",
+      "request": "launch",
+      "name": "TapirAuthDemo",
+      "mainClass": "demo.TapirAuthDemo",
+      "buildTarget": "file:/Users/liewhite/projects/ox-demo/?id=root",
+      "args": [],
+      "jvmOptions": [],
+      "env": {}
+    },
+    {
+      "type": "scala",
+      "request": "launch",
+      "name": "MakerDemo",
+      "mainClass": "hft.demo.MakerDemo",
+      "buildTarget": "file:/Users/liewhite/projects/ox-demo/?id=root",
+      "args": [],
+      "jvmOptions": [],
+      "env": {}
+    },
+    {
+      "type": "scala",
+      "request": "launch",
+      "name": "SimMakerDemo",
+      "mainClass": "hft.demo.SimMakerDemo",
+      "buildTarget": "file:/Users/liewhite/projects/ox-demo/?id=root",
+      "args": [],
+      "jvmOptions": [],
+      "env": {}
+    }
+  ]
+}

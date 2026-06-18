@@ -54,13 +54,14 @@ final class BinanceMarketStream(
     }
 
   private def routeOf(kind: SubscriptionKind): Route = kind match
-    case _: SubscriptionKind.BBO => Route.Public
-    case _                       => Route.Market
+    case _: SubscriptionKind.BBO | _: SubscriptionKind.Trade => Route.Public // 高频流
+    case _                                                   => Route.Market
 
   private def streamName(kind: SubscriptionKind): String =
     val symbol = kind.subscribedSymbol.toLowerCase
     kind match
-      case _: SubscriptionKind.BBO => s"$symbol@bookTicker"
+      case _: SubscriptionKind.BBO   => s"$symbol@bookTicker"
+      case _: SubscriptionKind.Trade => s"$symbol@aggTrade"
       // FundingRate / MarkPrice / IndexPrice 共用 markPrice 流
       case _ => s"$symbol@markPrice@1s"
 
@@ -77,8 +78,13 @@ final class BinanceMarketStream(
     readFromString[WsEnvelope](text).e match
       case "bookTicker"      => publishBookTicker(readFromString[BookTickerMsg](text))
       case "markPriceUpdate" => publishMarkPrice(readFromString[MarkPriceMsg](text))
+      case "aggTrade"        => publishTrade(readFromString[AggTradeMsg](text))
       case ""                => () // SUBSCRIBE ack: {"result":null,"id":N}，确定可忽略
       case other             => throw IllegalStateException(s"Unexpected public event '$other': $text")
+
+  private def publishTrade(msg: AggTradeMsg): Unit =
+    val trade = MarketTrade(Exchange.Binance, msg.s, msg.p.asDouble, msg.q.asDouble, msg.m, msg.T)
+    bus.publish(IncomeEvent.at(msg.T, EventData.MarketTradeUpdate(trade)))
 
   private def publishBookTicker(msg: BookTickerMsg): Unit =
     val bbo = BBO(
