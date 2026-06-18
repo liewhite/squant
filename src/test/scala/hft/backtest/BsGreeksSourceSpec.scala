@@ -18,8 +18,9 @@ class BsGreeksSourceSpec extends munit.FunSuite:
   private def trade(price: Price, ts: Timestamp): IncomeEvent =
     IncomeEvent(ts, ts, EventData.MarketTradeUpdate(MarketTrade(ex, sym, price, 1.0, isBuyerMaker = false, ts)))
 
-  private def config(straddles: Double, spot: Double, tenorDays: Double = 30.0, intervalMs: Long = 1000) =
-    BsGreeksConfig(ex, ccy, sym, straddles = straddles, impliedVol = 0.2, tenorDays = tenorDays,
+  // 到期设在 30 天后 (单只持有, 不滚动)
+  private def config(straddles: Double, spot: Double, intervalMs: Long = 1000) =
+    BsGreeksConfig(ex, ccy, sym, straddles = straddles, impliedVol = 0.2, expiry = 30 * day,
       riskFreeRate = 0.0, spotHolding = spot, emitIntervalMs = intervalMs)
 
   private def near(a: Double, b: Double, eps: Double = 1e-6): Unit = assert(math.abs(a - b) < eps, s"$a vs $b")
@@ -65,18 +66,13 @@ class BsGreeksSourceSpec extends munit.FunSuite:
       + BlackScholes.greeks(OptionRight.Put, 100.0, 100.0, tY, 0.2, 0.0).delta)
     near(corrected.get.delta, raw + 2.0)
 
-  test("期权腿初始未实现 ≈ -权利金 (刚开仓, 现价=ATM)"):
+  test("期权腿: 刚开仓现价=ATM -> P&L≈0; ATM 为首笔成交价; 不滚动"):
     val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), config(straddles = 1.0, spot = 0.0))
     src.events().toVector // 驱动初始化
-    // 刚开仓, 现价=进场价 -> 未实现 ≈ 0 (现价值 - 进场权利金)
-    near(src.optionUnrealized(100.0, 0), 0.0)
-    assertEquals(src.optionRealizedPnl, 0.0)
-    assertEquals(src.currentStrike, 100.0)
+    near(src.optionPnl(100.0, 0), 0.0) // 现价值 - 进场权利金
+    assertEquals(src.strikePrice, 100.0)
 
-  test("跨过到期前滚动: currentStrike 更新到滚动时价, 已实现累计"):
-    // tenor=30d, rollBefore=3d -> 第 27 天后即滚动；喂 0 和第 28 天两笔
-    val evs = Vector(trade(100.0, 0), trade(120.0, 28 * day))
-    val src = BsGreeksSource(FixedSource(evs), config(straddles = 1.0, spot = 0.0, tenorDays = 30.0))
+  test("期权腿: 价格大涨 -> 长跨式 P&L 转正 (call 增值盖过 put)"):
+    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), config(straddles = 1.0, spot = 0.0))
     src.events().toVector
-    assertEquals(src.currentStrike, 120.0) // 已滚动到新 ATM=120
-    assert(src.optionRealizedPnl != 0.0, "滚动应实现旧跨式 P&L")
+    assert(src.optionPnl(130.0, day) > 0, s"pnl=${src.optionPnl(130.0, day)}") // 涨 30%, 跨式获利
