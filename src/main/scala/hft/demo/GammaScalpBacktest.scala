@@ -38,15 +38,16 @@ import java.time.{LocalDate, ZoneOffset}
   val expiryDays = 30L        // 期权到期 (远于回测窗口，使 greeks 稳定、gamma 不在到期日爆炸)
   val straddles = 10.0        // 长跨式张数 (N 个 call + N 个 put)
   val deltaBand = 0.1         // 净 delta 对称容忍带 (ETH)
-  val baseOffsetRatio = 0.002  // 基础对冲间距 0.2% (PostOnly 距 BBO)
-  val dirSkewRatio = 0.0005    // 小时 MACD 方向偏移 ±0.05%
+  val baseOffsetRatio = 0.002  // 基础对冲间距 0.2% (PostOnly 距最新成交价)
   val takerFeeRate = 0.0005
   val initialBalanceUsdt = 100_000.0
 
   val end = args.lift(1).map(LocalDate.parse).getOrElse(LocalDate.now().minusDays(2))
   val start = args.lift(0).map(LocalDate.parse).getOrElse(end.minusDays(6))
-  // maker 手续费率 (gamma scalp 的核心成本)，可由第 3 参覆盖以做"毛收益 vs 净收益"对照。0.0002 = 0.02%
+  // maker 手续费率 (gamma scalp 的核心成本)，第 3 参覆盖以做"毛/净"对照。0.0002 = 0.02%
   val makerFeeRate = args.lift(2).map(_.toDouble).getOrElse(0.0002)
+  // 方向性间距偏移 (小时 MACD 柱>0 看多/<0 看空)，第 4 参覆盖以做 A/B：0=关(纯对称), 0.0005=开
+  val dirSkewRatio = args.lift(3).map(_.toDouble).getOrElse(0.0005)
 
   val backend = DefaultSyncBackend()
   val publicClient = hft.exchange.binance.BinanceClient(backend, credentials = None)
