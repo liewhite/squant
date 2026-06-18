@@ -39,3 +39,15 @@ class MacdSpec extends munit.FunSuite:
     assert(math.abs(k.macdLine - (ef - es)) < 1e-9, s"line ${k.macdLine} vs ${ef - es}")
     assert(math.abs(k.macdSignalLine - esig) < 1e-9, s"signal ${k.macdSignalLine} vs $esig")
     assert(math.abs(k.macdHistogram - ((ef - es) - esig)) < 1e-9)
+
+  test("保存逐根已收盘柱历史 -> 可判定连续递减 (用户场景: macd 柱连续 2 周期递减)"):
+    val k = series
+    // 先涨到顶再回落，使 MACD 柱在后段连续走低
+    val closes = (0 until 60).map(_.toDouble).map(i => 100.0 + math.sin(i / 12.0) * 10) :+ 80.0 :+ 70.0 :+ 60.0
+    closes.zipWithIndex.foreach((c, i) => k.update(i.toLong * hour, c))
+    // 已收盘柱序列存在且非空
+    assert(k.macdHistSeries.size > 0)
+    // 末段三笔单调下行 -> 柱连续递减
+    assert(k.macdHistSeries.falling(2), s"hist tail=${k.macdHistSeries.recent(4)}")
+    // 已收盘历史不含盘中根 (跨桶次数 - 1)
+    assertEquals(k.macdHistSeries.size, closes.size - 1)

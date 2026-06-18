@@ -23,6 +23,11 @@ trait Macd extends KlineSeries:
   private var dSignal = 0.0
   private var dHist = 0.0
 
+  // 逐根已收盘的 DIF(line)/DEA(signal)/柱(hist) 历史，供回看与单调性判定
+  private val lineHistory = RingSeries(maxBars)
+  private val signalHistory = RingSeries(maxBars)
+  private val histHistory = RingSeries(maxBars)
+
   abstract override protected def onBarClosed(bar: Candle): Unit =
     super.onBarClosed(bar)
     val c = bar.close
@@ -35,6 +40,10 @@ trait Macd extends KlineSeries:
       fEmaSlow = Macd.ema(fEmaSlow, c, macdSlow)
       fEmaSignal = Macd.ema(fEmaSignal, fEmaFast - fEmaSlow, macdSignalPeriod)
     closedCount += 1
+    val line = fEmaFast - fEmaSlow
+    lineHistory.push(line)
+    signalHistory.push(fEmaSignal)
+    histHistory.push(line - fEmaSignal)
 
   abstract override protected def onBarUpdated(bar: Candle): Unit =
     super.onBarUpdated(bar)
@@ -47,9 +56,15 @@ trait Macd extends KlineSeries:
       dSignal = Macd.ema(fEmaSignal, dMacd, macdSignalPeriod)
       dHist = dMacd - dSignal
 
+  // 当前 (含盘中根) 动态值
   def macdLine: Double = dMacd
   def macdSignalLine: Double = dSignal
   def macdHistogram: Double = dHist
+
+  // 逐根已收盘历史 (最旧->最新)，用于回看："macd 柱连续 2 周期递减" = macdHistSeries.falling(2)
+  def macdLineSeries: RingSeries = lineHistory
+  def macdSignalSeries: RingSeries = signalHistory
+  def macdHistSeries: RingSeries = histHistory
 
   /** 方向：+1 看多 (柱>0)、-1 看空 (柱<0)、0 预热不足或持平 */
   def macdDirection: Int =

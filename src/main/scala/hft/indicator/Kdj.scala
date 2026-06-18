@@ -19,6 +19,11 @@ trait Kdj extends KlineSeries:
   private var dD = 50.0
   private var dJ = 0.0
 
+  // 逐根已收盘的 K/D/J 历史
+  private val kHistory = RingSeries(maxBars)
+  private val dHistory = RingSeries(maxBars)
+  private val jHistory = RingSeries(maxBars)
+
   private def rsv(window: collection.Seq[Candle]): Double =
     val hi = window.map(_.high).max
     val lo = window.map(_.low).min
@@ -30,6 +35,9 @@ trait Kdj extends KlineSeries:
     fK = (1.0 - 1.0 / kdjM1) * fK + (1.0 / kdjM1) * r
     fD = (1.0 - 1.0 / kdjM2) * fD + (1.0 / kdjM2) * fK
     closedCount += 1
+    kHistory.push(fK)
+    dHistory.push(fD)
+    jHistory.push(3 * fK - 2 * fD)
 
   abstract override protected def onBarUpdated(bar: Candle): Unit =
     super.onBarUpdated(bar)
@@ -41,6 +49,11 @@ trait Kdj extends KlineSeries:
 
   /** (K, D, J) 当前 (含盘中根) 值 */
   def kdjValues: (Double, Double, Double) = (dK, dD, dJ)
+
+  // 逐根已收盘历史 (最旧->最新)
+  def kSeries: RingSeries = kHistory
+  def dSeries: RingSeries = dHistory
+  def jSeries: RingSeries = jHistory
 
   /** 方向：K 上穿 D 看多 (+1)、K 下穿 D 看空 (-1)、预热不足或持平 0 */
   def kdjDirection: Int =
