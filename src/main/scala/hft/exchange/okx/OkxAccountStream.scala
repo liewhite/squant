@@ -1,0 +1,173 @@
+package hft.exchange.okx
+
+import com.github.plokhotnyuk.jsoniter_scala.core.*
+import hft.domain.*
+import hft.exchange.{AccountStream, WsLoop}
+import hft.messaging.{EventBus, EventData, IncomeEvent}
+import org.slf4j.LoggerFactory
+import ox.{Ox, fork}
+import ox.channels.Channel
+import sttp.client4.WebSocketSyncBackend
+import sttp.ws.WebSocketFrame
+
+import java.time.Instant
+import scala.collection.mutable
+
+import OkxCodec.*
+import OkxCodec.given
+
+object OkxAccountStream:
+  /** Greeks REST 轮询间隔。OKX account-greeks WS 推送频率过低，改用 REST 轮询 (官方限速 10/2s) */
+  val GreeksPollIntervalMs: Long = 1000
+
+/** OKX 永续合约私有账户连接器。
+  *
+  * 连接 `/ws/v5/private`，带内握手 (WsLoop 无建连钩子，故用事件驱动)：
+  *   1. start 时把 login 帧入队 (连上即发)
+  *   2. 收到 login 成功 (event=login,code=0) 后，入队订阅 positions/account/orders
+  *
+  * 解析：
+  *   - positions -> Position (张->币)；只发布推送中出现的仓位 (平仓时 OKX 推 pos=0)，
+  *     初始 0 仓由 Engine 启动对齐负责
+  *   - account   -> AccountInfo(净值/名义价值) + 各币种 Balance(cashBal，供 greeks delta 修正)
+  *   - orders    -> Fill (fillSz>0 时, 先于 OrderUpdate) + OrderUpdate (张->币)
+  *
+  * 另起一个 fork 以 REST 轮询账户级希腊字母，去重后发布 [[EventData.GreeksUpdate]]。
+  *
+  * Fail-fast：连接断开、解析失败、登录失败、错误事件一律抛异常终止引擎作用域。
+  * Greeks 轮询失败是唯一例外 (记 warn 后下次重试)，不影响私有流主链路。
+  */
+final class OkxAccountStream(
+    client: OkxClient,
+    backend: WebSocketSyncBackend,
+    wsUrl: String = OkxClient.WsPrivateUrl,
+) extends AccountStream:
+  require(client.hasCredentials, "OkxAccountStream requires credentials")
+  private val logger = LoggerFactory.getLogger(classOf[OkxAccountStream])
+  private val credentials = client.wsCredentials.getOrElse(sys.error("OkxAccountStream requires credentials"))
+
+  override def exchange: Exchange = Exchange.Okx
+
+  private val outgoing = Channel.unlimited[WebSocketFrame]
+  private var bus: EventBus[IncomeEvent] = scala.compiletime.uninitialized
+  /** symbol -> meta，用于张<->币换算 (start 时一次性拉取) */
+  private var metas: Map[Symbol, SymbolMeta] = Map.empty
+  /** greeks 去重：ccy -> 上次 timestamp */
+  private val lastGreeksTs: mutable.Map[String, Timestamp] = mutable.Map.empty
+
+  override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit =
+    bus = incomeBus
+    metas = client.fetchAllSymbolMetas() match
+      case Right(ms) => ms.map(m => m.symbol -> m).toMap
+      case Left(e)   => throw IllegalStateException(s"OKX fetch symbol metas failed: ${e.message}")
+
+    WsLoop.run("okx/private", backend, () => wsUrl, outgoing, onPrivateText)
+    // login 帧入队，连接建立后立即发送 (timestamp 在此刻生成；连接通常亚秒级，OKX 允许 ~30s 偏差)
+    outgoing.send(WebSocketFrame.text(loginFrame()))
+
+    // Greeks REST 轮询 (独立虚拟线程，与私有 WS 并行)
+    fork {
+      while true do
+        Thread.sleep(OkxAccountStream.GreeksPollIntervalMs)
+        pollGreeks()
+    }
+    ()
+
+  private def loginFrame(): String =
+    val ts = Instant.now().getEpochSecond.toString
+    val sign = credentials.signWsLogin(ts)
+    s"""{"op":"login","args":[{"apiKey":"${credentials.apiKey}","passphrase":"${credentials.passphrase}","timestamp":"$ts","sign":"$sign"}]}"""
+
+  private val subscribeFrame =
+    """{"op":"subscribe","args":[{"channel":"positions","instType":"SWAP"},{"channel":"account"},{"channel":"orders","instType":"SWAP"}]}"""
+
+  /** 轮询账户希腊字母，去重 (ts 未变跳过) 后发布。失败仅 warn，下次重试 (不致命) */
+  private def pollGreeks(): Unit =
+    client.fetchGreeks() match
+      case Right(list) =>
+        list.foreach { g =>
+          if lastGreeksTs.getOrElse(g.ccy, -1L) != g.timestamp then
+            lastGreeksTs(g.ccy) = g.timestamp
+            bus.publish(IncomeEvent.at(g.timestamp, EventData.GreeksUpdate(g)))
+        }
+      case Left(e) =>
+        logger.warn(s"OKX fetch greeks failed (will retry): ${e.message}")
+
+  // ==================== 私有流解析 (任何不理解的消息 -> 异常上抛终止) ====================
+
+  private def onPrivateText(text: String): Unit =
+    val env = readFromString[OkxEnvelope](text)
+    if env.event.nonEmpty then handleControl(env, text)
+    else
+      env.arg.channel match
+        case "positions" => readFromString[WsPush[PositionData]](text).data.foreach(publishPosition)
+        case "account"   => readFromString[WsPush[AccountData]](text).data.foreach(publishAccount)
+        case "orders"    => readFromString[WsPush[OrderPushData]](text).data.foreach(publishOrder)
+        // account-greeks 走 REST 轮询，WS 同名频道 (若订阅) 直接忽略
+        case "account-greeks" => ()
+        case other            => throw IllegalStateException(s"Unexpected OKX private channel '$other': $text")
+
+  private def handleControl(env: OkxEnvelope, text: String): Unit = env.event match
+    case "login" =>
+      if env.code == "0" then
+        logger.info("OKX private login success, subscribing private channels")
+        outgoing.send(WebSocketFrame.text(subscribeFrame))
+      else throw IllegalStateException(s"OKX login failed: code=${env.code} msg=${env.msg}")
+    case "subscribe" | "unsubscribe" | "channel-conn-count" => ()
+    case "error" => throw IllegalStateException(s"OKX private WS error: code=${env.code} msg=${env.msg}")
+    case other   => logger.warn(s"ignoring OKX private event '$other': $text")
+
+  /** 缺少 meta 的 symbol 无法做张->币换算，跳过 (非配置 quote 的品种) */
+  private def metaOf(symbol: Symbol): Option[SymbolMeta] = metas.get(symbol)
+
+  private def publishPosition(d: PositionData): Unit =
+    for
+      sym <- fromOkx(d.instId)
+      meta <- metaOf(sym)
+    do
+      val position = Position(
+        exchange = Exchange.Okx,
+        symbol = sym,
+        size = meta.qtyToCoin(d.pos.asDouble),
+        entryPrice = d.avgPx.asDoubleOrZero,
+        unrealizedPnl = d.upl.asDoubleOrZero,
+      )
+      bus.publish(IncomeEvent.local(EventData.PositionUpdate(position)))
+
+  private def publishAccount(d: AccountData): Unit =
+    val ts = d.uTime.toLongOption.getOrElse(nowMs)
+    bus.publish(
+      IncomeEvent.at(ts, EventData.AccountInfoUpdate(Exchange.Okx, AccountInfo(d.totalEq.asDouble, d.notionalUsd.asDouble)))
+    )
+    // 各币种现金余额：供 StateManager 修正 greeks delta 的现货敞口
+    d.details.foreach { detail =>
+      bus.publish(IncomeEvent.at(ts, EventData.BalanceUpdate(Balance(Exchange.Okx, detail.ccy, detail.cashBal.asDouble, ts))))
+    }
+
+  private def publishOrder(d: OrderPushData): Unit =
+    val sym = fromOkx(d.instId).getOrElse(throw IllegalStateException(s"Unknown OKX instId in order: '${d.instId}'"))
+    val meta = metaOf(sym).getOrElse(throw IllegalStateException(s"No SymbolMeta for OKX order symbol: $sym"))
+    val side = d.side match
+      case "buy"  => Side.Long
+      case "sell" => Side.Short
+      case other  => throw IllegalStateException(s"Unknown OKX side: '$other'")
+    val fillSz = meta.qtyToCoin(d.fillSz.asDouble)
+    val filledQty = meta.qtyToCoin(d.accFillSz.asDouble)
+    // Fill 先于 OrderUpdate (确保乐观更新 position 后再处理订单终态)
+    if fillSz > 0 then
+      val fill = Fill(Exchange.Okx, sym, side, price = d.fillPx.asDouble, size = fillSz, timestamp = nowMs)
+      bus.publish(IncomeEvent.local(EventData.FillUpdate(fill)))
+    val update = OrderUpdate(
+      orderId = d.ordId,
+      clientOrderId = if d.clOrdId.nonEmpty then Some(d.clOrdId) else None,
+      exchange = Exchange.Okx,
+      symbol = sym,
+      side = side,
+      status = mapOrderState(d.state, filledQty),
+      price = d.px.asDoubleOrZero,
+      quantity = meta.qtyToCoin(d.sz.asDouble),
+      filledQuantity = filledQty,
+      fillSize = fillSz,
+      timestamp = nowMs,
+    )
+    bus.publish(IncomeEvent.local(EventData.OrderUpdated(update)))
