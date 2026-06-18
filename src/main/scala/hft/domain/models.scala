@@ -190,7 +190,14 @@ final case class IndexPrice(
   * 回测的 BS 合成源亦将单合约希腊字母按持仓聚合为同一形态，使策略对实盘/回测无感。
   *
   * delta 为**原始期权 delta**；总敞口需叠加现货/合约 delta，见 [[hft.messaging.StateManager.greeks]]
-  * 用 cashBal 做的修正。delta>0 表示该币种看多敞口。theta 为每日时间衰减，vega 对 1.0 (=100%) 波动率。
+  * 用 cashBal 做的修正。delta>0 表示该币种看多敞口。
+  *
+  * **通道规范单位 (SSOT)**：所有来源 (OKX 轮询 / BS 合成) 必须统一为——
+  *   - delta/gamma: 币本位 (dPrice/dS、d²Price/dS²)
+  *   - theta: **每日** 时间衰减
+  *   - vega : 对 **1% (0.01)** 波动率变动的敏感度
+  * 以此保证策略数值读 theta/vega 时实盘与回测一致。(OKX deltaBS/thetaBS/vegaBS 视为已遵循此约定;
+  * BS 合成源在 [[hft.backtest.BsGreeksSource]] 内把数学约定的每年 theta、对 1.0 vega 换算到此约定。)
   */
 final case class Greeks(
     exchange: Exchange,

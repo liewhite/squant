@@ -73,6 +73,8 @@ final class OkxMarketStream(
   private def requireSymbol(instId: String): Symbol =
     fromOkx(instId).getOrElse(throw IllegalStateException(s"Unknown OKX instId: '$instId'"))
 
+  // 注意: OKX bbo-tbt 的盘口数量单位为**合约张数**，此处未转币本位 (Binance BBO 为币本位)。
+  // 当前无消费者读取 bidQty/askQty；若策略按盘口深度定 size，须先用 SymbolMeta.qtyToCoin 换算。
   private def publishBbo(instId: String, d: BboData): Unit =
     val sym = requireSymbol(instId)
     val ask = d.asks.headOption.getOrElse(throw IllegalStateException(s"OKX bbo empty asks: $instId"))

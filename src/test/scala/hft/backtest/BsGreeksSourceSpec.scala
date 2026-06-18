@@ -38,6 +38,9 @@ class BsGreeksSourceSpec extends munit.FunSuite:
     val single = BlackScholes.greeks(OptionRight.Call, 100.0, 100.0, 1.0, 0.2, 0.0)
     assert(math.abs(greeks.head.delta - 10.0 * single.delta) < 1e-6, s"delta=${greeks.head.delta}")
     assert(math.abs(greeks.head.gamma - 10.0 * single.gamma) < 1e-9)
+    // 通道规范单位换算: theta 每年->每日 (/365), vega 对 1.0->对 1% (/100)
+    assert(math.abs(greeks.head.theta - 10.0 * single.theta / 365.0) < 1e-9, s"theta=${greeks.head.theta}")
+    assert(math.abs(greeks.head.vega - 10.0 * single.vega / 100.0) < 1e-9, s"vega=${greeks.head.vega}")
 
   test("greeks 事件与触发 BBO 同 exchangeTs, 排在该 BBO 之后"):
     val src = BsGreeksSource(FixedSource(Vector(bbo(99.9, 100.1, 1234))), config(qty = 1.0, spot = 0.0))

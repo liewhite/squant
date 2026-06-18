@@ -88,6 +88,7 @@ final class OkxAccountStream(
         list.foreach { g =>
           if lastGreeksTs.getOrElse(g.ccy, -1L) != g.timestamp then
             lastGreeksTs(g.ccy) = g.timestamp
+            logger.debug(s"OKX greeks ${g.ccy}: delta=${g.delta} gamma=${g.gamma} theta=${g.theta} vega=${g.vega} ts=${g.timestamp}")
             bus.publish(IncomeEvent.at(g.timestamp, EventData.GreeksUpdate(g)))
         }
       case Left(e) =>

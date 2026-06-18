@@ -40,6 +40,10 @@ final case class BsGreeksConfig(
   *
   * 时间衰减 (theta/剩余期限) 随事件 exchangeTs 自然推进；其余事件原样透传。
   */
+object BsGreeksSource:
+  /** 与 [[hft.option.BlackScholes.MillisPerYear]] 一致的天数基准，用于 theta 每年->每日换算 */
+  val DaysPerYear: Double = 365.0
+
 final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig) extends MarketDataSource:
 
   override def events(): Iterator[IncomeEvent] =
@@ -65,18 +69,30 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
   private def shouldEmit(now: Timestamp, lastEmit: Timestamp): Boolean =
     lastEmit == Long.MinValue || now - lastEmit >= config.emitIntervalMs
 
-  /** 按持仓聚合各期权的 BS 希腊字母为账户级 Greeks (单位见 [[hft.option.BsGreeks]]) */
+  /** 按持仓聚合各期权的 BS 希腊字母为账户级 [[Greeks]]。
+    *
+    * BS 输出为数学约定 (theta 每年、vega 对 1.0 波动率)，此处换算到 Greeks **通道规范单位**
+    * (theta 每日、vega 对 1%)，使实盘 OKX 与回测喂入同一通道时单位一致。
+    */
   private def computeGreeks(s: Double, now: Timestamp): Greeks =
     var delta = 0.0
     var gamma = 0.0
-    var theta = 0.0
-    var vega = 0.0
+    var thetaPerYear = 0.0
+    var vegaPer1 = 0.0
     config.positions.foreach { pos =>
       val tYears = (pos.spec.expiry - now) / BlackScholes.MillisPerYear
       val g = BlackScholes.greeks(pos.spec.right, s, pos.spec.strike, tYears, config.impliedVol, config.riskFreeRate)
       delta += pos.quantity * g.delta
       gamma += pos.quantity * g.gamma
-      theta += pos.quantity * g.theta
-      vega += pos.quantity * g.vega
+      thetaPerYear += pos.quantity * g.theta
+      vegaPer1 += pos.quantity * g.vega
     }
-    Greeks(config.exchange, config.ccy, delta, gamma, theta, vega, now)
+    Greeks(
+      exchange = config.exchange,
+      ccy = config.ccy,
+      delta = delta,
+      gamma = gamma,
+      theta = thetaPerYear / BsGreeksSource.DaysPerYear, // 每年 -> 每日
+      vega = vegaPer1 / 100.0,                           // 对 1.0 -> 对 1%
+      timestamp = now,
+    )
