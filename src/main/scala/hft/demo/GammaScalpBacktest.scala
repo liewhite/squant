@@ -4,13 +4,12 @@ import hft.backtest.{BacktestEngine, BinanceHistory, BsGreeksConfig, BsGreeksSou
 import hft.domain.Exchange
 import hft.engine.StrategyRunner
 import hft.messaging.{EventData, IncomeEvent}
-import hft.option.{BlackScholes, OptionPosition, OptionRight, OptionSpec}
 import hft.sim.{FillRecorder, SimConfig}
 import hft.strategy.GammaScalpStrategy
 import sttp.client4.DefaultSyncBackend
 
 import java.nio.file.Path
-import java.time.{LocalDate, ZoneOffset}
+import java.time.LocalDate
 
 /** 纯 gamma scalping 回测入口 ([[GammaScalpStrategy]])。
   *
@@ -35,8 +34,8 @@ import java.time.{LocalDate, ZoneOffset}
   val ccy = "ETH"
   val impliedVol = 0.6        // 年化 IV (ETH 典型)
   val riskFreeRate = 0.0
-  val expiryDays = 30L        // 期权到期 (远于回测窗口，使 greeks 稳定、gamma 不在到期日爆炸)
-  val straddles = 10.0        // 长跨式张数 (N 个 call + N 个 put)
+  val tenorDays = 30.0        // 期权期限：临近到期滚动到新 ATM (gamma 全程存活)
+  val straddles = 10.0        // 长跨式份数 (N 个 call + N 个 put)
   val deltaBand = 0.1         // 净 delta 对称容忍带 (ETH)
   val baseOffsetRatio = 0.002  // 基础对冲间距 0.2% (PostOnly 距最新成交价)
   val takerFeeRate = 0.0005
@@ -68,18 +67,14 @@ import java.time.{LocalDate, ZoneOffset}
     .collectFirst { case IncomeEvent(_, _, EventData.MarketTradeUpdate(t)) => t.price }
     .getOrElse(sys.error(s"no market data for $symbol [$start .. $end] (数据未上架或日期无效?)"))
 
-  val expiryMs = start.plusDays(expiryDays).atStartOfDay.toInstant(ZoneOffset.UTC).toEpochMilli
-  // 长 ATM 跨式：long call + long put，近似 delta 中性、纯 gamma
-  val positions = Vector(
-    OptionPosition(OptionSpec(OptionRight.Call, atmStrike, expiryMs), straddles),
-    OptionPosition(OptionSpec(OptionRight.Put, atmStrike, expiryMs), straddles),
-  )
+  // 滚动 ATM 长跨式：临近到期滚到新 ATM，gamma 全程存活；行权价由源在首笔成交时自设为当时价
   val greeksConfig = BsGreeksConfig(
     exchange = Exchange.Binance,
     ccy = ccy,
     underlyingSymbol = symbol,
-    positions = positions,
+    straddles = straddles,
     impliedVol = impliedVol,
+    tenorDays = tenorDays,
     riskFreeRate = riskFreeRate,
     spotHolding = 0.0,        // 纯期权 + 永续对冲，无现货
     emitIntervalMs = 1000,    // 对齐实盘 OKX greeks 轮询节奏
@@ -102,7 +97,7 @@ import java.time.{LocalDate, ZoneOffset}
   recorder.open()
   // 旁路观察者: 跟踪最新标的中间价与时间，用于回测末期期权腿 MTM 估值
   var lastMid = atmStrike
-  var lastTs = expiryMs
+  var lastTs = 0L
   val priceObserver: IncomeEvent => Unit = ev =>
     ev.data match
       case EventData.MarketTradeUpdate(t) => lastMid = t.price; lastTs = t.timestamp
@@ -123,20 +118,15 @@ import java.time.{LocalDate, ZoneOffset}
     )
     val result = engine.run()
 
-    // 期权腿 MTM：完整 gamma scalp P&L = 期权腿 + 永续对冲腿。
+    // 完整 gamma scalp P&L = 期权腿 (滚动跨式: 历次滚动已实现 + 末期未实现) + 永续对冲腿。
     // 仅看对冲腿在趋势行情里会严重误导 (对冲腿亏损由期权腿盈利对冲)。
-    def optionValue(price: Double, ts: Long): Double =
-      positions.map { p =>
-        val tYears = (p.spec.expiry - ts) / BlackScholes.MillisPerYear
-        p.quantity * BlackScholes.greeks(p.spec.right, price, p.spec.strike, tYears, impliedVol, riskFreeRate).price
-      }.sum
-    val optionPnl = optionValue(lastMid, lastTs) - optionValue(atmStrike, result.firstTs)
+    val optionPnl = source.optionRealizedPnl + source.optionUnrealized(lastMid, lastTs)
     val hedgePnl = result.finalEquity - result.initialBalance // 永续对冲腿 (含未实现 + 手续费)
-    val totalPnl = hedgePnl + optionPnl // 完整: 期权腿 + 对冲腿 (含 theta, 已扣手续费)
+    val totalPnl = hedgePnl + optionPnl // 完整: 期权腿 + 对冲腿 (含 theta/滚动, 已扣手续费)
     val days = java.time.temporal.ChronoUnit.DAYS.between(start, end) + 1
     println("==================== GammaScalp Backtest Result ====================")
     println(s"symbol         : $symbol  [$start .. $end] ($days days)")
-    println(f"ATM strike     : $atmStrike%.2f  | IV=$impliedVol  straddles=$straddles  band=$deltaBand ETH")
+    println(f"期权            : 起点ATM $atmStrike%.2f | IV=$impliedVol straddles=$straddles tenor=${tenorDays}%.0fd(滚动) band=$deltaBand ETH")
     println(f"对冲间距       : ${baseOffsetRatio * 100}%.2f%% ± ${dirSkewRatio * 100}%.2f%% (MACD 方向偏移, mode=$biasMode)")
     println(f"maker fee      : ${makerFeeRate * 100}%.3f%%  (PostOnly 对冲单)")
     println(f"start/end px    : $atmStrike%.2f -> $lastMid%.2f  (${(lastMid / atmStrike - 1) * 100}%+.2f%%)")
