@@ -4,7 +4,7 @@ import hft.backtest.{BacktestEngine, BinanceHistoryDownloader, BinanceHistorySou
 import hft.domain.Exchange
 import hft.engine.StrategyRunner
 import hft.messaging.{EventData, IncomeEvent}
-import hft.option.{OptionPosition, OptionRight, OptionSpec}
+import hft.option.{BlackScholes, OptionPosition, OptionRight, OptionSpec}
 import hft.sim.{FillRecorder, SimConfig}
 import hft.strategy.GammaScalpStrategy
 import sttp.client4.DefaultSyncBackend
@@ -39,12 +39,13 @@ import java.time.{LocalDate, ZoneOffset}
   val straddles = 10.0        // 长跨式张数 (N 个 call + N 个 put)
   val deltaBand = 0.1         // 净 delta 对称容忍带 (ETH)
   val offsetRatio = 0.0002    // PostOnly 距 BBO 偏移
-  val makerFeeRate = 0.0002   // maker 手续费 0.02% (gamma scalp 的核心成本)
   val takerFeeRate = 0.0005
   val initialBalanceUsdt = 100_000.0
 
   val end = args.lift(1).map(LocalDate.parse).getOrElse(LocalDate.now().minusDays(2))
   val start = args.lift(0).map(LocalDate.parse).getOrElse(end.minusDays(6))
+  // maker 手续费率 (gamma scalp 的核心成本)，可由第 3 参覆盖以做"毛收益 vs 净收益"对照。0.0002 = 0.02%
+  val makerFeeRate = args.lift(2).map(_.toDouble).getOrElse(0.0002)
 
   val backend = DefaultSyncBackend()
   val publicClient = hft.exchange.binance.BinanceClient(backend, credentials = None)
@@ -92,6 +93,13 @@ import java.time.{LocalDate, ZoneOffset}
   val stamp = LocalDate.now().toString
   val recorder = FillRecorder(Path.of(s"backtest-fills-gammascalp-$symbol-$stamp.csv"))
   recorder.open()
+  // 旁路观察者: 跟踪最新标的中间价与时间，用于回测末期期权腿 MTM 估值
+  var lastMid = atmStrike
+  var lastTs = expiryMs
+  val priceObserver: IncomeEvent => Unit = ev =>
+    ev.data match
+      case EventData.BboUpdate(b) => lastMid = b.midPrice; lastTs = b.timestamp
+      case _                      => ()
   try
     val engine = BacktestEngine(
       exchange = Exchange.Binance,
@@ -104,21 +112,33 @@ import java.time.{LocalDate, ZoneOffset}
         makerFeeRate = makerFeeRate,
         takerFeeRate = takerFeeRate,
       ),
-      observers = Seq(recorder.onEvent),
+      observers = Seq(recorder.onEvent, priceObserver),
     )
     val result = engine.run()
+
+    // 期权腿 MTM：完整 gamma scalp P&L = 期权腿 + 永续对冲腿。
+    // 仅看对冲腿在趋势行情里会严重误导 (对冲腿亏损由期权腿盈利对冲)。
+    def optionValue(price: Double, ts: Long): Double =
+      positions.map { p =>
+        val tYears = (p.spec.expiry - ts) / BlackScholes.MillisPerYear
+        p.quantity * BlackScholes.greeks(p.spec.right, price, p.spec.strike, tYears, impliedVol, riskFreeRate).price
+      }.sum
+    val optionPnl = optionValue(lastMid, lastTs) - optionValue(atmStrike, result.firstTs)
+    val hedgePnl = result.finalEquity - result.initialBalance // 永续对冲腿 (含未实现 + 手续费)
+    val totalPnl = hedgePnl + optionPnl // 完整: 期权腿 + 对冲腿 (含 theta, 已扣手续费)
     val days = java.time.temporal.ChronoUnit.DAYS.between(start, end) + 1
-    val ret = (result.finalEquity / result.initialBalance - 1) * 100
     println("==================== GammaScalp Backtest Result ====================")
     println(s"symbol         : $symbol  [$start .. $end] ($days days)")
     println(f"ATM strike     : $atmStrike%.2f  | IV=$impliedVol  straddles=$straddles  band=$deltaBand ETH")
     println(f"maker fee      : ${makerFeeRate * 100}%.3f%%  (PostOnly 对冲单)")
+    println(f"start/end px    : $atmStrike%.2f -> $lastMid%.2f  (${(lastMid / atmStrike - 1) * 100}%+.2f%%)")
     println(s"market events  : ${result.marketEvents}")
     println(s"fills          : ${result.fills}")
-    println(f"realized PnL   : ${result.realizedPnl}%.4f USDT  (= 永续 scalp 净收益, 已扣手续费)")
-    println(f"final equity   : ${result.finalEquity}%.4f USDT  (init ${result.initialBalance}%.1f, 含未实现)")
-    println(f"total return   : $ret%.3f%%")
-    println(s"open positions : ${result.positions}")
-    println(f"cumulative realizedPnl (recorder): ${recorder.cumulativeRealizedPnl}%.4f")
+    println("-------------------- P&L 拆解 (USDT) --------------------")
+    println(f"  期权腿 MTM   : $optionPnl%+.2f   (长跨式 BS 估值变化, 含 theta)")
+    println(f"  永续对冲腿   : $hedgePnl%+.2f   (含未实现 + 手续费)")
+    println(f"  完整 gamma   : $totalPnl%+.2f   (期权腿 + 对冲腿)")
+    println("---------------------------------------------------------")
+    println(f"对冲腿 realized : ${result.realizedPnl}%.2f USDT (已扣手续费) | 末仓 ${result.positions}")
     println("====================================================================")
   finally recorder.close()
