@@ -24,19 +24,27 @@ import OkxCodec.given
   * Fail-fast：连接断开、解析失败、错误事件 (event=error) 一律抛异常终止引擎作用域。
   */
 final class OkxMarketStream(
+    client: OkxClient,
     backend: WebSocketSyncBackend,
-    quote: String = "USDT",
     wsUrl: String = OkxClient.WsPublicUrl,
 ) extends MarketDataStream:
   private val logger = LoggerFactory.getLogger(classOf[OkxMarketStream])
+
+  /** 计价币与张<->币换算的 SymbolMeta 均取自 client (instruments 为公共端点，免凭证) */
+  private val quote: String = client.quote
 
   override def exchange: Exchange = Exchange.Okx
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
   private var bus: EventBus[IncomeEvent] = scala.compiletime.uninitialized
+  /** symbol -> meta，用于把盘口数量从合约张数换算为币本位 (start 时一次性拉取) */
+  private var metas: Map[Symbol, SymbolMeta] = Map.empty
 
   override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit =
     bus = incomeBus
+    metas = client.fetchAllSymbolMetas() match
+      case Right(ms) => ms.map(m => m.symbol -> m).toMap
+      case Left(e)   => throw IllegalStateException(s"OKX fetch symbol metas failed: ${e.message}")
     WsLoop.run("okx/public", backend, () => wsUrl, outgoing, onPublicText)
 
   override def subscribe(kinds: Set[SubscriptionKind]): Unit =
@@ -73,14 +81,22 @@ final class OkxMarketStream(
   private def requireSymbol(instId: String): Symbol =
     fromOkx(instId).getOrElse(throw IllegalStateException(s"Unknown OKX instId: '$instId'"))
 
-  // 注意: OKX bbo-tbt 的盘口数量单位为**合约张数**，此处未转币本位 (Binance BBO 为币本位)。
-  // 当前无消费者读取 bidQty/askQty；若策略按盘口深度定 size，须先用 SymbolMeta.qtyToCoin 换算。
+  // OKX bbo-tbt 盘口数量单位为合约张数，统一换算为币本位 (策略层永远看币本位，与 Binance BBO 一致)
   private def publishBbo(instId: String, d: BboData): Unit =
     val sym = requireSymbol(instId)
+    val meta = metas.getOrElse(sym, throw IllegalStateException(s"No SymbolMeta for OKX bbo symbol: $sym"))
     val ask = d.asks.headOption.getOrElse(throw IllegalStateException(s"OKX bbo empty asks: $instId"))
     val bid = d.bids.headOption.getOrElse(throw IllegalStateException(s"OKX bbo empty bids: $instId"))
     val ts = d.ts.toLong
-    val bbo = BBO(Exchange.Okx, sym, bid.head.asDouble, bid(1).asDouble, ask.head.asDouble, ask(1).asDouble, ts)
+    val bbo = BBO(
+      exchange = Exchange.Okx,
+      symbol = sym,
+      bidPrice = bid.head.asDouble,
+      bidQty = meta.qtyToCoin(bid(1).asDouble),
+      askPrice = ask.head.asDouble,
+      askQty = meta.qtyToCoin(ask(1).asDouble),
+      timestamp = ts,
+    )
     bus.publish(IncomeEvent.at(ts, EventData.BboUpdate(bbo)))
 
   private def publishMark(d: MarkPriceData): Unit =
