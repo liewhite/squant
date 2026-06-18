@@ -54,6 +54,7 @@ final class KlineSeries(
       case None =>
         cur = Some(Candle(bucket * periodMs, price, price, price, price, qty, closed = false))
       case Some(c) =>
+        // 跨多个空缺周期 (成交稀疏) 只收盘上一根、不补空 bar：指标按"有成交的 bar"推进 (常见做法)
         if bucket > c.openTime / periodMs then
           freeze(c.close)                 // 固定上一根 bar 的指标基线
           completed += c.copy(closed = true)
@@ -68,7 +69,12 @@ final class KlineSeries(
           ))
     recomputeDynamic()
 
-  /** 收盘一根 bar：推进冻结 EMA 基线 (首根播种) */
+  /** 收盘一根 bar：推进冻结 EMA 基线 (首根播种)。
+    *
+    * 注意 fEmaFast/fEmaSlow **先更新再相减**，故 `fEmaFast - fEmaSlow` 即该根收盘后的 MACD，
+    * 与 [[recomputeDynamic]] 在同一收盘价下算出的 dMacd 完全相同 —— 这保证盘中动态 histogram
+    * 在收盘价处等于冻结后的 histogram (KlineSeriesSpec 有对照参考实现的回归断言)。
+    */
   private def freeze(close: Double): Unit =
     if closedCount == 0 then
       fEmaFast = close

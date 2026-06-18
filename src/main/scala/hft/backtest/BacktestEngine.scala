@@ -21,28 +21,6 @@ final case class BacktestResult(
     lastTs: Timestamp,
 )
 
-object BacktestEngine:
-  /** 用 Binance 历史数据装配回测引擎 —— 回测层统一负责原始数据的**下载/缓存/组装**。
-    *
-    * 默认 trade-native：行情只用真实 trades，撮合走 [[hft.sim.SimState.matchTrade]] (真实成交价
-    * 严格越价)，**不合成任何盘口**。仅当策略写死依赖 BBO、而行情无 L1 时把 `synthesizeBbo` 置 true，
-    * 用 [[TradePrintBboSource]] 把 trade 替换为零价差 BBO (合成近似，会高估 maker 成交)。
-    */
-  def binance(
-      backend: sttp.client4.SyncBackend,
-      symbols: Seq[Symbol],
-      start: java.time.LocalDate,
-      end: java.time.LocalDate,
-      runners: Seq[StrategyRunner],
-      config: SimConfig = SimConfig(),
-      observers: Seq[IncomeEvent => Unit] = Nil,
-      synthesizeBbo: Boolean = false,
-      clockIntervalMs: Long = 1000,
-      cacheDir: String = "data-cache",
-  ): BacktestEngine =
-    val source = BinanceHistory.source(backend, symbols, start, end, synthesizeBbo, cacheDir)
-    BacktestEngine(Exchange.Binance, source, runners, config, observers, clockIntervalMs)
-
 /** 虚拟时间回测引擎 —— 单线程、确定性。
   *
   * 与实盘/模拟盘共享**全部领域逻辑**：撮合用纯状态机 [[SimState]] (沿用 BBO 越价撮合)、

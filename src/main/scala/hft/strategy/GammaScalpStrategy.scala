@@ -94,8 +94,9 @@ final class GammaScalpStrategy(
     */
   private def desiredHedge(refPrice: Price, netDelta: Double): Option[(Side, Quantity, Price)] =
     val dir = klines.macdDirection
-    val sellOffset = baseOffsetRatio + dir * dirSkewRatio
-    val buyOffset = baseOffsetRatio - dir * dirSkewRatio
+    // 偏移下限 0：dirSkewRatio > baseOffsetRatio 时不致挂到价格另一侧而立即 would-take
+    val sellOffset = math.max(0.0, baseOffsetRatio + dir * dirSkewRatio)
+    val buyOffset = math.max(0.0, baseOffsetRatio - dir * dirSkewRatio)
     if netDelta > deltaBand then Some((Side.Short, netDelta, refPrice * (1 + sellOffset)))
     else if netDelta < -deltaBand then Some((Side.Long, -netDelta, refPrice * (1 - buyOffset)))
     else None

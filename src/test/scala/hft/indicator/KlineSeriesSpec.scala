@@ -49,3 +49,25 @@ class KlineSeriesSpec extends munit.FunSuite:
     (0 until 80).foreach(h => down.update(h.toLong * hour, 1000.0 - h * 1.0))
     assertEquals(down.macdDirection, -1)
     assert(down.macdHistogram < 0)
+
+  test("盘中动态 MACD = 把(已收盘+盘中)收盘价整列跑 EMA 的参考实现 (freeze/dynamic 一致)"):
+    // 每根一笔 -> 第 i 根收盘价=closes(i)，最后一根为盘中
+    val closes = (0 until 40).map(i => 100.0 + math.sin(i * 0.37) * 8 + i * 0.1)
+    val k = KlineSeries(hour, maxBars = 200)
+    closes.zipWithIndex.foreach((c, i) => k.update(i.toLong * hour, c))
+
+    // 参考：与 KlineSeries 完全相同的 EMA 递推 (首根播种, signal@首根=0)，整列含盘中根
+    var ef = 0.0; var es = 0.0; var esig = 0.0
+    closes.zipWithIndex.foreach { (c, i) =>
+      if i == 0 then { ef = c; es = c; esig = 0.0 }
+      else
+        val k2 = 2.0 / (12 + 1); ef = c * k2 + ef * (1 - k2)
+        val k3 = 2.0 / (26 + 1); es = c * k3 + es * (1 - k3)
+        val macd = ef - es
+        val k4 = 2.0 / (9 + 1); esig = macd * k4 + esig * (1 - k4)
+    }
+    val refLine = ef - es
+    val refHist = refLine - esig
+    assert(math.abs(k.macdLine - refLine) < 1e-9, s"line ${k.macdLine} vs $refLine")
+    assert(math.abs(k.macdSignalLine - esig) < 1e-9, s"signal ${k.macdSignalLine} vs $esig")
+    assert(math.abs(k.macdHistogram - refHist) < 1e-9, s"hist ${k.macdHistogram} vs $refHist")
