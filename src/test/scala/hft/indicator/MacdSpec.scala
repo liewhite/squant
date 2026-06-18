@@ -51,3 +51,26 @@ class MacdSpec extends munit.FunSuite:
     assert(k.macdHistSeries.falling(2), s"hist tail=${k.macdHistSeries.recent(4)}")
     // 已收盘历史不含盘中根 (跨桶次数 - 1)
     assertEquals(k.macdHistSeries.size, closes.size - 1)
+
+  test("histBias = 颜色(符号) × 趋势(连续升降) 的分级 {-2..2}"):
+    val k = series
+    val closes = (0 until 60).map(i => 100.0 + math.sin(i / 7.0) * 10 + i * 0.2)
+    closes.zipWithIndex.foreach((c, i) => k.update(i.toLong * hour, c))
+    // 与按 颜色×趋势 手算的预期一致 (验证分级映射接线)
+    val color = math.signum(k.macdHistogram).toInt
+    val expected =
+      if color > 0 then (if k.macdHistSeries.rising(2) then 2 else 1)
+      else if color < 0 then (if k.macdHistSeries.falling(2) then -2 else -1)
+      else 0
+    assertEquals(k.histBias(2), expected)
+
+  test("histBias 预热不足 -> 0; 加速上涨 (水上且连升) -> 最激进 +2"):
+    val cold = series
+    (0 until 30).foreach(h => cold.update(h.toLong * hour, 100.0 + h))
+    assertEquals(cold.histBias(2), 0) // < slow+signal 根已收盘
+
+    val accel = series
+    // 加速上行：柱持续为正且连续走高 -> +2
+    (0 until 80).foreach(h => accel.update(h.toLong * hour, 100.0 + h.toDouble * h * 0.05))
+    assert(accel.macdHistogram > 0, s"hist=${accel.macdHistogram}")
+    assertEquals(accel.histBias(2), 2)

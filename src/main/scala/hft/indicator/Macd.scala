@@ -73,6 +73,17 @@ trait Macd extends KlineSeries:
     else if dHist < 0 then -1
     else 0
 
+  /** 柱的方向强度 = **颜色 (符号) × 趋势 (连续升/降)** -> {-2,-1,0,1,2}：
+    *   - 水上 (柱>0) 且连续上升 = +2 (最强多)，水上但回落 = +1；
+    *   - 水下 (柱<0) 且连续下降 = -2 (最强空)，水下但反弹 = -1；
+    *   - 持平/预热不足 = 0。
+    * 颜色取当前 (含盘中) 柱，趋势取最近 [[trendBars]] 根**已收盘**柱 (确认值)。 */
+  def histBias(trendBars: Int): Int =
+    if closedCount < macdSlow + macdSignalPeriod then 0
+    else if dHist > 0 then (if histHistory.rising(trendBars) then 2 else 1)
+    else if dHist < 0 then (if histHistory.falling(trendBars) then -2 else -1)
+    else 0
+
 object Macd:
   private def ema(prev: Double, x: Double, period: Int): Double =
     val k = 2.0 / (period + 1)

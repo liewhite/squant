@@ -47,6 +47,8 @@ final class GammaScalpStrategy(
     /** K 线周期 (由逐笔 trade 聚合)，用于 MACD 方向偏移；默认 1 小时 */
     barIntervalMs: Long = 3_600_000,
     maxBars: Int = 200,
+    /** "连续上升/下降"判定的周期数 (MACD 柱趋势)；颜色与趋势同向时偏移最激进 (强度 ±2) */
+    macdTrendBars: Int = 2,
 ) extends Strategy:
 
   /** 已发出撤单、尚未确认移除的订单，防止重复撤单 */
@@ -86,14 +88,15 @@ final class GammaScalpStrategy(
 
   /** 越带的目标对冲：把净 delta 拉回中性。偏多 -> 最新价上方挂卖；偏空 -> 最新价下方挂买。
     *
-    * 对冲间距按 K 线 MACD 方向偏移：顺势侧挂更远、逆势侧挂更近。
-    * dir=+1(看多): 卖间距 base+skew (更远)、买间距 base-skew (更近)；dir=-1(看空) 镜像。
+    * 对冲间距按 MACD 柱的**颜色×趋势**分级偏移 ([[Macd.histBias]] ∈ {-2..2})：顺势侧挂更远、
+    * 逆势侧挂更近，**水上且连续上升 (或水下且连续下降) 最激进** (强度 2 = 偏移 2×dirSkewRatio)。
+    * bias>0: 卖间距 base+bias·skew (更远)、买间距 base-bias·skew (更近)；bias<0 镜像。
     */
   private def desiredHedge(refPrice: Price, netDelta: Double): Option[(Side, Quantity, Price)] =
-    val dir = klines.macdDirection
-    // 偏移下限 0：dirSkewRatio > baseOffsetRatio 时不致挂到价格另一侧而立即 would-take
-    val sellOffset = math.max(0.0, baseOffsetRatio + dir * dirSkewRatio)
-    val buyOffset = math.max(0.0, baseOffsetRatio - dir * dirSkewRatio)
+    val bias = klines.histBias(macdTrendBars)
+    // 偏移下限 0：bias·dirSkewRatio 过大时不致挂到价格另一侧而立即 would-take
+    val sellOffset = math.max(0.0, baseOffsetRatio + bias * dirSkewRatio)
+    val buyOffset = math.max(0.0, baseOffsetRatio - bias * dirSkewRatio)
     if netDelta > deltaBand then Some((Side.Short, netDelta, refPrice * (1 + sellOffset)))
     else if netDelta < -deltaBand then Some((Side.Long, -netDelta, refPrice * (1 - buyOffset)))
     else None
@@ -137,7 +140,7 @@ final class GammaScalpStrategy(
                   clientOrderId = "",
                 )
               ),
-              f"gamma_hedge | $side%s netDelta=$netDelta%.4f qty=$qty%.4f px=$price%.4f dir=${klines.macdDirection}",
+              f"gamma_hedge | $side%s netDelta=$netDelta%.4f qty=$qty%.4f px=$price%.4f bias=${klines.histBias(macdTrendBars)}",
             )
           )
 
