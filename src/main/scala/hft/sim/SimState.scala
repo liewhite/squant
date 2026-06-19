@@ -16,6 +16,7 @@ final case class RestingOrder(
     side: Side,
     limitPrice: Price,
     quantity: Quantity,
+    reduceOnly: Boolean,
 )
 
 /** 虚拟柜台的全部状态 (账本 + 挂单簿 + 最新行情)，不可变。
@@ -67,7 +68,7 @@ final case class SimState(
     crossed.foldLeft((this, Vector.empty[IncomeEvent])) { case ((st, evs), o) =>
       val (next, fillEvs) = st
         .copy(resting = st.resting - o.orderId)
-        .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, bbo.timestamp, Liquidity.Maker)
+        .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, bbo.timestamp, Liquidity.Maker, o.reduceOnly)
       (next, evs ++ fillEvs)
     }
 
@@ -77,7 +78,7 @@ final case class SimState(
     crossed.foldLeft((this, Vector.empty[IncomeEvent])) { case ((st, evs), o) =>
       val (next, fillEvs) = st
         .copy(resting = st.resting - o.orderId)
-        .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, t.timestamp, Liquidity.Maker)
+        .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, t.timestamp, Liquidity.Maker, o.reduceOnly)
       (next, evs ++ fillEvs)
     }
 
@@ -91,7 +92,7 @@ final case class SimState(
       case OrderType.Market =>
         bboOpt match
           case Some(bbo) =>
-            fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, Matcher.touchPrice(order.side, bbo), order.quantity, ts, Liquidity.Taker)
+            fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, Matcher.touchPrice(order.side, bbo), order.quantity, ts, Liquidity.Taker, order.reduceOnly)
           case None =>
             (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected("no market data for market order"), 0.0, ts)))
       case OrderType.Limit(limit, tif) =>
@@ -99,7 +100,7 @@ final case class SimState(
         // (Matcher.crosses) 二者自洽；价与可成交性同源, 无需 .get
         val takerPrice: Option[Price] =
           bboOpt.filter(Matcher.crosses(order.side, limit, _)).map(Matcher.touchPrice(order.side, _))
-        def takerFill(price: Price) = fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, price, order.quantity, ts, Liquidity.Taker)
+        def takerFill(price: Price) = fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, price, order.quantity, ts, Liquidity.Taker, order.reduceOnly)
         tif match
           case TimeInForce.PostOnly =>
             takerPrice match
@@ -131,9 +132,13 @@ final case class SimState(
   // ==================== 私有构造 ====================
 
   private def rest(exchange: Exchange, order: Order, orderId: OrderId, limit: Price, ts: Timestamp): (SimState, Vector[IncomeEvent]) =
-    val ro = RestingOrder(orderId, order.clientOrderId, order.symbol, order.side, limit, order.quantity)
+    val ro = RestingOrder(orderId, order.clientOrderId, order.symbol, order.side, limit, order.quantity, order.reduceOnly)
     (copy(resting = resting.updated(orderId, ro)), Vector(statusEvent(exchange, order, orderId, OrderStatus.Pending, limit, ts)))
 
+  /** 成交落账。reduceOnly 单按当前持仓截断 (卖只平多、买只平空)：撮合层强制不反向开仓，
+    * 与真实交易所一致——故策略对 reduceOnly 的"只减不增"可信赖，不必自行截断 qty (但仍可截断以省单)。
+    * 无可平仓位时不成交，回 Cancelled。
+    */
   private def fill(
       exchange: Exchange,
       orderId: OrderId,
@@ -144,15 +149,28 @@ final case class SimState(
       qty: Quantity,
       ts: Timestamp,
       liquidity: Liquidity,
+      reduceOnly: Boolean,
   ): (SimState, Vector[IncomeEvent]) =
-    val feeRate = liquidity match
-      case Liquidity.Maker => makerFeeRate
-      case Liquidity.Taker => takerFeeRate
-    val fee = fillPrice * qty * feeRate
-    val next = copy(ledger = ledger.applyFill(exchange, symbol, side, fillPrice, qty, fee))
-    val update = OrderUpdate(orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, qty, qty, qty, ts)
-    val f = Fill(exchange, symbol, side, fillPrice, qty, ts)
-    (next, Vector(IncomeEvent.at(ts, EventData.OrderUpdated(update)), IncomeEvent.at(ts, EventData.FillUpdate(f))))
+    val effectiveQty =
+      if !reduceOnly then qty
+      else
+        val posSize = ledger.positions.get(symbol).map(_.size).getOrElse(0.0)
+        side match
+          case Side.Short => math.min(qty, math.max(0.0, posSize))  // 卖平多: 至多平掉现有多头
+          case Side.Long  => math.min(qty, math.max(0.0, -posSize)) // 买平空: 至多平掉现有空头
+    if reduceOnly && effectiveQty <= Position.Epsilon then
+      // reduceOnly 无可平仓位 -> 不成交，回 Cancelled (订单已被调用方移出簿 / 不入簿)
+      val update = OrderUpdate(orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Cancelled, fillPrice, qty, 0.0, 0.0, ts)
+      (this, Vector(IncomeEvent.at(ts, EventData.OrderUpdated(update))))
+    else
+      val feeRate = liquidity match
+        case Liquidity.Maker => makerFeeRate
+        case Liquidity.Taker => takerFeeRate
+      val fee = fillPrice * effectiveQty * feeRate
+      val next = copy(ledger = ledger.applyFill(exchange, symbol, side, fillPrice, effectiveQty, fee))
+      val update = OrderUpdate(orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, effectiveQty, ts)
+      val f = Fill(exchange, symbol, side, fillPrice, effectiveQty, ts)
+      (next, Vector(IncomeEvent.at(ts, EventData.OrderUpdated(update)), IncomeEvent.at(ts, EventData.FillUpdate(f))))
 
   private def statusEvent(exchange: Exchange, order: Order, orderId: OrderId, status: OrderStatus, price: Price, ts: Timestamp): IncomeEvent =
     IncomeEvent.at(

@@ -13,6 +13,8 @@ class SimStateSpec extends munit.FunSuite:
   private def marketEv(b: BBO): IncomeEvent = IncomeEvent.at(b.timestamp, EventData.BboUpdate(b))
   private def limit(side: Side, price: Price, tif: TimeInForce, cid: String): Order =
     Order("", ex, sym, side, OrderType.Limit(price, tif), 0.002, reduceOnly = false, clientOrderId = cid)
+  private def limitRO(side: Side, price: Price, tif: TimeInForce, cid: String, qty: Quantity): Order =
+    Order("", ex, sym, side, OrderType.Limit(price, tif), qty, reduceOnly = true, clientOrderId = cid)
 
   private def statuses(evs: Vector[IncomeEvent]): Vector[OrderStatus] =
     evs.collect { case IncomeEvent(_, _, EventData.OrderUpdated(u)) => u.status }
@@ -72,3 +74,19 @@ class SimStateSpec extends munit.FunSuite:
     val (s2, evs) = empty.onCancelArrived(ex, "404")
     assert(evs.isEmpty)
     assertEquals(s2, empty)
+
+  test("reduceOnly 卖单无多头持仓 -> 不成交并回 Cancelled (撮合层禁止反向开仓)"):
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)))
+    val (s2, _) = s1.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "s1", 0.002), "1") // 上方 resting
+    val (s3, evs) = s2.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2))) // bid 50011 >= 50010 -> 越价
+    assert(fills(evs).isEmpty, "无多头可平, 不应成交")
+    assert(statuses(evs).contains(OrderStatus.Cancelled), "reduceOnly 无可平 -> Cancelled")
+    assert(s3.ledger.positions.get(sym).forall(_.isEmpty), "不得反向开出空头")
+
+  test("reduceOnly 卖单数量超过多头 -> 截断到持仓, 不反手"):
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)))
+    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 50005, TimeInForce.GTC, "b1"), "1") // taker 开多 0.002
+    val (s3, _) = s2.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "s1", 0.005), "2") // 平仓单量 0.005 > 持仓
+    val (s4, evs) = s3.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2)))
+    assertEquals(fills(evs).map(_.size), Vector(0.002)) // 截断到多头 0.002
+    assertEquals(s4.ledger.positions(sym).size, 0.0) // 平至 0, 不反手为 -0.003
