@@ -6,6 +6,7 @@ import java.util.UUID
 enum Exchange:
   case Binance
   case Okx
+  case Bybit
 
   /** 生成交易所合法的 client_order_id */
   def newClientOrderId: String =
@@ -13,6 +14,7 @@ enum Exchange:
     this match
       case Binance => s"0x$hex" // 34 字符, Binance 上限 36
       case Okx     => hex // 32 字符纯字母数字, OKX clOrdId 上限 32
+      case Bybit   => hex // 32 字符, Bybit orderLinkId 上限 36
 
 /** 交易方向 */
 enum Side:
