@@ -56,5 +56,17 @@ class BinanceCsvSpec extends munit.FunSuite:
       case EventData.MarketTradeUpdate(t) => assertEquals(t.isBuyerMaker, false)
       case other                          => fail(s"expected MarketTradeUpdate, got $other")
 
+  test("streamTrades 流式解析 = parseTrades (同序同值) + 跳表头"):
+    val csv =
+      """id,price,qty,quote_qty,time,is_buyer_maker
+        |1,100.5,0.5,50.25,1700000000002,true
+        |2,100.6,0.3,30.18,1700000000003,false
+        |3,100.7,0.2,20.14,1700000000004,true""".stripMargin
+    val bytes = zipOf("x.csv", csv)
+    val streamed = BinanceCsv.streamTrades("BTCUSDT", bytes).toVector
+    assertEquals(streamed, BinanceCsv.parseTrades("BTCUSDT", bytes)) // 流式与物化逐事件一致
+    assertEquals(streamed.size, 3)
+
   test("空 zip / 空内容 -> 空结果"):
     assertEquals(BinanceCsv.parseBookTicker("BTCUSDT", zipOf("x.csv", "")).size, 0)
+    assertEquals(BinanceCsv.streamTrades("BTCUSDT", zipOf("x.csv", "")).toVector.size, 0)
