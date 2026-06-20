@@ -30,6 +30,18 @@ final class RingSeries(val maxLen: Int):
   /** 最近 n 个值，最旧 -> 最新 */
   def recent(n: Int): collection.Seq[Double] = buf.takeRight(n)
 
+  /** 最近 n 个值是否都满足 pred (需至少 n 个值, 否则 false)；不分配中间集合。
+    * 等价 `recent(n).sizeIs >= n && recent(n).forall(pred)`, 供逐笔热路径避免 takeRight 分配。 */
+  def lastAll(n: Int)(pred: Double => Boolean): Boolean =
+    if n < 1 || buf.size < n then false
+    else
+      var i = buf.size - n
+      var ok = true
+      while ok && i < buf.size do
+        ok = pred(buf(i))
+        i += 1
+      ok
+
   /** 最近 n 步是否**严格递减** (需 >= n+1 个值)：v[t] < v[t-1] 连续 n 次。
     * 例：`falling(2)` = 连续 2 个周期递减 (最近 3 个值严格下行)。 */
   def falling(n: Int): Boolean = monotone(n)(_ < _)

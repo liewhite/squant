@@ -33,7 +33,8 @@ object BinanceCsv:
   def streamTrades(symbol: Symbol, zipBytes: Array[Byte]): Iterator[IncomeEvent] =
     streamRows(zipBytes)(tradeRow(symbol))
 
-  private def bookTickerRow(symbol: Symbol)(f: Array[String]): IncomeEvent =
+  private def bookTickerRow(symbol: Symbol)(line: String): IncomeEvent =
+    val f = line.split(",")
     val bbo = BBO(
       exchange = Exchange.Binance,
       symbol = symbol,
@@ -47,22 +48,29 @@ object BinanceCsv:
     // (延迟由回测引擎建模，源数据无网络延迟) 又保证回测确定性。
     historical(bbo.timestamp, EventData.BboUpdate(bbo))
 
-  private def tradeRow(symbol: Symbol)(f: Array[String]): IncomeEvent =
+  /** trades 是回测热路径 (单 symbol 月级达数千万行)，故单趟切片只取所需列、不物化整行 split 数组。
+    * 列: id(0),price(1),qty(2),quote_qty(3),time(4),is_buyer_maker(5)；切片子串与 split 完全一致, 解析值逐位相同。 */
+  private def tradeRow(symbol: Symbol)(line: String): IncomeEvent =
+    val c0 = line.indexOf(',')
+    val c1 = line.indexOf(',', c0 + 1)
+    val c2 = line.indexOf(',', c1 + 1)
+    val c3 = line.indexOf(',', c2 + 1)
+    val c4 = line.indexOf(',', c3 + 1) // time 之后即末列 is_buyer_maker, 无尾逗号
     val trade = MarketTrade(
       exchange = Exchange.Binance,
       symbol = symbol,
-      price = f(1).toDouble,
-      qty = f(2).toDouble,
-      isBuyerMaker = f(5).trim.equalsIgnoreCase("true"),
-      timestamp = f(4).toLong,
+      price = line.substring(c0 + 1, c1).toDouble,
+      qty = line.substring(c1 + 1, c2).toDouble,
+      isBuyerMaker = line.substring(c4 + 1).trim.equalsIgnoreCase("true"),
+      timestamp = line.substring(c3 + 1, c4).toLong,
     )
     historical(trade.timestamp, EventData.MarketTradeUpdate(trade))
 
   /** 历史事件构造：localTs == exchangeTs (见上)。 */
   private def historical(ts: Long, data: EventData): IncomeEvent = IncomeEvent(ts, ts, data)
 
-  /** 解压 zip 内单一 CSV，逐行切分为字段并映射；自动跳过表头行 (首字段非数字)。 */
-  private def mapRows(zipBytes: Array[Byte])(f: Array[String] => IncomeEvent): Vector[IncomeEvent] =
+  /** 解压 zip 内单一 CSV，逐行映射 (行解析器自行切字段)；自动跳过表头行 (首字段非数字)。 */
+  private def mapRows(zipBytes: Array[Byte])(f: String => IncomeEvent): Vector[IncomeEvent] =
     val zis = ZipInputStream(ByteArrayInputStream(zipBytes))
     try
       if zis.getNextEntry == null then Vector.empty
@@ -71,13 +79,13 @@ object BinanceCsv:
         val out = ArrayBuffer.empty[IncomeEvent]
         var line = reader.readLine()
         while line != null do
-          if line.nonEmpty && isDataRow(line) then out += f(line.split(","))
+          if line.nonEmpty && isDataRow(line) then out += f(line)
           line = reader.readLine()
         out.toVector
     finally zis.close()
 
   /** 解压 zip 内单一 CSV 并**惰性**逐行映射；读尽时关闭底层流 (见 [[streamTrades]] 的提前弃用说明)。 */
-  private def streamRows(zipBytes: Array[Byte])(f: Array[String] => IncomeEvent): Iterator[IncomeEvent] =
+  private def streamRows(zipBytes: Array[Byte])(f: String => IncomeEvent): Iterator[IncomeEvent] =
     val zis = ZipInputStream(ByteArrayInputStream(zipBytes))
     if zis.getNextEntry == null then
       zis.close()
@@ -95,7 +103,7 @@ object BinanceCsv:
         def hasNext: Boolean = pending != null
         def next(): IncomeEvent =
           if pending == null then throw java.util.NoSuchElementException("streamRows exhausted")
-          val ev = f(pending.split(","))
+          val ev = f(pending)
           pending = advance()
           ev
 

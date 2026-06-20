@@ -106,6 +106,8 @@ final class MaMacdGridStrategy(
       case Some(ss) =>
         // 清理已确认消失 (成交/撤成) 的撤单追踪
         cancelling.filterInPlace(id => ss.pendingOrders.exists(_.order.id == id))
+        // 逐笔直接读指标 (盘中量恒为最新)；收盘衍生量 (sma/atr/macd 柱历史) 已在各指标内部于收盘时
+        // 算定为 O(1) 读取、水上/水下判据用 RingSeries.lastAll 免分配 —— 无策略侧缓存, 无陈旧风险。
         klines.sma match
           case None => Vector.empty // 均线未预热 -> 不动作
           case Some(ma) =>
@@ -115,9 +117,8 @@ final class MaMacdGridStrategy(
             val rising = klines.macdHistSeries.rising(risingBars) // 续势 (加仓用)
             val falling = klines.macdHistSeries.falling(risingBars)
             // 双确认离场判据: 柱连续 waterBars 根在水下/水上 (用已收盘柱, 钝化, 抗趋势中段假信号)
-            val recentHist = klines.macdHistSeries.recent(waterBars)
-            val belowWater = recentHist.sizeIs >= waterBars && recentHist.forall(_ < 0)
-            val aboveWater = recentHist.sizeIs >= waterBars && recentHist.forall(_ > 0)
+            val belowWater = klines.macdHistSeries.lastAll(waterBars)(_ < 0)
+            val aboveWater = klines.macdHistSeries.lastAll(waterBars)(_ > 0)
             // 方案2: 价偏离均线超过 atrStretchN×ATR -> 拉伸过度。该方向"锁盈离场(移动止盈) + 停止加仓"。
             val overstretched =
               atrStretchN > 0.0 && klines.atr.exists(a => a > 0.0 && math.abs(price - ma) / a >= atrStretchN)
@@ -157,13 +158,18 @@ final class MaMacdGridStrategy(
                   (Side.Long, price * (1 - sp), closeQty(-pos), true, reversed && trailingExit)
                 }
 
-            // 现有 pending 按 slot 归类 (每 slot 至多一张：只在缺失时补挂)
-            val present: Map[Slot, PendingOrder] =
-              ss.pendingOrders.groupBy(p => slotOf(p.order)).view.mapValues(_.head).toMap
+            // 现有 pending 按 slot 归类 (每 slot 至多一张：只在缺失时补挂)。
+            // 单趟扫描填入按 Slot.ordinal 索引的定长数组, 保留每槽首张 (与 groupBy+head 同义),
+            // 避免逐笔 groupBy/Map 分配。
+            val present = new Array[PendingOrder](Slot.values.length) // 引用数组, 默认 null
+            ss.pendingOrders.foreach { p =>
+              val i = slotOf(p.order).ordinal
+              if present(i) == null then present(i) = p
+            }
 
             val actions = mutable.ArrayBuffer.empty[OutcomeEvent]
             Slot.values.foreach { slot =>
-              (spec(slot), present.get(slot)) match
+              (spec(slot), Option(present(slot.ordinal))) match
                 // 期望且缺失 -> 按当前价补挂 (网格重锚 / 移动止盈重挂)
                 case (Some((side, px, qty, ro, _)), None) if qty > 0.0 =>
                   actions += OutcomeEvent.PlaceOrders(

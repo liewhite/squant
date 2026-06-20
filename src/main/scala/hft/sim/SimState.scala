@@ -3,6 +3,8 @@ package hft.sim
 import hft.domain.*
 import hft.messaging.{EventData, IncomeEvent}
 
+import scala.collection.mutable
+
 /** 成交的流动性角色：maker (resting 单被越价成交) / taker (到达即吃单成交)，决定手续费率 */
 enum Liquidity:
   case Maker
@@ -76,30 +78,38 @@ final case class SimState(
         (next, ev +: fills)
       case _ => (this, Vector(ev))
 
-  /** 多张挂单同刻越价时的成交顺序：价格-时间优先 (更激进者先成交, 同价按到达序 FIFO)，
-    * 而非 HashMap 哈希序——影响多张 reduceOnly 竞争同一持仓时的成交分配。 */
-  private def matchOrder(crossed: Iterable[RestingOrder]): Vector[RestingOrder] =
-    crossed.toVector.sortBy(o => (o.pricePriority, o.seq))
+  /** 收集越价挂单, 按 (价格, 到达序) 优先级排序 (更激进者先成交, 同价 FIFO)，杜绝 HashMap 哈希序。
+    * 单趟扫描 valuesIterator；无匹配 (绝大多数行情) 零分配快速返回；单张免排序。 */
+  private def crossingOrders(pred: RestingOrder => Boolean): Vector[RestingOrder] =
+    var buf: mutable.ArrayBuffer[RestingOrder] = null
+    val it = resting.valuesIterator
+    while it.hasNext do
+      val o = it.next()
+      if pred(o) then
+        if buf == null then buf = mutable.ArrayBuffer.empty
+        buf += o
+    if buf == null then Vector.empty
+    else if buf.length == 1 then Vector(buf.head)
+    else buf.sortInPlaceBy(o => (o.pricePriority, o.seq)).toVector
+
+  /** 把按优先级排好序的越价挂单依次成交 (maker 成交价取挂单价)。 */
+  private def fillCrossed(exchange: Exchange, crossed: Vector[RestingOrder], now: Timestamp): (SimState, Vector[IncomeEvent]) =
+    if crossed.isEmpty then (this, Vector.empty)
+    else
+      crossed.foldLeft((this, Vector.empty[IncomeEvent])) { case ((st, evs), o) =>
+        val (next, fillEvs) = st
+          .copy(resting = st.resting - o.orderId)
+          .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, now, Liquidity.Maker, o.reduceOnly)
+        (next, evs ++ fillEvs)
+      }
 
   /** BBO 越过挂单价的全部挂单成交 (maker 成交价取挂单价) */
   private def matchCrossing(exchange: Exchange, bbo: BBO, now: Timestamp): (SimState, Vector[IncomeEvent]) =
-    val crossed = matchOrder(resting.values.filter(o => o.symbol == bbo.symbol && Matcher.crosses(o.side, o.limitPrice, bbo)))
-    crossed.foldLeft((this, Vector.empty[IncomeEvent])) { case ((st, evs), o) =>
-      val (next, fillEvs) = st
-        .copy(resting = st.resting - o.orderId)
-        .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, now, Liquidity.Maker, o.reduceOnly)
-      (next, evs ++ fillEvs)
-    }
+    fillCrossed(exchange, crossingOrders(o => o.symbol == bbo.symbol && Matcher.crosses(o.side, o.limitPrice, bbo)), now)
 
   /** 真实成交严格越过挂单价的全部挂单成交 (maker 成交价取挂单价) */
   private def matchTrade(exchange: Exchange, t: MarketTrade, now: Timestamp): (SimState, Vector[IncomeEvent]) =
-    val crossed = matchOrder(resting.values.filter(o => o.symbol == t.symbol && Matcher.tradeCrosses(o.side, o.limitPrice, t.price)))
-    crossed.foldLeft((this, Vector.empty[IncomeEvent])) { case ((st, evs), o) =>
-      val (next, fillEvs) = st
-        .copy(resting = st.resting - o.orderId)
-        .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, now, Liquidity.Maker, o.reduceOnly)
-      (next, evs ++ fillEvs)
-    }
+    fillCrossed(exchange, crossingOrders(o => o.symbol == t.symbol && Matcher.tradeCrosses(o.side, o.limitPrice, t.price)), now)
 
   // ==================== 下单到达撮合 ====================
 

@@ -59,8 +59,14 @@ final class BacktestEngine(
 
   private final case class Scheduled(time: Timestamp, seq: Long, action: Action)
 
-  // 最小堆：先按时间、同刻按 seq (入队序) -> 完全确定
-  private given Ordering[Scheduled] = Ordering.by[Scheduled, (Timestamp, Long)](s => (s.time, s.seq)).reverse
+  // 最小堆：先按时间、同刻按 seq (入队序) -> 完全确定。
+  // 自定义比较 (不用 Ordering.by(tuple)) 避免每次堆比较都分配 Tuple2 + 装箱两个 Long ——
+  // 月级回测堆操作上千万次, 这是热路径 GC 大头。语义等价原 `.reverse` (PriorityQueue 弹最大,
+  // 故 compare 取反使最小 (time,seq) 先出)。
+  private given Ordering[Scheduled] with
+    def compare(a: Scheduled, b: Scheduled): Int =
+      val byTime = java.lang.Long.compare(b.time, a.time)
+      if byTime != 0 then byTime else java.lang.Long.compare(b.seq, a.seq)
   private val pq = mutable.PriorityQueue.empty[Scheduled]
 
   private var state: SimState = SimState.empty(config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
