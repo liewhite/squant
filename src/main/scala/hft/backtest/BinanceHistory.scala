@@ -20,8 +20,9 @@ object BinanceHistory:
       end: LocalDate,
       synthesizeBbo: Boolean = false,
       cacheDir: String = "data-cache",
+      kinds: Seq[BinanceDataKind] = BinanceDataKind.values.toIndexedSeq,
   ): MarketDataSource =
     val cache = LocalFsDataCache(Path.of(cacheDir))
     val downloader = BinanceHistoryDownloader(backend, cache)
-    val base = BinanceHistorySource(downloader, symbols, start, end)
+    val base = BinanceHistorySource(downloader, symbols, start, end, kinds)
     if synthesizeBbo then TradePrintBboSource(base) else base

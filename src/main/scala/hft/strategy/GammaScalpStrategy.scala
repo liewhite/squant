@@ -2,18 +2,9 @@ package hft.strategy
 
 import hft.domain.*
 import hft.exchange.SubscriptionKind
-import hft.indicator.{KlineSeries, Macd}
 import hft.messaging.{EventData, IncomeEvent, PendingOrder, StateManager, SymbolState}
 
 import scala.collection.mutable
-
-/** MACD 柱 -> 方向偏移强度的映射模式：
-  *   - [[MacdBiasMode.Sign]]   : 只看柱符号 (水上+1 / 水下-1)，幅度 1
-  *   - [[MacdBiasMode.Graded]] : 颜色×趋势分级 (同向最激进)，幅度 {-2..2}，见 [[hft.indicator.Macd.histBias]]
-  */
-enum MacdBiasMode:
-  case Sign
-  case Graded
 
 /** gamma scalping 策略 (long-gamma 的 maker 对冲，带 K 线 MACD 方向性间距偏移)。
   *
@@ -64,8 +55,8 @@ final class GammaScalpStrategy(
   /** 已发出撤单、尚未确认移除的订单，防止重复撤单 */
   private val cancelling = mutable.Set.empty[OrderId]
 
-  /** 由逐笔 trade 聚合 K 线算 MACD (混入 [[Macd]] trait)，柱>0 看多 / <0 看空 -> 调整对冲间距方向偏移 */
-  private val klines = new KlineSeries(barIntervalMs, maxBars) with Macd
+  /** 由逐笔 trade 聚合 K 线算 MACD 的方向信号 (柱>0 看多 / <0 看空 -> 调整对冲间距方向偏移) */
+  private val signal = MacdBiasSignal(barIntervalMs, maxBars, biasMode, macdTrendBars)
 
   override def publicStreams: Map[Exchange, Set[SubscriptionKind]] =
     Map(exchange -> Set(SubscriptionKind.Trade(symbol)))
@@ -77,7 +68,7 @@ final class GammaScalpStrategy(
     event.data match
       // 逐笔成交：喂 K 线 (方向信号) + 以最新成交价为基准评估对冲
       case EventData.MarketTradeUpdate(t) if t.exchange == exchange && t.symbol == symbol =>
-        klines.update(t.timestamp, t.price, t.qty)
+        signal.update(t.timestamp, t.price, t.qty)
         hedge(t.price, state)
       // greeks 变化 (delta 漂移) 也即时触发，用 state 中最新成交价为基准
       case EventData.GreeksUpdate(g) if g.exchange == exchange && g.ccy == ccy =>
@@ -96,17 +87,15 @@ final class GammaScalpStrategy(
         case Some(side, qty, price) => maintain(symbolState, side, qty, price, netDelta)
     ).getOrElse(Vector.empty)
 
+  /** 当前方向偏移强度 (按 biasMode) */
+  private def currentBias: Int = signal.bias
+
   /** 越带的目标对冲：把净 delta 拉回中性。偏多 -> 最新价上方挂卖；偏空 -> 最新价下方挂买。
     *
-    * 对冲间距按 MACD 柱的**颜色×趋势**分级偏移 ([[Macd.histBias]] ∈ {-2..2})：顺势侧挂更远、
+    * 对冲间距按 MACD 柱的**颜色×趋势**分级偏移 (bias ∈ {-2..2})：顺势侧挂更远、
     * 逆势侧挂更近，**水上且连续上升 (或水下且连续下降) 最激进** (强度 2 = 偏移 2×dirSkewRatio)。
     * bias>0: 卖间距 base+bias·skew (更远)、买间距 base-bias·skew (更近)；bias<0 镜像。
     */
-  /** 当前方向偏移强度 (按 biasMode) */
-  private def currentBias: Int = biasMode match
-    case MacdBiasMode.Sign   => klines.macdDirection
-    case MacdBiasMode.Graded => klines.histBias(macdTrendBars)
-
   private def desiredHedge(refPrice: Price, netDelta: Double): Option[(Side, Quantity, Price)] =
     val bias = currentBias
     // 偏移下限 0：bias·dirSkewRatio 过大时不致挂到价格另一侧而立即 would-take
