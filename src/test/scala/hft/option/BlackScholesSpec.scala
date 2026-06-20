@@ -53,3 +53,28 @@ class BlackScholesSpec extends munit.FunSuite:
   test("非法波动率/价格退化为内在价值，不抛异常或除零"):
     val g = BlackScholes.greeks(Call, s = 100, k = 100, tYears = 1.0, sigma = 0.0, r = 0.0)
     assert(g.gamma == 0.0 && g.vega == 0.0)
+
+  // 希腊字母必须是价格的导数 (而非恰好命中某参考点)：用中心差分逐一核对。
+  // 这能抓住"某点对、但导数公式错"的 bug (delta/gamma/vega/theta 任一系数/符号错都会暴露)。
+  test("希腊字母 = 价格的有限差分导数 (delta/gamma/vega/theta)"):
+    for
+      right <- Seq(Call, Put)
+      s <- Seq(80.0, 100.0, 125.0) // OTM / ATM / ITM
+    do
+      val k = 100.0; val t = 0.5; val sigma = 0.4; val r = 0.02
+      def price(ss: Double = s, tt: Double = t, vv: Double = sigma): Double =
+        BlackScholes.greeks(right, ss, k, tt, vv, r).price
+      val g = BlackScholes.greeks(right, s, k, t, sigma, r)
+      val hS = s * 1e-5
+      val deltaFd = (price(ss = s + hS) - price(ss = s - hS)) / (2 * hS)
+      val gammaFd = (price(ss = s + hS) - 2 * g.price + price(ss = s - hS)) / (hS * hS)
+      val hV = 1e-6
+      val vegaFd = (price(vv = sigma + hV) - price(vv = sigma - hV)) / (2 * hV)
+      val hT = 1e-6
+      val thetaFd = (price(tt = t - hT) - price(tt = t)) / hT // dP/d(日历时间) = -dP/d(剩余期限)
+      def rel(a: Double, b: Double) = math.abs(a - b) / math.max(math.abs(b), 1e-6)
+      val tag = s"$right S=$s"
+      assert(rel(deltaFd, g.delta) < 1e-4, s"$tag delta fd=$deltaFd bs=${g.delta}")
+      assert(rel(gammaFd, g.gamma) < 1e-3, s"$tag gamma fd=$gammaFd bs=${g.gamma}")
+      assert(rel(vegaFd, g.vega) < 1e-4, s"$tag vega fd=$vegaFd bs=${g.vega}")
+      assert(rel(thetaFd, g.theta) < 1e-3, s"$tag theta fd=$thetaFd bs=${g.theta}")
