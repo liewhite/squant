@@ -49,7 +49,7 @@ class CrashChaseStrategySpec extends munit.FunSuite:
     signals.collect { case OutcomeEvent.PlaceOrders(orders, _) => orders }.flatten
 
   private def registerPending(state: StateManager, order: Order, clientOrderId: String): Unit =
-    state.addPendingOrder(order.copy(clientOrderId = clientOrderId))
+    state.addPendingOrder(order.copy(clientOrderId = clientOrderId), 0L)
 
   /** 把策略产出的下单信号登记为 pending (复刻 Runner 行为)，返回登记的 (order, clientId) */
   private def registerAll(state: StateManager, orders: Vector[Order]): Vector[(Order, String)] =

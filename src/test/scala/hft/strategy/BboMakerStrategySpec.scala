@@ -34,7 +34,7 @@ class BboMakerStrategySpec extends munit.FunSuite:
 
   /** 模拟 Executor 对下单信号的 pending 登记 */
   private def registerPending(state: StateManager, order: Order, clientOrderId: String): Unit =
-    state.addPendingOrder(order.copy(clientOrderId = clientOrderId))
+    state.addPendingOrder(order.copy(clientOrderId = clientOrderId), 0L)
 
   private def confirm(state: StateManager, clientOrderId: String, orderId: OrderId, side: Side): Unit =
     inject(

@@ -28,6 +28,6 @@ final class Executor(
       logger.info(s"Executor started: subscriptions=${runner.subscriptions}")
       while true do
         val event = events.receive()
-        if runner.accepts(event) then runner.onEvent(event).foreach(outcomeBus.publish)
+        if runner.accepts(event) then runner.onEvent(event, nowMs).foreach(outcomeBus.publish)
     }
     ()

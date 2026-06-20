@@ -46,7 +46,7 @@ import java.time.format.DateTimeFormatter
     orderSize = 0.01,
     maxLeverage = 2.0,
   )
-  val runner = StrategyRunner(strategy, symbolMetas)
+  val runner = StrategyRunner.backtest(strategy, symbolMetas)
 
   // 旁路观察者: 成交写 CSV (与模拟盘同一份逻辑, 这里同步复用)
   val stamp = LocalDate.now().toString

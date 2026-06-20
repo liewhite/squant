@@ -55,7 +55,7 @@ import java.time.LocalDate
     stopLossRatio = 0.03,     // 反弹 3% 止损
     cooldownMs = 60_000,
   )
-  val runner = StrategyRunner(strategy, symbolMetas)
+  val runner = StrategyRunner.backtest(strategy, symbolMetas)
 
   val stamp = LocalDate.now().toString
   val recorder = FillRecorder(Path.of(s"backtest-fills-crashchase-$symbol-$stamp.csv"))

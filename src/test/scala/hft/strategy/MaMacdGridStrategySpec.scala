@@ -130,11 +130,13 @@ class MaMacdGridStrategySpec extends munit.FunSuite:
     val bars = 90
     // 经 runner 预热: 指标就绪后会下出并登记一张 BuyAccum, 后续步因 present 命中不再重复
     (0 until bars).foreach { i =>
-      runner.onEvent(tradeEv(i.toLong * hour + 60_000L, 1000.0 + i.toDouble * i * 0.5))
+      val ts = i.toLong * hour + 60_000L
+      runner.onEvent(tradeEv(ts, 1000.0 + i.toDouble * i * 0.5), ts)
     }
     val px = 1000.0 + bars.toDouble * bars * 0.5
     // 已挂 BuyAccum (pos 仍为 0 -> 无 SellClose), 再来一笔不应再下加仓买
-    val out = runner.onEvent(tradeEv(bars.toLong * hour + 60_000L, px))
+    val stepTs = bars.toLong * hour + 60_000L
+    val out = runner.onEvent(tradeEv(stepTs, px), stepTs)
     val newAccumBuys = out.collect { case OutcomeEvent.PlaceOrders(os, _) => os }.flatten
       .count(o => o.side == Side.Long && !o.reduceOnly)
     assertEquals(newAccumBuys, 0, s"BuyAccum 已在 present 中, 不应重复下单: $out")
@@ -148,7 +150,7 @@ class MaMacdGridStrategySpec extends munit.FunSuite:
       val px = 1000.0 + bars.toDouble * bars * 0.5
       // 注入一张 bull 下不该存在的 SellAccum (Short, 非 reduceOnly) 挂单
       val injected = Order("oid1", ex, sym, Side.Short, OrderType.Limit(px * 1.001, TimeInForce.GTC), 0.5, reduceOnly = false, "cid1")
-      sm.addPendingOrder(injected) // Created
+      sm.addPendingOrder(injected, 0L) // Created
       if confirm then // 推到 Pending (已确认) 才可撤
         sm.apply(IncomeEvent(0, 0, EventData.OrderUpdated(
           OrderUpdate("oid1", Some("cid1"), ex, sym, Side.Short, OrderStatus.Pending, px * 1.001, 0.5, 0.0, 0.0, 0)
@@ -180,7 +182,7 @@ class MaMacdGridStrategySpec extends munit.FunSuite:
       warm(s, sm, priceAt, bars)
       sm.apply(IncomeEvent(0, 0, EventData.PositionUpdate(Position(ex, sym, 2.0, stepPx, 0.0)))) // 多仓 (现已逆势)
       val o = Order("oidC", ex, sym, Side.Short, OrderType.Limit(restingClosePx, TimeInForce.GTC), 0.5, reduceOnly = true, "cidC")
-      sm.addPendingOrder(o)
+      sm.addPendingOrder(o, 0L)
       sm.apply(IncomeEvent(0, 0, EventData.OrderUpdated(
         OrderUpdate("oidC", Some("cidC"), ex, sym, Side.Short, OrderStatus.Pending, restingClosePx, 0.5, 0.0, 0.0, 0)
       )))

@@ -36,8 +36,9 @@ final case class BacktestResult(
   * 账户净值：周期性 (clockIntervalMs) 由当前账本计算 AccountInfoUpdate 投递给策略 (等价实盘
   * Engine 的 accountRefresh)，并在首个事件时先投递一次初始净值，否则依赖净值的策略不会动作。
   *
-  * 已知限制：订单超时清理 (failOnTimedOutOrders) 在回测中不触发——createdAt 取墙钟、虚拟时间
-  * 为历史时刻，差值恒负。无害：虚拟柜台必然对每单回 Pending/Filled，不存在卡在 Created 的单。
+  * 时间一致性：撮合回报与 pending order 的 createdAt 一律取虚拟时间 `now` (不读墙钟)，故
+  * 逐笔回报时间戳、订单超时检测 (failOnTimedOutOrders) 在回测中与虚拟时间一致——同一输入
+  * 必得同一结果。
   */
 final class BacktestEngine(
     exchange: Exchange,
@@ -126,15 +127,15 @@ final class BacktestEngine(
   private def ingest(ev: IncomeEvent): Unit =
     now = ev.exchangeTs
     marketEvents += 1
-    applyMatching(state.onMarket(exchange, ev))
+    applyMatching(state.onMarket(exchange, ev, now))
 
   private def runQueued(): Unit =
     val s = pq.dequeue()
     now = s.time
     s.action match
       case Action.Deliver(ev)            => deliver(ev)
-      case Action.OrderArrive(order, id) => applyMatching(state.onOrderArrived(exchange, order, id))
-      case Action.CancelArrive(id)       => applyMatching(state.onCancelArrived(exchange, id))
+      case Action.OrderArrive(order, id) => applyMatching(state.onOrderArrived(exchange, order, id, now))
+      case Action.CancelArrive(id)       => applyMatching(state.onCancelArrived(exchange, id, now))
       case Action.Clock =>
         deliver(IncomeEvent(now, now, EventData.Clock))
         deliver(accountInfoEvent(now)) // 周期刷新净值, 等价实盘 Engine 的 accountRefresh
@@ -149,7 +150,7 @@ final class BacktestEngine(
     observers.foreach(_(ev))
     runners.foreach { r =>
       if r.accepts(ev) then
-        r.onEvent(ev).foreach {
+        r.onEvent(ev, now).foreach {
           case OutcomeEvent.PlaceOrders(orders, _) =>
             orders.foreach { o =>
               orderIdGen += 1

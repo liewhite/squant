@@ -22,71 +22,85 @@ class SimStateSpec extends munit.FunSuite:
     evs.collect { case IncomeEvent(_, _, EventData.FillUpdate(f)) => f }
 
   test("非 marketable 的 PostOnly 买单 -> resting (Pending), 不成交"):
-    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)))
-    val (s2, evs) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1")
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, evs) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1", 1)
     assertEquals(statuses(evs), Vector(OrderStatus.Pending))
     assert(s2.resting.contains("1"))
     assert(fills(evs).isEmpty)
 
   test("marketable 的 PostOnly -> 拒单, 不进簿不成交"):
-    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)))
-    val (s2, evs) = s1.onOrderArrived(ex, limit(Side.Long, 50001, TimeInForce.PostOnly, "b1"), "1")
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, evs) = s1.onOrderArrived(ex, limit(Side.Long, 50001, TimeInForce.PostOnly, "b1"), "1", 1)
     assert(statuses(evs).exists(_.isInstanceOf[OrderStatus.Rejected]))
     assert(s2.resting.isEmpty)
     assert(fills(evs).isEmpty)
 
   test("resting 买单被卖价越过 -> 成交于挂单价, 出簿, 仓位增加"):
-    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)))
-    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1")
-    val (s3, evs) = s2.onMarket(ex, marketEv(bbo(49990, 49994, ts = 2))) // ask 49994 <= 49995
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1", 1)
+    val (s3, evs) = s2.onMarket(ex, marketEv(bbo(49990, 49994, ts = 2)), 2) // ask 49994 <= 49995
     val f = fills(evs)
     assertEquals(f.map(_.price), Vector(49995.0)) // maker 价
     assertEquals(s3.resting.size, 0)
     assertEquals(s3.ledger.positions(sym).size, 0.002)
 
   test("行情先于成交回流: onMarket 返回的首事件是行情, 其后才是成交"):
-    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)))
-    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1")
-    val (_, evs) = s2.onMarket(ex, marketEv(bbo(49990, 49994, ts = 2)))
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1", 1)
+    val (_, evs) = s2.onMarket(ex, marketEv(bbo(49990, 49994, ts = 2)), 2)
     assert(evs.head.data.isInstanceOf[EventData.BboUpdate], "首事件应为行情转发")
     assert(evs.tail.exists(_.data.isInstanceOf[EventData.FillUpdate]), "成交回报排在行情之后")
 
   test("GTC 到达即可成交 -> taker 成交于对手价"):
-    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)))
-    val (s2, evs) = s1.onOrderArrived(ex, limit(Side.Long, 50005, TimeInForce.GTC, "b1"), "1")
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, evs) = s1.onOrderArrived(ex, limit(Side.Long, 50005, TimeInForce.GTC, "b1"), "1", 1)
     assertEquals(fills(evs).map(_.price), Vector(50001.0)) // 吃卖价
     assert(s2.resting.isEmpty)
 
   test("IOC 不可成交 -> 整单取消, 不进簿"):
-    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)))
-    val (s2, evs) = s1.onOrderArrived(ex, limit(Side.Long, 49000, TimeInForce.IOC, "b1"), "1")
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, evs) = s1.onOrderArrived(ex, limit(Side.Long, 49000, TimeInForce.IOC, "b1"), "1", 1)
     assertEquals(statuses(evs), Vector(OrderStatus.Cancelled))
     assert(s2.resting.isEmpty)
 
   test("撤单到达: 在簿则出簿并回报 Cancelled"):
-    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)))
-    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1")
-    val (s3, evs) = s2.onCancelArrived(ex, "1")
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1", 1)
+    val (s3, evs) = s2.onCancelArrived(ex, "1", 1)
     assertEquals(statuses(evs), Vector(OrderStatus.Cancelled))
     assert(s3.resting.isEmpty)
 
   test("撤单到达但订单已不在簿 (已成交) -> 无事发生"):
-    val (s2, evs) = empty.onCancelArrived(ex, "404")
+    val (s2, evs) = empty.onCancelArrived(ex, "404", 1)
     assert(evs.isEmpty)
     assertEquals(s2, empty)
 
   test("reduceOnly 卖单无多头持仓 -> 不成交并回 Cancelled (撮合层禁止反向开仓)"):
-    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)))
-    val (s2, _) = s1.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "s1", 0.002), "1") // 上方 resting
-    val (s3, evs) = s2.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2))) // bid 50011 >= 50010 -> 越价
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, _) = s1.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "s1", 0.002), "1", 1) // 上方 resting
+    val (s3, evs) = s2.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2)), 2) // bid 50011 >= 50010 -> 越价
     assert(fills(evs).isEmpty, "无多头可平, 不应成交")
     assert(statuses(evs).contains(OrderStatus.Cancelled), "reduceOnly 无可平 -> Cancelled")
     assert(s3.ledger.positions.get(sym).forall(_.isEmpty), "不得反向开出空头")
 
   test("reduceOnly 卖单数量超过多头 -> 截断到持仓, 不反手"):
-    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)))
-    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 50005, TimeInForce.GTC, "b1"), "1") // taker 开多 0.002
-    val (s3, _) = s2.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "s1", 0.005), "2") // 平仓单量 0.005 > 持仓
-    val (s4, evs) = s3.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2)))
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 50005, TimeInForce.GTC, "b1"), "1", 1) // taker 开多 0.002
+    val (s3, _) = s2.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "s1", 0.005), "2", 2) // 平仓单量 0.005 > 持仓
+    val (s4, evs) = s3.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2)), 2)
     assertEquals(fills(evs).map(_.size), Vector(0.002)) // 截断到多头 0.002
     assertEquals(s4.ledger.positions(sym).size, 0.0) // 平至 0, 不反手为 -0.003
+
+  test("撮合按到达序 (FIFO) 而非哈希序: 同价 reduceOnly 竞争同一持仓, 先到先成交"):
+    // 开多 0.003，两张同价 reduceOnly 卖单 (各 0.002, 合计 0.004 > 持仓) 同刻越价竞争。
+    // 价相同 -> 价格优先级相同 -> 按到达序: 先到 "early" 全成 0.002, 后到 "late" 仅余 0.001。
+    val longBuy = Order("", ex, sym, Side.Long, OrderType.Limit(50005, TimeInForce.GTC), 0.003, reduceOnly = false, "b1")
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, _) = s1.onOrderArrived(ex, longBuy, "1", 1) // 开多 0.003
+    val (s3, _) = s2.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "early", 0.002), "2", 1) // 先到 seq0
+    val (s4, _) = s3.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "late", 0.002), "3", 1)  // 后到 seq1
+    val (_, evs) = s4.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2)), 2) // bid 50011 >= 50010 -> 两张同刻越价
+    val filledOf = evs.collect {
+      case IncomeEvent(_, _, EventData.OrderUpdated(u)) if u.status == OrderStatus.Filled => (u.clientOrderId, u.fillSize)
+    }
+    assertEquals(filledOf, Vector((Some("early"), 0.002), (Some("late"), 0.001)))

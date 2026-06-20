@@ -87,7 +87,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       baseQty = baseQty,
       maxPositionCoin = maxPos,
     )
-    val runner = StrategyRunner(strategy, symbolMetas)
+    val runner = StrategyRunner.backtest(strategy, symbolMetas)
     var firstPx = 0.0
     var lastPx = 0.0
     // 资金利用率: 每次 AccountInfoUpdate (引擎每秒发) 取 notional/equity, 求均值与峰值

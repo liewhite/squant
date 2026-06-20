@@ -41,8 +41,15 @@ class BacktestEngineSpec extends munit.FunSuite:
   )
 
   private def runOnce(): BacktestResult =
-    val runner = StrategyRunner(OneShotBuy(), metas)
+    val runner = StrategyRunner.backtest(OneShotBuy(), metas)
     BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0)).run()
+
+  /** 跑一次并收集投递给观察者的全部事件 (含逐笔回报的 client_order_id 与时间戳)。 */
+  private def runCollect(): Vector[IncomeEvent] =
+    val collected = Vector.newBuilder[IncomeEvent]
+    val runner = StrategyRunner.backtest(OneShotBuy(), metas)
+    BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0), observers = Seq(collected += _)).run()
+    collected.result()
 
   test("挂单越价成交: 1 笔成交, 持仓 +1, 已实现盈亏 0"):
     val r = runOnce()
@@ -56,3 +63,20 @@ class BacktestEngineSpec extends munit.FunSuite:
 
   test("确定性: 相同输入两次运行结果完全一致"):
     assertEquals(runOnce(), runOnce())
+
+  test("确定性: 逐笔回报流 (client_order_id + 时间戳) 跨运行完全一致"):
+    // 直接比对全部投递事件 —— 含 OrderUpdate/Fill 的 client_order_id 与 exchangeTs/localTs。
+    // 旧实现里 UUID 随机 + 墙钟时间戳会让两次运行不等，能捕获 #1/#2 回归。
+    assertEquals(runCollect(), runCollect())
+
+  test("确定性: client_order_id 为自增计数, 回报时间戳取虚拟时间 (非墙钟)"):
+    val evs = runCollect()
+    val orderUpdates = evs.collect { case IncomeEvent(_, _, EventData.OrderUpdated(u)) => u }
+    assert(orderUpdates.nonEmpty, "应有订单回报")
+    assert(orderUpdates.forall(_.clientOrderId.contains("bt0")), s"client_order_id 应为确定性 bt0: ${orderUpdates.map(_.clientOrderId)}")
+    // 数据时间在 1000..3000，回报时间戳必落在虚拟时间量级 (远小于墙钟 ~1.7e12)
+    val fillEvs = evs.filter(_.data.isInstanceOf[EventData.FillUpdate])
+    assertEquals(fillEvs.size, 1)
+    fillEvs.foreach { e =>
+      assert(e.exchangeTs < 1_000_000L && e.localTs < 1_000_000L, s"回报时间戳应为虚拟时间, got $e")
+    }

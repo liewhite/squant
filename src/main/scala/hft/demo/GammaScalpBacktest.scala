@@ -91,7 +91,7 @@ import java.time.{LocalDate, ZoneOffset}
     dirSkewRatio = dirSkewRatio,
     biasMode = biasMode,
   )
-  val runner = StrategyRunner(strategy, symbolMetas)
+  val runner = StrategyRunner.backtest(strategy, symbolMetas)
 
   val stamp = LocalDate.now().toString
   val recorder = FillRecorder(Path.of(s"backtest-fills-gammascalp-$symbol-$stamp.csv"))

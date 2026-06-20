@@ -12,10 +12,14 @@ import hft.strategy.{OutcomeEvent, Strategy}
   *
   * 职责与原 Executor.handle 完全一致：过滤订阅范围、更新 StateManager、分配 clientOrderId、
   * 登记 pending、按 SymbolMeta 转换 (币本位->张数、价格/数量取整)。行为不变。
+  *
+  * @param clientOrderIdGen client_order_id 生成器 (按交易所格式)。实盘默认用 UUID 保唯一；
+  *   回测注入确定性自增计数 (见 [[StrategyRunner.backtest]])，使逐笔回报/CSV 跨运行可复现。
   */
 final class StrategyRunner(
     strategy: Strategy,
     symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
+    clientOrderIdGen: Exchange => String = _.newClientOrderId,
 ):
   /** 策略订阅的 (exchange, symbol) 集合，用于事件过滤 */
   val subscriptions: Set[(Exchange, Symbol)] =
@@ -29,15 +33,17 @@ final class StrategyRunner(
   def accepts(event: IncomeEvent): Boolean =
     event.routing.forall(subscriptions.contains)
 
-  /** 更新状态并运行策略，返回**已转换为交易所格式**的信号 (下单已分配 id、登记 pending、取整)。 */
-  def onEvent(event: IncomeEvent): Vector[OutcomeEvent] =
+  /** 更新状态并运行策略，返回**已转换为交易所格式**的信号 (下单已分配 id、登记 pending、取整)。
+    * `now` 为当前处理时刻 (回测虚拟时间 / 实盘墙钟)，作为 pending order 的 createdAt (超时检测基准)。
+    */
+  def onEvent(event: IncomeEvent, now: Timestamp): Vector[OutcomeEvent] =
     state.apply(event)
     strategy.onEvent(event, state).map {
       case OutcomeEvent.PlaceOrders(orders, comment) =>
         val converted = orders.map { order =>
-          val withId = order.copy(clientOrderId = order.exchange.newClientOrderId)
+          val withId = order.copy(clientOrderId = clientOrderIdGen(order.exchange))
           // 原始订单 (币本位) 登记到 pending，策略端统一看到币的数量
-          state.addPendingOrder(withId)
+          state.addPendingOrder(withId, now)
           // 转换为交易所格式 (合约张数 + 价格/数量取整)
           convertOrder(withId)
         }
@@ -58,3 +64,17 @@ final class StrategyRunner(
       case OrderType.Market            => OrderType.Market
       case OrderType.Limit(price, tif) => OrderType.Limit(meta.roundPrice(price), tif)
     order.copy(quantity = quantity, orderType = orderType)
+
+object StrategyRunner:
+  /** 回测用确定性 client_order_id 生成器：自增计数 bt0/bt1/...，使逐笔回报/CSV 跨运行可复现。
+    * 有状态闭包 (单回测为单线程，无并发问题)；每个 runner 独享一份，自 0 起算。 */
+  def deterministicIdGen(): Exchange => String =
+    var counter = 0L
+    (_: Exchange) =>
+      val id = s"bt$counter"
+      counter += 1
+      id
+
+  /** 回测专用工厂：注入确定性 client_order_id 生成器 (杜绝 UUID 随机带来的不可复现)。 */
+  def backtest(strategy: Strategy, symbolMetas: Map[(Exchange, Symbol), SymbolMeta]): StrategyRunner =
+    StrategyRunner(strategy, symbolMetas, deterministicIdGen())

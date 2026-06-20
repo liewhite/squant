@@ -20,13 +20,14 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long):
 
   // ==================== 下单接口 ====================
 
-  /** 添加 pending order (由 Executor 调用，clientOrderId 已生成)。
+  /** 添加 pending order (由 StrategyRunner 调用，clientOrderId 已生成)。
+    * `now` 为当前处理时刻 (回测虚拟时间 / 实盘墙钟)，作为 createdAt 超时检测基准。
     * symbol 不在订阅范围内时抛异常 (表示策略配置错误，应立即暴露)
     */
-  def addPendingOrder(order: Order): Unit =
+  def addPendingOrder(order: Order, now: Timestamp): Unit =
     states
       .getOrElse(order.symbol, sys.error(s"Symbol not found in StateManager: ${order.symbol}"))
-      .addPendingOrder(order, nowMs)
+      .addPendingOrder(order, now)
 
   // ==================== 状态查询 ====================
 

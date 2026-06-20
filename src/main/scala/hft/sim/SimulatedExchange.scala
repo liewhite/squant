@@ -112,9 +112,9 @@ final class SimulatedExchange(
   /** actor 主循环：纯转移 + 顺序发布 (在唯一线程上, 故全局有序) */
   private def process(cmd: Command): Unit =
     val (next, events) = cmd match
-      case Command.Market(ev)             => state.onMarket(exchange, ev)
-      case Command.OrderArrived(order, id) => state.onOrderArrived(exchange, order, id)
-      case Command.CancelArrived(id)       => state.onCancelArrived(exchange, id)
+      case Command.Market(ev)             => state.onMarket(exchange, ev, nowMs)
+      case Command.OrderArrived(order, id) => state.onOrderArrived(exchange, order, id, nowMs)
+      case Command.CancelArrived(id)       => state.onCancelArrived(exchange, id, nowMs)
     state = next
     events.foreach { ev =>
       ev.data match
