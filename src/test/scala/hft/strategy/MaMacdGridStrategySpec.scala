@@ -13,12 +13,13 @@ class MaMacdGridStrategySpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "ETHUSDT"
   private val hour = 3_600_000L
-  private val small = 0.003
-  private val large = 0.012
+  private val small = 0.003 // addSpacing (加仓)
+  private val large = 0.012 // largeSpacing (顺势止盈, 宽)
+  private val exitS = 0.001 // exitSpacing (MACD 反向后的移动止盈, 窄)
 
   private def strat = MaMacdGridStrategy(
     ex, sym, maPeriodBars = 60, barIntervalMs = hour, risingBars = 2,
-    smallSpacing = small, largeSpacing = large, baseQty = 0.5, maxPositionCoin = 10.0,
+    addSpacing = small, largeSpacing = large, exitSpacing = exitS, baseQty = 0.5, maxPositionCoin = 10.0,
   )
 
   private def tradeEv(ts: Long, px: Double): IncomeEvent =
@@ -164,3 +165,67 @@ class MaMacdGridStrategySpec extends munit.FunSuite:
       !created.exists { case _: OutcomeEvent.CancelOrder => true; case _ => false },
       s"仅 Created (未确认) 的挂单不应被撤 (无 orderId 可撤): $created",
     )
+
+  test("双确认离场: 价跌破均线 且 柱≥5根水下 -> 多头止盈切窄移动并随价重挂; 已贴窄档则不重挂"):
+    // 先温和上行 (建多/暖指标), 再持续下行使价跌破均线 且 MACD 柱连续多根<0 (双确认)
+    val up = 70; val down = 35; val bars = up + down
+    def priceAt(i: Int): Double =
+      if i < up then 1000.0 + i.toDouble * 15.0 // 温和上行
+      else 1000.0 + (up - 1).toDouble * 15.0 - (i - up + 1).toDouble * 40.0 // 持续下行, 破均线 + 柱翻负
+    val stepPx = priceAt(bars - 1) - 40.0 // 再跌一根
+
+    def run(restingClosePx: Double): Vector[OutcomeEvent] =
+      val s = strat
+      val sm = StateManager(Iterable(sym), 5000)
+      warm(s, sm, priceAt, bars)
+      sm.apply(IncomeEvent(0, 0, EventData.PositionUpdate(Position(ex, sym, 2.0, stepPx, 0.0)))) // 多仓 (现已逆势)
+      val o = Order("oidC", ex, sym, Side.Short, OrderType.Limit(restingClosePx, TimeInForce.GTC), 0.5, reduceOnly = true, "cidC")
+      sm.addPendingOrder(o)
+      sm.apply(IncomeEvent(0, 0, EventData.OrderUpdated(
+        OrderUpdate("oidC", Some("cidC"), ex, sym, Side.Short, OrderStatus.Pending, restingClosePx, 0.5, 0.0, 0.0, 0)
+      )))
+      step(s, sm, bars, stepPx)
+
+    def cancelled(out: Vector[OutcomeEvent]) =
+      out.exists { case OutcomeEvent.CancelOrder(`ex`, `sym`, "oidC") => true; case _ => false }
+    // 双确认成立 -> 遗留宽止盈单 (现价 +large) 被切窄移动止盈重挂
+    assert(cancelled(run(stepPx * (1 + large))), "双确认(破均线+柱连续水下)后, 宽止盈单应被切窄移动止盈重挂")
+    // 已贴合窄档 (现价 +exitS) -> 不重挂
+    assert(!cancelled(run(stepPx * (1 + exitS))), "已在窄档位 -> 不应重挂")
+
+  // ==================== 方案1: 平仓至少 max(占比×持仓, baseQty) ====================
+
+  test("方案1 closeMinFraction=0.5: 大持仓单次平仓量 = max(半仓, baseQty)"):
+    val s = MaMacdGridStrategy(
+      ex, sym, maPeriodBars = 60, barIntervalMs = hour, risingBars = 2,
+      addSpacing = small, largeSpacing = large, exitSpacing = exitS,
+      closeMinFraction = 0.5, baseQty = 0.5, maxPositionCoin = 10.0,
+    )
+    val sm = StateManager(Iterable(sym), 5000)
+    val bars = 90
+    warm(s, sm, i => 1000.0 + i.toDouble * i * 0.5, bars)
+    val px = 1000.0 + bars.toDouble * bars * 0.5
+    sm.apply(IncomeEvent(0, 0, EventData.PositionUpdate(Position(ex, sym, 4.0, px, 0.0)))) // 多仓 4
+    val orders = step(s, sm, bars, px).collect { case OutcomeEvent.PlaceOrders(os, _) => os }.flatten
+    val sell = orders.find(o => o.side == Side.Short && o.reduceOnly).getOrElse(fail(s"no SellClose: $orders"))
+    near(sell.quantity, 2.0) // min(4, max(4*0.5=2, 0.5)) = 2 (半仓), 而非逐笔 0.5
+
+  // ==================== 方案2: 价偏离均线 N×ATR -> 移动止盈 + 停止加仓 ====================
+
+  test("方案2 atrStretchN 触发: 价远超均线 -> 停止加多 且 多头止盈切窄移动 (exitSpacing)"):
+    val s = MaMacdGridStrategy(
+      ex, sym, maPeriodBars = 60, barIntervalMs = hour, risingBars = 2,
+      addSpacing = small, largeSpacing = large, exitSpacing = exitS,
+      atrStretchN = 0.01, atrPeriodBars = 14, baseQty = 0.5, maxPositionCoin = 10.0,
+    )
+    val sm = StateManager(Iterable(sym), 5000)
+    val bars = 90
+    warm(s, sm, i => 1000.0 + i.toDouble * i * 0.5, bars) // 加速上行: 价远在均线上, ATR>0
+    val px = 1000.0 + bars.toDouble * bars * 0.5
+    sm.apply(IncomeEvent(0, 0, EventData.PositionUpdate(Position(ex, sym, 2.0, px, 0.0)))) // 多仓
+    val orders = step(s, sm, bars, px).collect { case OutcomeEvent.PlaceOrders(os, _) => os }.flatten
+    // 拉伸过度 -> 不再加多
+    assert(!orders.exists(o => o.side == Side.Long && !o.reduceOnly), s"拉伸过度应停止加多: $orders")
+    // 止盈切窄 (exitSpacing) 而非宽静态 (largeSpacing)
+    val sell = orders.find(o => o.side == Side.Short && o.reduceOnly).getOrElse(fail(s"no SellClose: $orders"))
+    near(limitOf(sell)._1, px * (1 + exitS))
