@@ -41,6 +41,10 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   val straddles = sys.env.get("EDGE_STRADDLES").map(_.toDouble).getOrElse(10.0)
   val atrMult = 2.0
   val initialBalance = 1_000_000.0
+  // 成本/延迟 (默认 0)：对冲单为 Market(taker)，故只 takerFee 生效；EDGE_DELAY_MS 映射到
+  // 下单->撮合延迟 (现价观测到成交之间的滑点来源)，行情->策略延迟设 0 (假设行情即时)。
+  val takerFee = sys.env.get("EDGE_TAKER_FEE").map(_.toDouble).getOrElse(0.0)
+  val delayMs = sys.env.get("EDGE_DELAY_MS").map(_.toLong).getOrElse(0L)
 
   val ivMode = IvMode.parse(args.lift(0).getOrElse("trailing"))
 
@@ -71,7 +75,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   if months.isEmpty then sys.error(s"no complete cached months for $symbol under $cacheDir (filter $startBound..$endBound)")
 
   println(s"==================== Edge 月度滚动回测 (买方 long-gamma) ====================")
-  println(s"symbol=$symbol  月份=${months.head}..${months.last} (${months.size} 个)  IV=$ivMode  straddles=$straddles  fee=0 delay=0")
+  println(f"symbol=$symbol  月份=${months.head}..${months.last} (${months.size} 个)  IV=$ivMode  straddles=$straddles  takerFee=${takerFee * 100}%.3f%%  delay=${delayMs}ms")
   println(s"变体: ${variants.map(_._1).mkString(", ")}")
 
   // 每个并行任务各建独立 backend (sttp SyncBackend 不保证可并发复用)，try/finally 关闭——
@@ -124,8 +128,8 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       val engine = BacktestEngine(
         exchange = Exchange.Binance, source = source, runners = Seq(runner),
         config = SimConfig(
-          exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0,
-          initialBalanceUsdt = initialBalance, makerFeeRate = 0.0, takerFeeRate = 0.0,
+          exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = delayMs,
+          initialBalanceUsdt = initialBalance, makerFeeRate = 0.0, takerFeeRate = takerFee,
         ),
         observers = Seq(obs),
       )
