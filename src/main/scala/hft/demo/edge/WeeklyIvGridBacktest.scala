@@ -42,7 +42,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   val seedIv = sys.env.get("EDGE_SEED_IV").map(_.toDouble).getOrElse(0.55)
   val gridUp = sys.env.get("EDGE_GRID_UP").map(_.toDouble).getOrElse(1.5)    // 波动下降 -> 多买
   val gridDown = sys.env.get("EDGE_GRID_DOWN").map(_.toDouble).getOrElse(0.75) // 波动上升 -> 少买
-  val atrMult = 2.0
+  val atrMult = sys.env.get("EDGE_ATR_MULT").map(_.toDouble).getOrElse(2.0)
   val initialBalance = 1_000_000.0
   val takerFee = sys.env.get("EDGE_TAKER_FEE").map(_.toDouble).getOrElse(0.0)
   val delayMs = sys.env.get("EDGE_DELAY_MS").map(_.toLong).getOrElse(0L)
@@ -79,7 +79,10 @@ import scala.concurrent.{Await, ExecutionContext, Future}
             if t.timestamp - lastTs >= 3_600_000L then { lastTs = t.timestamp; samples += t.price }
           case _ => ()
       val rets = samples.toVector.sliding(2).collect { case Vector(a, b) if a > 0 && b > 0 => math.log(b / a) }.toVector
-      (RealizedVol.annualized(rets, 365.0 * 24.0), first)
+      val rv = RealizedVol.annualized(rets, 365.0 * 24.0)
+      if rv <= 0.0 || rets.sizeIs < 24 then
+        System.err.println(f"[WARN] [$start..$end] 周采样异常: 小时采样=${samples.size} 收益=${rets.size} RV=$rv%.4f -> 作为下周 IV 不可信")
+      (rv, first)
     finally backend.close()
 
   /** 单周回测 (对称 ATR 对冲)，捕获曲线 + 逐笔成交 */
@@ -139,16 +142,10 @@ import scala.concurrent.{Await, ExecutionContext, Future}
         Duration.Inf,
       ).toMap
 
-    // ② 顺序定每周 IV 与网格倍数 (只用过去): iv(0)=seed; iv(i)=rv(i-1); 倍数比较 iv(i) vs iv(i-1)
+    // ② 顺序定每周 IV 与网格倍数 (纯逻辑见 WeeklyIvGrid.planWeek, 只用过去周 RV, 无前视)
     val plans: Seq[WeekPlan] = weeks.indices.map { i =>
-      val iv = if i == 0 then seedIv else rvByWeek(i - 1)._1
-      val ivPrev = if i == 0 then seedIv else if i == 1 then seedIv else rvByWeek(i - 2)._1
-      val mult =
-        if i == 0 then 1.0
-        else if iv < ivPrev then gridUp      // 波动下降 -> 多买
-        else if iv > ivPrev then gridDown    // 波动上升 -> 少买
-        else 1.0
-      WeekPlan(i, weeks(i)._1, weeks(i)._2, rvByWeek(i)._1, iv, ivPrev, mult, baseStraddles * mult)
+      val p = WeeklyIvGrid.planWeek(i, seedIv, j => rvByWeek(j)._1, gridUp, gridDown)
+      WeekPlan(i, weeks(i)._1, weeks(i)._2, rvByWeek(i)._1, p.iv, p.ivPrev, p.mult, baseStraddles * p.mult)
     }
 
     // ③ 并行跑每周
@@ -238,7 +235,7 @@ private def summarize(recs: Seq[WeekRec], gridUp: Double, gridDown: Double): Uni
       println(f"  $label%-12s 周数=${bucket.size}%2d  Σ总=$bt%+9.1f  占比=${pct(bt, bp)}%+6.2f%%")
   }
 
-/** 缓存中该 symbol 连续完整 (每天都有 trades 文件) 的 7 天窗口, 不重叠, 升序 */
+/** 缓存中该 symbol 连续完整 (每天都有 trades 文件) 的 7 天窗口 (窗口切分纯逻辑见 [[WeeklyIvGrid.weekWindows]]) */
 private def completeWeeks(cacheDir: String, symbol: Symbol): Seq[(LocalDate, LocalDate)] =
   val dir = Path.of(cacheDir, "futures", "um", "daily", "trades", symbol)
   if !Files.isDirectory(dir) then Seq.empty
@@ -251,13 +248,5 @@ private def completeWeeks(cacheDir: String, symbol: Symbol): Seq[(LocalDate, Loc
         .flatMap(f => raw"(\d{4}-\d{2}-\d{2})".r.findFirstIn(f))
         .map(LocalDate.parse)
         .toSet
-      if dates.isEmpty then Seq.empty
-      else
-        val first = dates.min
-        val last = dates.max
-        Iterator.iterate(first)(_.plusDays(7))
-          .takeWhile(d => !d.plusDays(6).isAfter(last))
-          .filter(d => (0 to 6).forall(k => dates.contains(d.plusDays(k))))
-          .map(d => (d, d.plusDays(6)))
-          .toSeq
+      WeeklyIvGrid.weekWindows(dates)
     finally stream.close()
