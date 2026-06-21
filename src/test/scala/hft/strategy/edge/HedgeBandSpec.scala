@@ -43,6 +43,12 @@ class HedgeBandSpec extends munit.FunSuite:
     bandsNear(b.bands(ctx(maBias = 1)), 3.0, 2.0)   // 均线上: 上带 2*1.5, 下带不变
     bandsNear(b.bands(ctx(maBias = -1)), 1.0, 2.0)  // 均线下: 上带 2*0.5, 下带不变
 
+  test("MaAsymHedgeBand: 均线上 上紧下松, 均线下 上松下紧"):
+    val b = MaAsymHedgeBand(tightMult = 1.0, looseMult = 2.0)
+    bandsNear(b.bands(ctx(maBias = 1, atr = 1.0)), 1.0, 2.0)   // 均线上: 上带紧(1ATR)、下带松(2ATR)
+    bandsNear(b.bands(ctx(maBias = 0, atr = 1.0)), 1.0, 2.0)   // 未就绪(>=0)同均线上
+    bandsNear(b.bands(ctx(maBias = -1, atr = 2.0)), 4.0, 2.0)  // 均线下: 上松(2*2)、下紧(1*2)
+
   test("HedgeBand 共享因子: clamp / regimeFactor / skewOf"):
     near(HedgeBand.clamp(5.0, 0.5, 2.0), 2.0)
     near(HedgeBand.clamp(0.1, 0.5, 2.0), 0.5)

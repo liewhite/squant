@@ -199,7 +199,8 @@ final case class WeekResult(
 )
 final case class WeekRec(plan: WeekPlan, r: WeekResult)
 
-private def pct(x: Double, base: Double): Double = if base > 0 then x / base * 100.0 else 0.0
+// 以权利金**绝对值**为基准 (卖方 enteredPremium 为负=收到的权利金, 取绝对值得回报率)
+private def pct(x: Double, base: Double): Double = if base != 0.0 then x / math.abs(base) * 100.0 else 0.0
 
 private def writeWeekly(path: String, recs: Seq[WeekRec]): Unit =
   val pw = java.io.PrintWriter(path)

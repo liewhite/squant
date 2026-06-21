@@ -55,3 +55,9 @@ class WeeklyIvGridSpec extends munit.FunSuite:
   test("不足 7 天 / 空集 -> 无窗口"):
     assertEquals(WeeklyIvGrid.weekWindows((0 to 5).map(d).toSet), Seq.empty)
     assertEquals(WeeklyIvGrid.weekWindows(Set.empty), Seq.empty)
+
+  test("windows: 21 天窗口、7 天步长 -> 重叠"):
+    // 0..27 全 (28 天) -> 起点 0,7,14 (21 天窗各需起点+20<=27); 起点21 -> 21+20=41>27 跳过
+    val ws = WeeklyIvGrid.windows((0 to 27).map(d).toSet, lenDays = 21, stepDays = 7)
+    assertEquals(ws, Seq((d(0), d(20)), (d(7), d(27))))
+    assertEquals(WeeklyIvGrid.windows((0 to 13).map(d).toSet, 7, 7), WeeklyIvGrid.weekWindows((0 to 13).map(d).toSet))

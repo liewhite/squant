@@ -49,16 +49,19 @@ object WeeklyIvGrid:
     val ivPrev = if idx <= 1 then seedIv else rv(idx - 2)
     Plan(iv, ivPrev, policy.mult(iv, ivPrev, idx))
 
-  /** 从已有日期集合切出连续、不重叠、每天都有数据的 7 天窗口 (升序, 含起止日)。
-    * 从最早日期起以 7 天步长推进; 含缺天的窗口被整窗跳过 (不回退对齐)。 */
-  def weekWindows(dates: Set[LocalDate]): Seq[(LocalDate, LocalDate)] =
-    if dates.isEmpty then Seq.empty
+  /** 从已有日期集合切出**长 lenDays、步长 stepDays** 的窗口 (升序, 含起止日)：
+    * 从最早日期起按 stepDays 推进; 含缺天的窗口整窗跳过 (不回退对齐)。stepDays<lenDays 时窗口重叠。 */
+  def windows(dates: Set[LocalDate], lenDays: Int, stepDays: Int): Seq[(LocalDate, LocalDate)] =
+    if dates.isEmpty || lenDays < 1 || stepDays < 1 then Seq.empty
     else
       val first = dates.min
       val last = dates.max
       Iterator
-        .iterate(first)(_.plusDays(7))
-        .takeWhile(d => !d.plusDays(6).isAfter(last))
-        .filter(d => (0 to 6).forall(k => dates.contains(d.plusDays(k))))
-        .map(d => (d, d.plusDays(6)))
+        .iterate(first)(_.plusDays(stepDays))
+        .takeWhile(d => !d.plusDays(lenDays - 1).isAfter(last))
+        .filter(d => (0 until lenDays).forall(k => dates.contains(d.plusDays(k))))
+        .map(d => (d, d.plusDays(lenDays - 1)))
         .toSeq
+
+  /** 连续不重叠的 7 天窗口 (= windows(dates, 7, 7)) */
+  def weekWindows(dates: Set[LocalDate]): Seq[(LocalDate, LocalDate)] = windows(dates, 7, 7)
