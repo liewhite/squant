@@ -34,6 +34,8 @@ class VolSellSpec extends munit.FunSuite:
     def sellOption(symbol: String, qty: Double, limitPrice: Option[Double], orderLinkId: String) =
       placed += ((symbol, qty, limitPrice, orderLinkId))
       if failLeg(symbol) then Left("simulated fail") else Right(s"oid-$orderLinkId")
+    def optionAccountDelta() = Right(0.0)
+    def linearKlines(symbol: String, interval: String, bars: Int) = Right(Vector.empty)
 
   private val cfg = VolSell.Config(symbol = "ETHUSDT", baseCoin = "ETH", targetDays = 21, gridHigh = 2.0, gridLow = 1.0, baseQty = 1.0, bars2w = 20)
 

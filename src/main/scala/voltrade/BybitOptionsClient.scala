@@ -46,6 +46,26 @@ final class BybitOptionsClient(
   override def underlyingSpot(symbol: String): Either[String, Double] =
     underlyingCloses5m(symbol, 1).flatMap(_.lastOption.toRight(s"no kline for $symbol"))
 
+  override def linearKlines(symbol: String, interval: String, bars: Int): Either[String, Vector[(Double, Double, Double)]] =
+    // [startTime, open, high(2), low(3), close(4), volume, turnover], 倒序返回 -> 反转为最旧->最新
+    val q = s"category=linear&symbol=$symbol&interval=$interval&limit=${math.min(1000, bars)}"
+    publicGet[Envelope[KlineResult]](s"/v5/market/kline?$q").flatMap { env =>
+      env.asEither.map { r =>
+        r.list.reverse.flatMap { row =>
+          for h <- row.lift(2).flatMap(_.toDoubleOption); l <- row.lift(3).flatMap(_.toDoubleOption); c <- row.lift(4).flatMap(_.toDoubleOption)
+          yield (h, l, c)
+        }.toVector
+      }
+    }
+
+  override def optionAccountDelta(): Either[String, Double] =
+    credentials match
+      case None => Left("optionAccountDelta 需 API key")
+      case Some(c) =>
+        signedGet[Envelope[PositionListResult]](c, "/v5/position/list", "category=option").flatMap { env =>
+          env.asEither.map(_.list.flatMap(_.delta.toDoubleOption).sum)
+        }
+
   override def optionChain(baseCoin: String): Either[String, Vector[OptionInstrument]] =
     def page(cursor: Option[String], acc: Vector[OptionInstrument]): Either[String, Vector[OptionInstrument]] =
       val q = s"category=option&baseCoin=$baseCoin&limit=1000" + cursor.fold("")(c => s"&cursor=$c")
@@ -99,6 +119,22 @@ final class BybitOptionsClient(
       else Left(s"HTTP ${resp.code} GET $pathQuery: ${resp.body.take(300)}")
     catch case e: Throwable => Left(s"GET $pathQuery failed: ${e.getMessage}")
 
+  private def signedGet[T: JsonValueCodec](c: BybitCredentials, path: String, query: String): Either[String, T] =
+    try
+      val ts = Instant.now().toEpochMilli.toString
+      val prehash = ts + c.apiKey + BybitClient.RecvWindow + query
+      val resp = basicRequest
+        .get(Uri.unsafeParse(s"$base$path?$query"))
+        .header("X-BAPI-API-KEY", c.apiKey)
+        .header("X-BAPI-SIGN", BybitClient.hmacSha256Hex(c.apiSecret, prehash))
+        .header("X-BAPI-TIMESTAMP", ts)
+        .header("X-BAPI-RECV-WINDOW", BybitClient.RecvWindow)
+        .response(asStringAlways)
+        .send(backend)
+      if resp.code.isSuccess then Right(readFromString[T](resp.body))
+      else Left(s"HTTP ${resp.code} GET $path: ${resp.body.take(300)}")
+    catch case e: Throwable => Left(s"GET $path failed: ${e.getMessage}")
+
   private def signedPost[T: JsonValueCodec](c: BybitCredentials, path: String, body: String): Either[String, T] =
     try
       val ts = Instant.now().toEpochMilli.toString
@@ -134,8 +170,11 @@ object BybitOptionsClient:
   final case class TickerItem(symbol: String, ask1Price: String)
   final case class TickersResult(list: List[TickerItem])
   final case class OrderResult(orderId: String, orderLinkId: String)
+  final case class PositionItem(symbol: String, delta: String)
+  final case class PositionListResult(list: List[PositionItem])
 
   given klineCodec: JsonValueCodec[Envelope[KlineResult]] = JsonCodecMaker.make
   given instrumentsCodec: JsonValueCodec[Envelope[InstrumentsResult]] = JsonCodecMaker.make
   given tickersCodec: JsonValueCodec[Envelope[TickersResult]] = JsonCodecMaker.make
   given orderCodec: JsonValueCodec[Envelope[OrderResult]] = JsonCodecMaker.make
+  given positionsCodec: JsonValueCodec[Envelope[PositionListResult]] = JsonCodecMaker.make
