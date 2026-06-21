@@ -34,6 +34,22 @@ class PerpHedgerSpec extends munit.FunSuite:
   test("ATR 未就绪 (<=0) -> Hold"):
     assertEquals(PerpHedger.decide(110, 0.0, 1, 1.0, 0, PerpHedger.State(center = 100), p)._1, PerpHedger.Action.Hold)
 
+  test("数量按 qtyStep 向下取整且≥minQty, 卖价按 tickSize 向上取整 (保被动)"):
+    val pq = p.copy(qtyStep = 0.1, minQty = 0.1, tickSize = 0.5, minHedge = 0.001)
+    PerpHedger.decide(102, 1, 1, 0.55, 0, PerpHedger.State(center = 100), pq)._1 match
+      case PerpHedger.Action.Place(side, price, qty) =>
+        assertEquals(side, Side.Short)
+        assert(math.abs(qty - 0.5) < 1e-9, s"qty=$qty")            // 0.55 floor 到 0.1
+        assert(math.abs(price - 103.5) < 1e-9, s"price=$price")    // ceil(102*1.01/0.5)*0.5 = 103.5 (向上保被动)
+      case other => fail(s"expected Place, got $other")
+    // 量化后低于最小下单量 -> 无法对冲该残量 -> Hold
+    assertEquals(PerpHedger.decide(102, 1, 1, 0.05, 0, PerpHedger.State(center = 100), pq)._1, PerpHedger.Action.Hold)
+
+  test("中性 (|净Δ|<minHedge) -> 重置 center 到现价 + Hold"):
+    val (a, st) = PerpHedger.decide(120, 1, 1, 0.001, 0, PerpHedger.State(center = 100), p)
+    assertEquals(a, PerpHedger.Action.Hold)
+    assertEquals(st.center, 120.0) // 已中性, 中心移到现价
+
   test("均线下: 下行紧带(1ATR) 净空 -> 挂被动买"):
     val st0 = PerpHedger.State(center = 100)
     PerpHedger.decide(98, 1, -1, -0.5, 0, st0, p)._1 match // 均线下 down=tight=1ATR, 回落2>1 -> 触发
