@@ -38,6 +38,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   val ccy = "ETH"
   val cacheDir = sys.env.getOrElse("DATA_CACHE", "data-cache")
   val csvPath = sys.env.getOrElse("EDGE_CSV", "/tmp/edge_rolling.csv")
+  val curveCsvPath = sys.env.getOrElse("EDGE_CURVE_CSV", "/tmp/edge_curve.csv")
   val straddles = sys.env.get("EDGE_STRADDLES").map(_.toDouble).getOrElse(10.0)
   val atrMult = 2.0
   val initialBalance = 1_000_000.0
@@ -120,10 +121,17 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       val runner = StrategyRunner.backtest(strategy, symbolMetas)
 
       var lastMid = 0.0; var lastTs = 0L
+      // 小时采样 PnL 曲线点 (ts, 期权腿 MTM, 对冲腿 equity−init)，跨月拼成累计净值曲线
+      val curve = ArrayBuffer.empty[(Long, Double, Double)]
+      var curveLastTs = 0L
       val obs: IncomeEvent => Unit = ev =>
         ev.data match
           case EventData.BboUpdate(b) => lastMid = b.midPrice; lastTs = b.timestamp
-          case _                      => ()
+          case EventData.AccountInfoUpdate(_, info) =>
+            if lastTs > 0 && ev.exchangeTs - curveLastTs >= 3_600_000L then
+              curveLastTs = ev.exchangeTs
+              curve += ((ev.exchangeTs, withGreeks.optionPnl(lastMid, lastTs), info.equity - initialBalance))
+          case _ => ()
 
       val engine = BacktestEngine(
         exchange = Exchange.Binance, source = source, runners = Seq(runner),
@@ -138,7 +146,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       val optionPnl = withGreeks.optionPnl(lastMid, lastTs)
       val hedgePnl = result.finalEquity - result.initialBalance
       // 入场权利金取数据源内部真实值 (SSOT, 与 optionPnl 同源, 口径一致)
-      RunResult(optionPnl, hedgePnl, optionPnl + hedgePnl, withGreeks.enteredPremium, result.fills, lastMid)
+      RunResult(optionPnl, hedgePnl, optionPnl + hedgePnl, withGreeks.enteredPremium, result.fills, lastMid, curve.toVector)
     finally backend.close()
 
   // 月份/变体相互独立、每个回测确定性 -> 可并行 (结果与并行顺序无关)。
@@ -192,12 +200,18 @@ import scala.concurrent.{Await, ExecutionContext, Future}
     }
 
     writeCsv(csvPath, sorted)
+    writeCurveCsv(curveCsvPath, sorted)
     printSummary(variants.map(_._1), sorted)
-    println(f"\n明细 CSV (${sorted.size} 行) -> $csvPath   用时 ${(System.nanoTime() - t0) / 1e9}%.1fs (并行度 $parallelism)")
+    println(f"\n明细 CSV (${sorted.size} 行) -> $csvPath")
+    println(f"净值曲线 CSV -> $curveCsvPath   用时 ${(System.nanoTime() - t0) / 1e9}%.1fs (并行度 $parallelism)")
   finally pool.shutdown()
 
 /** 单月单变体结果 */
-final case class RunResult(optionPnl: Double, hedgePnl: Double, total: Double, premium: Double, fills: Int, endPx: Double):
+final case class RunResult(
+    optionPnl: Double, hedgePnl: Double, total: Double, premium: Double, fills: Int, endPx: Double,
+    /** 小时采样曲线点: (ts, 期权腿 MTM, 对冲腿 equity−init) */
+    curve: Vector[(Long, Double, Double)] = Vector.empty,
+):
   /** 总盈亏占入场权利金的比例 (%)，权利金<=0 时为 0 */
   def totalPct: Double = if premium > 0 then total / premium * 100.0 else 0.0
 
@@ -233,6 +247,27 @@ private def completeMonths(cacheDir: String, symbol: Symbol): Seq[YearMonth] =
         .collect { case (ym, ds) if ds.toSet.size == ym.lengthOfMonth() => ym }
         .toSeq.sorted
     finally stream.close()
+
+/** 各变体跨月拼接的**累计净值曲线**：月内为该月运行中的 (期权腿, 对冲腿)，跨月把上月末值
+  * 累加为基线 (每月独立开仓/到期, 视作"每月滚动执行同一策略"的连续净值)。最旧->最新。 */
+private def writeCurveCsv(path: String, records: Seq[Record]): Unit =
+  val pw = java.io.PrintWriter(path)
+  try
+    pw.println("ts,date,variant,cumOption,cumHedge,cumTotal")
+    records.groupBy(_.variant).foreach { case (variant, recs) =>
+      var carryOpt = 0.0
+      var carryHed = 0.0
+      recs.sortBy(_.month).foreach { rec =>
+        rec.r.curve.foreach { case (ts, opt, hed) =>
+          val co = carryOpt + opt
+          val ch = carryHed + hed
+          pw.println(f"$ts,${java.time.Instant.ofEpochMilli(ts)},$variant,$co%.2f,$ch%.2f,${co + ch}%.2f")
+        }
+        carryOpt += rec.r.optionPnl
+        carryHed += rec.r.hedgePnl
+      }
+    }
+  finally pw.close()
 
 private def writeCsv(path: String, records: Seq[Record]): Unit =
   val pw = java.io.PrintWriter(path)
