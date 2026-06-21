@@ -21,16 +21,20 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   *
   * 规则 (全部只用过去信息、不预测未来 IV)：
   *   - 每周独立开一份 ATM 长跨式, 持有到本周末。**IV = 上一周的已实现波动 RV**；首周无上周, 用种子 IV(默认 0.55)。
-  *   - **IV 网格仓位**：比较本周 IV(=上周 RV) 与上周 IV——波动**下降**则买 [[gridUp]]×(默认 1.5) 份,
-  *     **上升**则买 [[gridDown]]×(默认 0.75) 份, 持平 1×。即"波动便宜时多买、变贵时少买"。
-  *   - 对冲用对称 ATR 通道 (隔离仓位/择时效应, 不掺方向性对冲带)。
+  *   - **仓位策略 [[WeeklyIvGrid.SizePolicy]]** (EDGE_SIZE_MODE)：
+  *       `step`(默认)=两档网格 (波动↓买 [[gridUp]]×、↑买 [[gridDown]]×)；
+  *       `drop`=只在波动下降周建仓、**越跌越买** (倍数=clamp(scale×相对跌幅,0,cap), 上升/首周不建仓)。
+  *   - **对冲开关** (EDGE_HEDGE)：`on`(默认)=对称 ATR delta 对冲；`off`=纯买入持有到期、**不做 scalping**
+  *     (无下单, total=期权腿)。不对冲时 minTenor 默认 0.02d 使终值≈内在价值——注意仍含约 minTenor 的残留
+  *     时间价值, 对买方**轻微偏多**(非精确到期内在价值)。
   *
-  * 保留详细数据供分析：周度汇总 / 小时净值曲线 / 逐笔对冲成交。并解析对比"网格仓位" vs "恒定 1× 仓位"
-  * (P&L 随份数线性, 故 flat = Σ(周盈亏/倍数), 无需重跑)。
+  * 保留详细数据供分析：周度汇总 / 小时净值曲线 / 逐笔对冲成交。汇总解析"建仓周内恒定1×"对照
+  * (P&L 随份数线性, total/mult), 看越跌越买的缩放贡献。
   *
   * 运行: sbt "runMain hft.demo.edge.WeeklyIvGridBacktest"
-  * 可调 env: EDGE_SEED_IV / EDGE_GRID_UP / EDGE_GRID_DOWN / EDGE_STRADDLES / EDGE_TAKER_FEE / EDGE_DELAY_MS /
-  *           EDGE_WEEKLY_CSV / EDGE_CURVE_CSV / EDGE_FILLS_CSV / EDGE_PAR / DATA_CACHE
+  * 可调 env: EDGE_SIZE_MODE(step|drop) / EDGE_HEDGE(on|off) / EDGE_SEED_IV / EDGE_GRID_UP / EDGE_GRID_DOWN /
+  *           EDGE_DROP_SCALE / EDGE_DROP_CAP / EDGE_ATR_MULT / EDGE_MIN_TENOR_DAYS / EDGE_STRADDLES /
+  *           EDGE_TAKER_FEE / EDGE_DELAY_MS / EDGE_MAX_WEEKS / EDGE_WEEKLY_CSV / EDGE_CURVE_CSV / EDGE_FILLS_CSV / EDGE_PAR / DATA_CACHE
   */
 @main def WeeklyIvGridBacktest(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")
@@ -74,6 +78,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   println("==================== 周度 IV 网格回测 (买方) ====================")
   println(f"symbol=$symbol  周数=${weeks.size} (${weeks.head._1}..${weeks.last._2})  种子IV=$seedIv%.2f  仓位=$sizeDesc")
   println(f"基准份数=$baseStraddles  对冲=${if hedgeOn then f"对称ATR(${atrMult}%.1f)" else "无(买入持有到期)"}  minTenor=${minTenorDays}d  takerFee=${takerFee * 100}%.3f%%  delay=${delayMs}ms")
+  if !hedgeOn then println(f"注: 持有到期为近似——终值含约 ${minTenorDays}%.2fd 残留时间价值, 对买方轻微偏多 (非精确到期内在价值)")
 
   def tradeSource(backend: sttp.client4.SyncBackend, start: LocalDate, end: LocalDate) =
     BinanceHistory.source(backend, Seq(symbol), start, end, kinds = Seq(BinanceDataKind.Trades), cacheDir = cacheDir)
