@@ -6,7 +6,7 @@ import hft.engine.StrategyRunner
 import hft.indicator.RealizedVol
 import hft.messaging.{EventData, IncomeEvent}
 import hft.sim.SimConfig
-import hft.strategy.edge.{BandHedgeStrategy, MaAsymHedgeBand}
+import hft.strategy.edge.{BandHedgeStrategy, MaAsymHedgeBand, MakerHedgeStrategy}
 import sttp.client4.DefaultSyncBackend
 
 import java.nio.file.{Files, Path}
@@ -46,7 +46,12 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   val looseAtr = sys.env.get("EDGE_LOOSE_ATR").map(_.toDouble).getOrElse(2.0)
   val tenorDays = sys.env.get("EDGE_TENOR_DAYS").map(_.toInt).getOrElse(21)
   val takerFee = sys.env.get("EDGE_TAKER_FEE").map(_.toDouble).getOrElse(0.0)
+  val makerFee = sys.env.get("EDGE_MAKER_FEE").map(_.toDouble).getOrElse(0.0)
   val delayMs = sys.env.get("EDGE_DELAY_MS").map(_.toLong).getOrElse(0L)
+  // 对冲执行: take(市价吃单) | maker(现价外挂被动单, 省费+赚价差, 5s重挂)
+  val hedgeExec = sys.env.getOrElse("EDGE_HEDGE_EXEC", "take")
+  val makerOffset = sys.env.get("EDGE_MAKER_OFFSET").map(_.toDouble).getOrElse(0.0002)
+  val requoteMs = sys.env.get("EDGE_REQUOTE_MS").map(_.toLong).getOrElse(5000L)
   val maxTranches = sys.env.get("EDGE_MAX_TRANCHES").map(_.toInt).getOrElse(Int.MaxValue)
   val initialBalance = 1_000_000.0
   val weeklyCsv = sys.env.getOrElse("EDGE_WEEKLY_CSV", "/tmp/sellvol_tranches.csv")
@@ -65,7 +70,8 @@ import scala.concurrent.{Await, ExecutionContext, Future}
 
   println("==================== 卖方 short-vol 周度滚动回测 ====================")
   println(f"symbol=$symbol  周数=${weeks.size}  tenor=${tenorDays}d(${tenorWeeks}周)  基准卖=${baseStraddles}份")
-  println(f"仓位: 波动↑卖${gridHigh}×/↓卖${gridLow}×   对冲: 均线上 上${tightAtr}%.1fATR/下${looseAtr}%.1fATR, 均线下反之   takerFee=${takerFee * 100}%.3f%%  delay=${delayMs}ms")
+  val execDesc = if hedgeExec == "maker" then f"maker(现价外${makerOffset * 100}%.3f%%, ${requoteMs}ms重挂, makerFee=${makerFee * 100}%.3f%%)" else f"take(taker费${takerFee * 100}%.3f%%)"
+  println(f"仓位: 波动↑卖${gridHigh}×/↓卖${gridLow}×   对冲带: 均线上 上${tightAtr}%.1fATR/下${looseAtr}%.1fATR, 均线下反之   执行=$execDesc  delay=${delayMs}ms")
 
   def tradeSource(backend: sttp.client4.SyncBackend, s: LocalDate, e: LocalDate) =
     BinanceHistory.source(backend, Seq(symbol), s, e, kinds = Seq(BinanceDataKind.Trades), cacheDir = cacheDir)
@@ -95,7 +101,10 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       )
       val withGreeks = BsGreeksSource(tradeSource(backend, start, end), cfg)
       val source = TradePrintBboSource(withGreeks)
-      val runner = StrategyRunner.backtest(BandHedgeStrategy(Exchange.Binance, symbol, ccy, band), symbolMetas)
+      val hedgeStrat =
+        if hedgeExec == "maker" then MakerHedgeStrategy(Exchange.Binance, symbol, ccy, band, offsetPct = makerOffset, requoteMs = requoteMs)
+        else BandHedgeStrategy(Exchange.Binance, symbol, ccy, band)
+      val runner = StrategyRunner.backtest(hedgeStrat, symbolMetas)
       var lastMid = 0.0; var lastTs = 0L; var curveLastTs = 0L
       val curve = ArrayBuffer.empty[(Long, Double, Double)]
       val fillRecs = ArrayBuffer.empty[(Long, Side, Double, Double)]
@@ -111,7 +120,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       val engine = BacktestEngine(
         exchange = Exchange.Binance, source = source, runners = Seq(runner),
         config = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = delayMs,
-          initialBalanceUsdt = initialBalance, makerFeeRate = 0.0, takerFeeRate = takerFee),
+          initialBalanceUsdt = initialBalance, makerFeeRate = makerFee, takerFeeRate = takerFee),
         observers = Seq(obs),
       )
       val result = engine.run()
