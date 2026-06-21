@@ -42,7 +42,18 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   val seedIv = sys.env.get("EDGE_SEED_IV").map(_.toDouble).getOrElse(0.55)
   val gridUp = sys.env.get("EDGE_GRID_UP").map(_.toDouble).getOrElse(1.5)    // 波动下降 -> 多买
   val gridDown = sys.env.get("EDGE_GRID_DOWN").map(_.toDouble).getOrElse(0.75) // 波动上升 -> 少买
+  val dropScale = sys.env.get("EDGE_DROP_SCALE").map(_.toDouble).getOrElse(5.0)
+  val dropCap = sys.env.get("EDGE_DROP_CAP").map(_.toDouble).getOrElse(3.0)
+  // 仓位策略: step(两档网格) | drop(只买波动下降周, 越跌越买)
+  val sizePolicy: WeeklyIvGrid.SizePolicy = sys.env.getOrElse("EDGE_SIZE_MODE", "step") match
+    case "step" => WeeklyIvGrid.StepGrid(gridUp, gridDown)
+    case "drop" => WeeklyIvGrid.DropOnly(dropScale, dropCap)
+    case other  => sys.error(s"unknown EDGE_SIZE_MODE='$other' (step|drop)")
   val atrMult = sys.env.get("EDGE_ATR_MULT").map(_.toDouble).getOrElse(2.0)
+  // 对冲开关: on=对称ATR delta 对冲; off=纯买入持有到期不对冲 (无 scalping)
+  val hedgeOn = sys.env.getOrElse("EDGE_HEDGE", "on") != "off"
+  // 剩余期限下限 (天): 不对冲时设小 -> 终值≈内在价值 (真实持有到期); 对冲时保 1 天避奇点
+  val minTenorDays = sys.env.get("EDGE_MIN_TENOR_DAYS").map(_.toDouble).getOrElse(if hedgeOn then 1.0 else 0.02)
   val initialBalance = 1_000_000.0
   val takerFee = sys.env.get("EDGE_TAKER_FEE").map(_.toDouble).getOrElse(0.0)
   val delayMs = sys.env.get("EDGE_DELAY_MS").map(_.toLong).getOrElse(0L)
@@ -57,9 +68,12 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   val weeks = completeWeeks(cacheDir, symbol).take(maxWeeks)
   if weeks.isEmpty then sys.error(s"no complete cached weeks for $symbol under $cacheDir")
 
-  println("==================== 周度 IV 网格回测 (买方 long-gamma) ====================")
-  println(f"symbol=$symbol  周数=${weeks.size} (${weeks.head._1}..${weeks.last._2})  种子IV=$seedIv%.2f  网格: 波动↓买${gridUp}×/↑买${gridDown}×")
-  println(f"基准份数=$baseStraddles  对冲=对称ATR(${atrMult}%.1f)  takerFee=${takerFee * 100}%.3f%%  delay=${delayMs}ms")
+  val sizeDesc = sys.env.getOrElse("EDGE_SIZE_MODE", "step") match
+    case "drop" => f"drop(只买波动↓周, scale=$dropScale%.1f cap=$dropCap%.1f)"
+    case _      => f"step(波动↓买${gridUp}×/↑买${gridDown}×)"
+  println("==================== 周度 IV 网格回测 (买方) ====================")
+  println(f"symbol=$symbol  周数=${weeks.size} (${weeks.head._1}..${weeks.last._2})  种子IV=$seedIv%.2f  仓位=$sizeDesc")
+  println(f"基准份数=$baseStraddles  对冲=${if hedgeOn then f"对称ATR(${atrMult}%.1f)" else "无(买入持有到期)"}  minTenor=${minTenorDays}d  takerFee=${takerFee * 100}%.3f%%  delay=${delayMs}ms")
 
   def tradeSource(backend: sttp.client4.SyncBackend, start: LocalDate, end: LocalDate) =
     BinanceHistory.source(backend, Seq(symbol), start, end, kinds = Seq(BinanceDataKind.Trades), cacheDir = cacheDir)
@@ -93,12 +107,14 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       val cfg = BsGreeksConfig(
         exchange = Exchange.Binance, ccy = ccy, underlyingSymbol = symbol,
         straddles = straddles, impliedVol = iv, expiry = expiryMs,
-        riskFreeRate = 0.0, spotHolding = 0.0, emitIntervalMs = 1000,
+        riskFreeRate = 0.0, spotHolding = 0.0, emitIntervalMs = 1000, minTenorDays = minTenorDays,
       )
       val withGreeks = BsGreeksSource(tradeSource(backend, start, end), cfg)
       val source = TradePrintBboSource(withGreeks)
-      val strategy = BandHedgeStrategy(Exchange.Binance, symbol, ccy, SymmetricAtrBand(atrMult))
-      val runner = StrategyRunner.backtest(strategy, symbolMetas)
+      // 对冲关 -> 无 runner (纯期权腿持有到期); 开 -> 对称 ATR delta 对冲
+      val runners =
+        if hedgeOn then Seq(StrategyRunner.backtest(BandHedgeStrategy(Exchange.Binance, symbol, ccy, SymmetricAtrBand(atrMult)), symbolMetas))
+        else Seq.empty
 
       var lastMid = 0.0; var lastTs = 0L
       var curveLastTs = 0L
@@ -115,7 +131,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
           case _ => ()
 
       val engine = BacktestEngine(
-        exchange = Exchange.Binance, source = source, runners = Seq(runner),
+        exchange = Exchange.Binance, source = source, runners = runners,
         config = SimConfig(
           exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = delayMs,
           initialBalanceUsdt = initialBalance, makerFeeRate = 0.0, takerFeeRate = takerFee,
@@ -142,30 +158,32 @@ import scala.concurrent.{Await, ExecutionContext, Future}
         Duration.Inf,
       ).toMap
 
-    // ② 顺序定每周 IV 与网格倍数 (纯逻辑见 WeeklyIvGrid.planWeek, 只用过去周 RV, 无前视)
+    // ② 顺序定每周 IV 与仓位倍数 (纯逻辑见 WeeklyIvGrid.planWeek, 只用过去周 RV, 无前视)
     val plans: Seq[WeekPlan] = weeks.indices.map { i =>
-      val p = WeeklyIvGrid.planWeek(i, seedIv, j => rvByWeek(j)._1, gridUp, gridDown)
+      val p = WeeklyIvGrid.planWeek(i, seedIv, j => rvByWeek(j)._1, sizePolicy)
       WeekPlan(i, weeks(i)._1, weeks(i)._2, rvByWeek(i)._1, p.iv, p.ivPrev, p.mult, baseStraddles * p.mult)
     }
+    val active = plans.filter(_.straddles > 0.0) // 倍数=0 的周不建仓 -> 跳过实跑 (盈亏 0)
 
-    // ③ 并行跑每周
+    // ③ 并行跑建仓周 (跳过的周记零结果)
     val done = AtomicInteger(0)
-    val recs = Await.result(
-      Future.sequence(plans.map { p =>
+    val activeRecs = Await.result(
+      Future.sequence(active.map { p =>
         Future {
           val r = runWeek(p.start, p.end, p.iv, p.straddles)
           val k = done.incrementAndGet()
-          println(f"  [$k%2d/${plans.size}] ${p.start} iv=${p.iv}%.3f ×${p.mult}%.2f 总=${r.total}%+9.1f (${pct(r.total, r.premium)}%+6.2f%%) fills=${r.fills}")
+          println(f"  [$k%2d/${active.size}] ${p.start} iv=${p.iv}%.3f ×${p.mult}%.2f 总=${r.total}%+9.1f (${pct(r.total, r.premium)}%+6.2f%%) fills=${r.fills}")
           WeekRec(p, r)
         }
       }),
       Duration.Inf,
-    ).sortBy(_.plan.idx)
+    ).map(rc => rc.plan.idx -> rc).toMap
+    val recs = plans.map(p => activeRecs.getOrElse(p.idx, WeekRec(p, WeekResult(0, 0, 0, 0, 0, 0, 0, Vector.empty, Vector.empty))))
 
     writeWeekly(weeklyCsv, recs)
     writeCurve(curveCsv, recs)
     writeFills(fillsCsv, recs)
-    summarize(recs, gridUp, gridDown)
+    summarize(recs)
     println(f"\n周度=$weeklyCsv  曲线=$curveCsv  成交=$fillsCsv   用时 ${(System.nanoTime() - t0) / 1e9}%.1fs (并行度 $parallelism)")
   finally pool.shutdown()
 
@@ -214,26 +232,20 @@ private def writeFills(path: String, recs: Seq[WeekRec]): Unit =
     }
   finally pw.close()
 
-/** 汇总：网格仓位 vs 恒定 1× (P&L 随份数线性, flat = Σ(周盈亏/倍数)), 并按倍数桶拆解 */
-private def summarize(recs: Seq[WeekRec], gridUp: Double, gridDown: Double): Unit =
-  val gridTotal = recs.map(_.r.total).sum
-  val gridPrem = recs.map(_.r.premium).sum
-  val flatTotal = recs.map(rc => rc.r.total / rc.plan.mult).sum         // 恒定 1× 的等价总盈亏
-  val flatPrem = recs.map(rc => rc.r.premium / rc.plan.mult).sum
-  val wins = recs.count(_.r.total > 0)
+/** 汇总：整体盈亏/占比/胜率, 建仓周占比, 及"建仓周内"的仓位缩放贡献 (flat=Σ建仓周盈亏/倍数, 仅 mult>0) */
+private def summarize(recs: Seq[WeekRec]): Unit =
+  val traded = recs.filter(_.plan.mult > 0.0)
+  val total = recs.map(_.r.total).sum
+  val prem = recs.map(_.r.premium).sum
+  val wins = traded.count(_.r.total > 0)
+  // 建仓周内的"恒定1×"等价 (P&L 随份数线性, total/mult), 与实际加权对比看缩放贡献
+  val flatTotal = traded.map(rc => rc.r.total / rc.plan.mult).sum
+  val flatPrem = traded.map(rc => rc.r.premium / rc.plan.mult).sum
   println("\n==================== 汇总 ====================")
-  println(f"周数=${recs.size}  胜周=$wins/${recs.size}")
-  println(f"网格仓位 : Σ总=$gridTotal%+.1f  Σ权利金=$gridPrem%.1f  占比=${pct(gridTotal, gridPrem)}%+.2f%%")
-  println(f"恒定 1×  : Σ总=$flatTotal%+.1f  Σ权利金=$flatPrem%.1f  占比=${pct(flatTotal, flatPrem)}%+.2f%%")
-  println(f"网格增量 : ${gridTotal - flatTotal}%+.1f  (>0 表示按波动贵贱缩放仓位带来正贡献)")
-  println("-------- 按倍数桶 --------")
-  Seq((gridUp, s"波动↓ ×$gridUp"), (1.0, "持平 ×1.0"), (gridDown, s"波动↑ ×$gridDown")).foreach { case (m, label) =>
-    val bucket = recs.filter(rc => math.abs(rc.plan.mult - m) < 1e-9)
-    if bucket.nonEmpty then
-      val bt = bucket.map(_.r.total).sum
-      val bp = bucket.map(_.r.premium).sum
-      println(f"  $label%-12s 周数=${bucket.size}%2d  Σ总=$bt%+9.1f  占比=${pct(bt, bp)}%+6.2f%%")
-  }
+  println(f"周数=${recs.size}  建仓周=${traded.size}  胜周(建仓内)=$wins/${traded.size}")
+  println(f"实际仓位 : Σ总=$total%+.1f  Σ权利金=$prem%.1f  占权利金=${pct(total, prem)}%+.2f%%")
+  if traded.nonEmpty then
+    println(f"建仓周内恒定1× : Σ总=$flatTotal%+.1f  占权利金=${pct(flatTotal, flatPrem)}%+.2f%%  (与实际比看越跌越买的缩放贡献)")
 
 /** 缓存中该 symbol 连续完整 (每天都有 trades 文件) 的 7 天窗口 (窗口切分纯逻辑见 [[WeeklyIvGrid.weekWindows]]) */
 private def completeWeeks(cacheDir: String, symbol: Symbol): Seq[(LocalDate, LocalDate)] =
