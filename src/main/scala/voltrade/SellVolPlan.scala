@@ -58,3 +58,17 @@ object SellVolPlan:
     val thisFri = from.`with`(TemporalAdjusters.nextOrSame(DayOfWeek.FRIDAY)).`with`(LocalTime.of(decisionHour, 0))
     val next = if thisFri.isAfter(from) then thisFri else thisFri.plusWeeks(1)
     next.toInstant.toEpochMilli
+
+  /** 当前**决策周期锚点** = from 当下或之前最近的"周五 decisionHour:00" (ms epoch)。
+    * 用于派生**幂等** orderLinkId (同一周决策无论重启/重试都得同一 link, 交易所据此拒重复单)。 */
+  def currentDecisionTime(fromMs: Long, zone: ZoneId = ZoneId.of("Asia/Shanghai"), decisionHour: Int = 15): Long =
+    val from = ZonedDateTime.ofInstant(Instant.ofEpochMilli(fromMs), zone)
+    val cand = from.`with`(TemporalAdjusters.previousOrSame(DayOfWeek.FRIDAY)).`with`(LocalTime.of(decisionHour, 0))
+    val anchor = if cand.isAfter(from) then cand.minusWeeks(1) else cand // prevOrSame 落在周五但时刻可能晚于 from
+    anchor.toInstant.toEpochMilli
+
+  /** 按交易所 qtyStep 向下取整并校验 minQty: 返回合规下单量, 低于最小量返回 None。step<=0 时只校验 minQty。 */
+  def quantizeQty(qty: Double, qtyStep: Double, minQty: Double): Option[Double] =
+    val q = if qtyStep > 0 then math.floor(qty / qtyStep + 1e-9) * qtyStep else qty
+    val rounded = if qtyStep > 0 then math.round(q / qtyStep) * qtyStep else q // 消除浮点尾差
+    if rounded >= minQty && rounded > 0 then Some(rounded) else None

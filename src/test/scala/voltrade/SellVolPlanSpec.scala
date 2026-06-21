@@ -32,6 +32,24 @@ class SellVolPlanSpec extends munit.FunSuite:
     // 缺 put 则无跨式
     assertEquals(SellVolPlan.selectStraddle(chain.filterNot(_.right == OptionRight.Put), 0, 2990, 21), None)
 
+  test("quantizeQty: 向下取整到 step 并校验 minQty"):
+    assertEquals(SellVolPlan.quantizeQty(1.0, 0.1, 0.1), Some(1.0))
+    assertEquals(SellVolPlan.quantizeQty(2.0, 0.1, 0.1), Some(2.0))
+    assertEquals(SellVolPlan.quantizeQty(0.05, 0.1, 0.1), None)        // < min
+    assertEquals(SellVolPlan.quantizeQty(0.25, 0.1, 0.1).map(r => math.round(r * 100) / 100.0), Some(0.2)) // floor 到 step
+    assertEquals(SellVolPlan.quantizeQty(1.0, 0.0, 0.1), Some(1.0))    // 无 step
+    assertEquals(SellVolPlan.quantizeQty(0.05, 0.0, 0.1), None)
+
+  test("currentDecisionTime: 当下或之前最近的北京周五15:00, 且不晚于 now、距今<7天"):
+    val zone = ZoneId.of("Asia/Shanghai")
+    Seq("2025-06-21T00:00:00Z", "2025-06-20T08:00:00Z", "2025-06-23T00:00:00Z").foreach { s =>
+      val now = Instant.parse(s).toEpochMilli
+      val anchor = SellVolPlan.currentDecisionTime(now)
+      val z = ZonedDateTime.ofInstant(Instant.ofEpochMilli(anchor), zone)
+      assertEquals(z.getDayOfWeek, DayOfWeek.FRIDAY, s); assertEquals(z.getHour, 15, s)
+      assert(anchor <= now && now - anchor < 7L * 86_400_000L, s)
+    }
+
   test("nextDecisionTime: 永远是北京周五15:00 且在 from 之后"):
     val zone = ZoneId.of("Asia/Shanghai")
     Seq("2025-06-16T00:00:00Z", "2025-06-20T06:59:00Z", "2025-06-20T08:00:00Z", "2025-06-21T00:00:00Z").foreach { s =>

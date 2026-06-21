@@ -32,41 +32,40 @@ import sttp.client4.DefaultSyncBackend
     for k <- sys.env.get("BYBIT_API_KEY"); s <- sys.env.get("BYBIT_API_SECRET") yield BybitCredentials(k, s)
   val backend = DefaultSyncBackend()
   val ex: OptionsExchange = BybitOptionsClient(backend, credentials, dryRun = !live, testnet = testnet)
+  val cfg = VolSell.Config(symbol, baseCoin, targetDays, gridHigh, gridLow, baseQty, bars2w)
 
-  logger.warn(s"VolSell 启动: symbol=$symbol baseCoin=$baseCoin tenor=${targetDays}d 网格=$gridHigh/$gridLow 基准张数=$baseQty")
+  logger.warn(s"VolSell 启动: $cfg")
   logger.warn(s"模式: ${if live then "*** 实盘 LIVE ***" else "dry-run (不下单)"}  ${if testnet then "testnet" else "mainnet"}  credentials=${credentials.isDefined}")
   if live && credentials.isEmpty then logger.error("VOLSELL_LIVE=1 但缺少 API key, 将无法下单")
 
-  def decideOnce(): Unit =
-    val now = System.currentTimeMillis
-    val outcome =
-      for
-        closes <- ex.underlyingCloses5m(symbol, bars2w)
-        _ <- Either.cond(closes.sizeIs >= 4, (), s"K线不足: ${closes.size}")
-        spot <- closes.lastOption.toRight("无现价")
-        chain <- ex.optionChain(baseCoin)
-        straddle <- SellVolPlan.selectStraddle(chain, now, spot, targetDays).toRight("未找到 ~21天 ATM 跨式")
-      yield
-        val (mult, rvPrev, rvThis) = SellVolPlan.decideMultiplier(closes, gridHigh, gridLow)
-        val qty = baseQty * mult
-        val (call, put) = straddle
-        logger.warn(f"决策: spot=$spot%.2f 上周RV=$rvPrev%.3f 本周RV=$rvThis%.3f -> ${if rvThis > rvPrev then "↑卖" else "↓卖"} ${mult}× (qty=$qty)")
-        logger.warn(s"标的跨式: ${call.symbol} + ${put.symbol} (到期=${java.time.Instant.ofEpochMilli(call.expiryMs)})")
-        Seq(call, put).foreach { inst =>
-          val bid = ex.optionBestBid(inst.symbol).toOption.flatten // PostOnly 卖挂最优买价
-          val link = s"vs-${now}-${if inst.right == OptionRight.Call then "c" else "p"}".take(36)
-          ex.sellOption(inst.symbol, qty, bid, link) match
-            case Right(id) => logger.warn(s"卖出 ${inst.symbol} qty=$qty @${bid.fold("MKT")(_.toString)} -> orderId=$id")
-            case Left(err) => logger.error(s"卖出 ${inst.symbol} 失败: $err")
-        }
-    outcome.left.foreach(err => logger.error(s"本次决策跳过: $err"))
+  // 幂等防护: 记录上次成功决策的周期锚点, 同一周不重复决策 (叠加 orderLinkId 幂等双保险)
+  var lastPeriod = -1L
 
-  if runNow then decideOnce()
+  def decideOnce(now: Long): Unit =
+    val period = SellVolPlan.currentDecisionTime(now)
+    if period == lastPeriod then
+      logger.warn(s"本周期 (${java.time.Instant.ofEpochMilli(period)}) 已决策过, 跳过 (防重复下单)")
+    else
+      VolSell.plan(ex, cfg, now) match
+        case Left(err) => logger.error(s"本次决策跳过: $err")
+        case Right(d) =>
+          logger.warn(f"决策: spot=${d.spot}%.2f 上周RV=${d.rvPrev}%.3f 本周RV=${d.rvThis}%.3f -> ${if d.rvThis > d.rvPrev then "↑卖" else "↓卖"} ${d.mult}×")
+          logger.warn(s"跨式 (到期=${java.time.Instant.ofEpochMilli(d.expiryMs)}): ${d.legs.map(l => s"${l.symbol} qty=${l.qty}@${l.price}").mkString(" + ")}")
+          val results = VolSell.execute(ex, d)
+          results.foreach {
+            case (l, Right(id)) => logger.warn(s"卖出 ${l.symbol} qty=${l.qty} @${l.price} PostOnly -> $id")
+            case (l, Left(e))   => logger.error(s"卖出 ${l.symbol} 失败: $e")
+          }
+          val ok = results.count(_._2.isRight)
+          if ok == results.size then lastPeriod = period // 仅两腿全成才标记完成
+          else if ok > 0 then logger.error(s"!!! 跨式不完整: ${ok}/${results.size} 腿成交 -> 存在裸方向敞口, 请人工处理 (撤/补另一腿)")
+
+  if runNow then decideOnce(System.currentTimeMillis)
 
   // 常驻: 每周五 15:00 北京时间决策
   while true do
     val now = System.currentTimeMillis
     val next = SellVolPlan.nextDecisionTime(now)
-    logger.warn(s"下次决策: ${java.time.Instant.ofEpochMilli(next)} (北京时间周五15:00), 等待 ${(next - now) / 1000 / 60} 分钟")
+    logger.warn(s"下次决策: ${java.time.Instant.ofEpochMilli(next)} (北京周五15:00), 等待 ${(next - now) / 60000} 分钟")
     Thread.sleep(math.max(1000L, next - now))
-    decideOnce()
+    decideOnce(System.currentTimeMillis)

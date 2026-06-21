@@ -8,12 +8,23 @@ enum OptionRight:
   case Call, Put
 
 /** 一个期权合约 (来自交易所 option chain)。
-  * @param symbol   交易所原始符号 (Bybit: ETH-26SEP25-3000-C), 下单时原样回传, 不自行拼接避免格式错
+  * @param symbol   交易所原始符号 (Bybit: ETH-26SEP25-3000-C-USDT), 下单时原样回传, 不自行拼接避免格式错
   * @param expiryMs 交割时间 (ms epoch), 取自 instruments-info.deliveryTime (比解析日期串稳)
   * @param strike   行权价
   * @param right    Call/Put
+  * @param minQty   最小下单量 (lotSizeFilter.minOrderQty)
+  * @param qtyStep  下单量步长 (lotSizeFilter.qtyStep)
+  * @param tickSize 价格最小变动 (priceFilter.tickSize)
   */
-final case class OptionInstrument(symbol: String, expiryMs: Long, strike: Double, right: OptionRight)
+final case class OptionInstrument(
+    symbol: String,
+    expiryMs: Long,
+    strike: Double,
+    right: OptionRight,
+    minQty: Double = 0.0,
+    qtyStep: Double = 0.0,
+    tickSize: Double = 0.0,
+)
 
 object OptionContract:
   /** 从 Bybit 期权符号解析 (base, strike, right)；兼容币本位 `BASE-EXPIRY-STRIKE-{C|P}` 与

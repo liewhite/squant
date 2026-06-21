@@ -11,8 +11,8 @@ trait OptionsExchange:
   /** baseCoin (如 ETH) 的期权链 */
   def optionChain(baseCoin: String): Either[String, Vector[OptionInstrument]]
 
-  /** 期权最优买价 (卖方挂单参考)；无报价返回 None */
-  def optionBestBid(symbol: String): Either[String, Option[Double]]
+  /** 期权最优卖价 ask1 (卖方 PostOnly 挂单价：挂在卖一才是 maker, 挂买一会越价被拒)；无报价返回 None */
+  def optionBestAsk(symbol: String): Either[String, Option[Double]]
 
   /** 卖出期权 (做空)。limitPrice=Some -> PostOnly 限价, None -> 市价。返回交易所 orderId (dry-run 返回合成 id)。 */
   def sellOption(symbol: String, qty: Double, limitPrice: Option[Double], orderLinkId: String): Either[String, String]

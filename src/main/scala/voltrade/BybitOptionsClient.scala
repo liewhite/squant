@@ -53,7 +53,12 @@ final class BybitOptionsClient(
         env.asEither.flatMap { r =>
           val insts = r.list.flatMap { i =>
             OptionContract.parseSymbol(i.symbol).flatMap { case (_, strike, right) =>
-              i.deliveryTime.toLongOption.filter(_ > 0).map(exp => OptionInstrument(i.symbol, exp, strike, right))
+              i.deliveryTime.toLongOption.filter(_ > 0).map { exp =>
+                OptionInstrument(i.symbol, exp, strike, right,
+                  minQty = i.lotSizeFilter.flatMap(_.minOrderQty.toDoubleOption).getOrElse(0.0),
+                  qtyStep = i.lotSizeFilter.flatMap(_.qtyStep.toDoubleOption).getOrElse(0.0),
+                  tickSize = i.priceFilter.flatMap(_.tickSize.toDoubleOption).getOrElse(0.0))
+              }
             }
           }
           val merged = acc ++ insts
@@ -64,9 +69,9 @@ final class BybitOptionsClient(
       }
     page(None, Vector.empty)
 
-  override def optionBestBid(symbol: String): Either[String, Option[Double]] =
+  override def optionBestAsk(symbol: String): Either[String, Option[Double]] =
     publicGet[Envelope[TickersResult]](s"/v5/market/tickers?category=option&symbol=$symbol").map { env =>
-      env.result.flatMap(_.list.headOption).flatMap(_.bid1Price.toDoubleOption).filter(_ > 0)
+      env.result.flatMap(_.list.headOption).flatMap(_.ask1Price.toDoubleOption).filter(_ > 0)
     }
 
   override def sellOption(symbol: String, qty: Double, limitPrice: Option[Double], orderLinkId: String): Either[String, String] =
@@ -122,9 +127,11 @@ object BybitOptionsClient:
       else Left(s"Bybit retCode=$retCode: $retMsg")
 
   final case class KlineResult(list: List[List[String]])
-  final case class InstrumentItem(symbol: String, deliveryTime: String)
+  final case class LotSizeFilter(minOrderQty: String, qtyStep: String)
+  final case class PriceFilter(tickSize: String)
+  final case class InstrumentItem(symbol: String, deliveryTime: String, lotSizeFilter: Option[LotSizeFilter], priceFilter: Option[PriceFilter])
   final case class InstrumentsResult(list: List[InstrumentItem], nextPageCursor: Option[String])
-  final case class TickerItem(symbol: String, bid1Price: String)
+  final case class TickerItem(symbol: String, ask1Price: String)
   final case class TickersResult(list: List[TickerItem])
   final case class OrderResult(orderId: String, orderLinkId: String)
 
