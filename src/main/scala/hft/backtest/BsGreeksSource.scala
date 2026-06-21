@@ -110,5 +110,9 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
   /** 期权腿 P&L = 当前跨式价值 − 进场权利金 (单只持仓，供 demo 在 run 后查询) */
   def optionPnl(s: Double, now: Timestamp): Double = straddleValue(s, now) - entryPremium
 
+  /** 进场权利金 (首笔成交时按期初 ATM/IV/tenor 定价的跨式价值)，作为占比基准的单一数据源——
+    * 与 [[optionPnl]] 同源，避免消费侧重算定价口径不一致 (run 后可查)。 */
+  def enteredPremium: Double = entryPremium
+
   /** ATM 行权价 (首笔成交价) */
   def strikePrice: Double = strike
