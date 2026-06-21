@@ -2,8 +2,8 @@ package hft.strategy.edge
 
 /** 对冲带策略 (纯函数) 单测：对称基线、波动体制收放、方向不对称、复合，及共享因子的 clamp 行为。 */
 class HedgeBandSpec extends munit.FunSuite:
-  private def ctx(volRatio: Double = 1.0, bias: Int = 0, atr: Double = 1.0): HedgeCtx =
-    HedgeCtx(px = 100.0, center = 100.0, atr = atr, volRatio = volRatio, macdBias = bias)
+  private def ctx(volRatio: Double = 1.0, bias: Int = 0, maBias: Int = 0, atr: Double = 1.0): HedgeCtx =
+    HedgeCtx(px = 100.0, center = 100.0, atr = atr, volRatio = volRatio, macdBias = bias, maBias = maBias)
 
   private def near(a: Double, b: Double): Unit = assert(math.abs(a - b) < 1e-9, s"expected $b got $a")
   private def bandsNear(got: (Double, Double), up: Double, down: Double): Unit =
@@ -36,6 +36,12 @@ class HedgeBandSpec extends munit.FunSuite:
     bandsNear(b.bands(ctx(volRatio = 2.0, bias = 2)), 1.5, 0.5)
     // 中性时退化为对称基线
     bandsNear(b.bands(ctx(volRatio = 1.0, bias = 0)), 2.0, 2.0)
+
+  test("MaSideBand: 均线上卖单(上带)更远, 均线下更近, 买单(下带)不变"):
+    val b = MaSideBand(2.0, skew = 0.5)
+    bandsNear(b.bands(ctx(maBias = 0)), 2.0, 2.0)   // 均线预热中 -> 对称基线
+    bandsNear(b.bands(ctx(maBias = 1)), 3.0, 2.0)   // 均线上: 上带 2*1.5, 下带不变
+    bandsNear(b.bands(ctx(maBias = -1)), 1.0, 2.0)  // 均线下: 上带 2*0.5, 下带不变
 
   test("HedgeBand 共享因子: clamp / regimeFactor / skewOf"):
     near(HedgeBand.clamp(5.0, 0.5, 2.0), 2.0)

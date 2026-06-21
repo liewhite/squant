@@ -6,7 +6,7 @@ import hft.engine.StrategyRunner
 import hft.indicator.RealizedVol
 import hft.messaging.{EventData, IncomeEvent}
 import hft.sim.SimConfig
-import hft.strategy.edge.{CompositeBand, DirectionalBand, HedgeBand, SymmetricAtrBand, VolRegimeBand}
+import hft.strategy.edge.{CompositeBand, DirectionalBand, HedgeBand, MaSideBand, SymmetricAtrBand, VolRegimeBand}
 import sttp.client4.DefaultSyncBackend
 
 import java.nio.file.{Files, Path}
@@ -53,6 +53,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
     "vol-regime"   -> VolRegimeBand(atrMult, minFactor = 0.5, maxFactor = 2.0),
     "directional"  -> DirectionalBand(atrMult, skew = 0.5),
     "composite"    -> CompositeBand(atrMult, minFactor = 0.5, maxFactor = 2.0, skew = 0.5),
+    "ma-side"      -> MaSideBand(atrMult, skew = 0.5),
   )
   val variants: Seq[(String, HedgeBand)] = sys.env.get("EDGE_VARIANTS") match
     case Some(csv) =>

@@ -10,6 +10,7 @@ package hft.strategy.edge
   * @param atr       已就绪的 ATR(>0)
   * @param volRatio  近端/基线 实现波动比 (>1 波动放大、<1 平静；未就绪=1.0)
   * @param macdBias  MACD 柱方向强度 ∈ {-2,-1,0,1,2} (>0 偏多、<0 偏空；未就绪=0)
+  * @param maBias    价相对均线的位置 = sign(px − MA) ∈ {-1,0,1} (>0 均线上、<0 均线下；未就绪=0)
   */
 final case class HedgeCtx(
     px: Double,
@@ -17,6 +18,7 @@ final case class HedgeCtx(
     atr: Double,
     volRatio: Double,
     macdBias: Int,
+    maBias: Int,
 )
 
 /** **对冲带策略** —— 把"何时对冲"抽象为上/下行两侧的价格带宽 (绝对价距，均 >0)：

@@ -17,6 +17,11 @@ class BandHedgeStrategySpec extends munit.FunSuite:
   private final class ConstantBand(up: Double, down: Double) extends HedgeBand:
     def bands(ctx: HedgeCtx): (Double, Double) = (up, down)
 
+  /** 记录最近收到的 ctx 且带宽极大永不触发：用于断言策略喂给带的信号 (如 maBias) 接线正确。 */
+  private final class CapturingBand extends HedgeBand:
+    var last: HedgeCtx = null
+    def bands(ctx: HedgeCtx): (Double, Double) = { last = ctx; (1e9, 1e9) }
+
   private def strat(band: HedgeBand): BandHedgeStrategy =
     BandHedgeStrategy(ex, sym, ccy, band, atrPeriodBars = 5, rvShortWindowBars = 3, rvLongWindowBars = 6,
       barIntervalMs = hour, minHedgeQty = 0.001)
@@ -94,6 +99,19 @@ class BandHedgeStrategySpec extends munit.FunSuite:
     val s = strat(ConstantBand(2.0, 2.0))
     feed(sm, s, bboEv(100.0, 0)) // 仅 1 根
     assertEquals(feed(sm, s, bboEv(200.0, hour)), Vector.empty)
+
+  test("maBias 接线: 价在均线上 -> +1, 均线下 -> -1"):
+    val cap = CapturingBand()
+    val sm = StateManager(Iterable(sym), orderTimeoutMs = 5000)
+    sm.apply(IncomeEvent(0, 0, EventData.BalanceUpdate(Balance(ex, ccy, 0.0, 0))))
+    sm.apply(IncomeEvent(0, 0, EventData.GreeksUpdate(Greeks(ex, ccy, 0.5, 0.01, -0.5, 1.0, 0))))
+    val s = BandHedgeStrategy(ex, sym, ccy, cap, atrPeriodBars = 5, rvShortWindowBars = 3, rvLongWindowBars = 6,
+      maSmaPeriod = 5, barIntervalMs = hour, minHedgeQty = 0.001)
+    (0 to 7).foreach(i => feed(sm, s, bboEv(100.0 + i, i.toLong * hour))) // 递增收盘 -> SMA 落后于现价
+    feed(sm, s, bboEv(200.0, 8 * hour)) // 远高于 SMA
+    assertEquals(cap.last.maBias, 1)
+    feed(sm, s, bboEv(50.0, 9 * hour)) // 远低于 SMA
+    assertEquals(cap.last.maBias, -1)
 
   test("greeks 未就绪 (无 cashBal) -> 不动作"):
     val sm = StateManager(Iterable(sym), orderTimeoutMs = 5000)

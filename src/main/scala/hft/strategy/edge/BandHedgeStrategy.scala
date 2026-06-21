@@ -2,7 +2,7 @@ package hft.strategy.edge
 
 import hft.domain.*
 import hft.exchange.SubscriptionKind
-import hft.indicator.{Atr, KlineSeries, Macd, RealizedVol}
+import hft.indicator.{Atr, KlineSeries, Macd, RealizedVol, Sma}
 import hft.messaging.{EventData, IncomeEvent, StateManager}
 import hft.strategy.{OutcomeEvent, Strategy}
 
@@ -32,16 +32,19 @@ final class BandHedgeStrategy(
     macdTrendBars: Int = 2,
     rvShortWindowBars: Int = 24,
     rvLongWindowBars: Int = 168,
+    /** 均线周期 (根)，供 maBias = sign(px − MA) (默认 MA20) */
+    maSmaPeriod: Int = 20,
     barIntervalMs: Long = 3_600_000L,
     minHedgeQty: Quantity = 0.001,
 ) extends Strategy:
 
   private val klines =
     new KlineSeries(barIntervalMs, math.max(math.max(atrPeriodBars * 4, rvLongWindowBars + 8), 64))
-      with Atr with Macd with RealizedVol:
+      with Atr with Macd with RealizedVol with Sma:
       override protected def atrPeriod: Int = atrPeriodBars
       override protected def rvShortBars: Int = rvShortWindowBars
       override protected def rvLongBars: Int = rvLongWindowBars
+      override protected def smaPeriod: Int = maSmaPeriod
 
   /** 对冲中心价 (NaN = 尚未初始化，首个行情设为现价) */
   private var center: Double = Double.NaN
@@ -70,7 +73,8 @@ final class BandHedgeStrategy(
       if atr > 0.0 && !center.isNaN
     yield
       // 信号未就绪时以中性默认填充, 各带在预热期自然退化为对称基线
-      val ctx = HedgeCtx(px, center, atr, klines.volRatio.getOrElse(1.0), klines.histBias(macdTrendBars))
+      val maBias = klines.sma.fold(0)(m => math.signum(px - m).toInt)
+      val ctx = HedgeCtx(px, center, atr, klines.volRatio.getOrElse(1.0), klines.histBias(macdTrendBars), maBias)
       val (upBand, downBand) = band.bands(ctx)
       val crossed = (px - center > upBand) || (center - px > downBand)
       if !crossed then Vector.empty
@@ -84,7 +88,7 @@ final class BandHedgeStrategy(
           Vector(
             OutcomeEvent.PlaceOrders(
               Vector(Order("", exchange, symbol, side, OrderType.Market, qty, reduceOnly = false, clientOrderId = "")),
-              f"band_hedge | $side netDelta=$netDelta%.4f qty=$qty%.4f px=$px%.2f atr=$atr%.2f up=$upBand%.2f down=$downBand%.2f bias=${ctx.macdBias} volR=${ctx.volRatio}%.2f",
+              f"band_hedge | $side netDelta=$netDelta%.4f qty=$qty%.4f px=$px%.2f atr=$atr%.2f up=$upBand%.2f down=$downBand%.2f macdBias=${ctx.macdBias} maBias=${ctx.maBias} volR=${ctx.volRatio}%.2f",
             )
           )
     ).getOrElse(Vector.empty)
