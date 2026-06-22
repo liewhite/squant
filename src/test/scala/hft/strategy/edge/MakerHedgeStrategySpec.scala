@@ -66,6 +66,22 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
     feed(sm, s, ordUpd(OrderStatus.Filled, Side.Short, 105.04, 8 * hour + 100)) // 成交 -> center=105.04
     assertEquals(feed(sm, s, bbo(105.04, 9 * hour)), Vector.empty) // dev=0 -> 不下单
 
+  test("无 ccy 余额 -> greeks()=None -> 不对冲 (实盘由 OptionGreeksStream 同步兜底余额)"):
+    val sm = StateManager(Iterable(sym), orderTimeoutMs = 60000)
+    sm.apply(IncomeEvent(0, 0, EventData.GreeksUpdate(Greeks(ex, ccy, 0.5, 0.01, -0.5, 1.0, 0)))) // 只 greeks, 无 Balance
+    val s = strat(ConstantBand(2.0, 2.0))
+    (0 to 7).foreach(i => feed(sm, s, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
+    assertEquals(feed(sm, s, bbo(104.0, 8 * hour)), Vector.empty) // 越带但 greeks()=None -> 不挂
+
+  test("greeks 陈旧超 maxGreeksStaleMs -> 暂停对冲"):
+    val sm = StateManager(Iterable(sym), orderTimeoutMs = 60000)
+    sm.apply(IncomeEvent(0, 0, EventData.BalanceUpdate(Balance(ex, ccy, 0.0, 0))))
+    sm.apply(IncomeEvent(0, 0, EventData.GreeksUpdate(Greeks(ex, ccy, 0.5, 0.01, -0.5, 1.0, 0)))) // ts=0 (旧)
+    val s = MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
+      atrPeriodBars = 5, rvShortWindowBars = 3, rvLongWindowBars = 6, maSmaPeriod = 5, maxGreeksStaleMs = 1000, barIntervalMs = hour, minHedgeQty = 0.001)
+    (0 to 7).foreach(i => feed(sm, s, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
+    assertEquals(feed(sm, s, bbo(104.0, 8 * hour)), Vector.empty) // now=8h, greeks ts=0 -> 陈旧 -> 暂停
+
   test("gammaAdjust: 两次 greeks 间用 gamma×价差修正净 delta"):
     // greeks: delta=0.0, gamma=0.1; greeksRefMid=100 (greeks 更新时); 现价 104 -> 修正 delta = 0.1×(104-100)=0.4
     val sm = StateManager(Iterable(sym), orderTimeoutMs = 60000)

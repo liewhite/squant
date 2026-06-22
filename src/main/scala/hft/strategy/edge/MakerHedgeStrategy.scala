@@ -35,9 +35,16 @@ final class MakerHedgeStrategy(
     /** 是否用 gamma 一阶修正 delta (两次 greeks 更新间用现价刷新, tick 级新鲜)。回测中 greeks 每秒已重算,
       * 默认关 (行为不变); 实盘 greeks 轮询较慢, 开启可消除轮询间的 delta 滞后。 */
     gammaAdjust: Boolean = false,
+    /** greeks 陈旧阈值 (ms): >0 时, greeks 距今超过它则暂停对冲 (防按过期 delta 乱挂); 0=不限 (回测默认) */
+    maxGreeksStaleMs: Long = 0L,
     barIntervalMs: Long = 3_600_000L,
     minHedgeQty: Quantity = 0.001,
 ) extends Strategy:
+  private val logger = org.slf4j.LoggerFactory.getLogger(classOf[MakerHedgeStrategy])
+  private var warnCnt = 0L
+  private def warnThrottled(msg: String): Unit =
+    if warnCnt % 200 == 0 then logger.warn(s"[MakerHedge $symbol] $msg")
+    warnCnt += 1
 
   private val klines =
     new KlineSeries(barIntervalMs, math.max(math.max(atrPeriodBars * 4, rvLongWindowBars + 8), 64))
@@ -100,31 +107,38 @@ final class MakerHedgeStrategy(
             Vector(OutcomeEvent.CancelOrder(exchange, symbol, id))
           else Vector.empty
         case None =>
-          (for
-            ss <- state.symbolState(symbol)
-            greeks <- state.greeks(exchange, ccy)
-            atr <- klines.atr
-            if atr > 0.0 && !center.isNaN
-          yield
-            val maBias = klines.sma.fold(0)(m => math.signum(px - m).toInt)
-            val ctx = HedgeCtx(px, center, atr, klines.volRatio.getOrElse(1.0), klines.histBias(macdTrendBars), maBias)
-            val (up, down) = band.bands(ctx)
-            val crossed = (px - center > up) || (center - px > down)
-            if !crossed then Vector.empty
-            else
-              // gamma 一阶修正: 两次 greeks 间用现价相对基准价刷新 delta (tick 级)
-              val gammaAdj = if gammaAdjust && !greeksRefMid.isNaN then greeks.gamma * (px - greeksRefMid) else 0.0
-              val netDelta = greeks.delta + gammaAdj + ss.positionSize(exchange)
-              val qty = math.abs(netDelta)
-              if qty < minHedgeQty then Vector.empty
-              else
-                val side = if netDelta > 0 then Side.Short else Side.Long // 净多→卖, 净空→买
-                val limitPx = if side == Side.Short then px * (1.0 + offsetPct) else px * (1.0 - offsetPct)
-                awaitingAck = true
-                Vector(
-                  OutcomeEvent.PlaceOrders(
-                    Vector(Order("", exchange, symbol, side, OrderType.Limit(limitPx, TimeInForce.PostOnly), qty, reduceOnly = false, clientOrderId = "")),
-                    f"maker_hedge | $side qty=$qty%.4f limit=$limitPx%.2f px=$px%.2f netDelta=$netDelta%.4f maBias=$maBias band=($up%.2f,$down%.2f)",
-                  )
-                )
-          ).getOrElse(Vector.empty)
+          state.greeks(exchange, ccy) match
+            case None =>
+              warnThrottled("greeks/ccy 余额未就绪 -> 未对冲 (检查期权 greeks 流是否在推、ccy 余额是否注入)")
+              Vector.empty
+            case Some(g) if maxGreeksStaleMs > 0 && now - g.timestamp > maxGreeksStaleMs =>
+              warnThrottled(s"greeks 陈旧 ${now - g.timestamp}ms > ${maxGreeksStaleMs}ms -> 暂停对冲 (宁可不动也不按过期 delta 乱挂)")
+              Vector.empty
+            case Some(greeks) =>
+              (for
+                ss <- state.symbolState(symbol)
+                atr <- klines.atr
+                if atr > 0.0 && !center.isNaN
+              yield
+                val maBias = klines.sma.fold(0)(m => math.signum(px - m).toInt)
+                val ctx = HedgeCtx(px, center, atr, klines.volRatio.getOrElse(1.0), klines.histBias(macdTrendBars), maBias)
+                val (up, down) = band.bands(ctx)
+                val crossed = (px - center > up) || (center - px > down)
+                if !crossed then Vector.empty
+                else
+                  // gamma 一阶修正: 两次 greeks 间用现价相对基准价刷新 delta (tick 级)
+                  val gammaAdj = if gammaAdjust && !greeksRefMid.isNaN then greeks.gamma * (px - greeksRefMid) else 0.0
+                  val netDelta = greeks.delta + gammaAdj + ss.positionSize(exchange)
+                  val qty = math.abs(netDelta)
+                  if qty < minHedgeQty then Vector.empty
+                  else
+                    val side = if netDelta > 0 then Side.Short else Side.Long // 净多→卖, 净空→买
+                    val limitPx = if side == Side.Short then px * (1.0 + offsetPct) else px * (1.0 - offsetPct)
+                    awaitingAck = true
+                    Vector(
+                      OutcomeEvent.PlaceOrders(
+                        Vector(Order("", exchange, symbol, side, OrderType.Limit(limitPx, TimeInForce.PostOnly), qty, reduceOnly = false, clientOrderId = "")),
+                        f"maker_hedge | $side qty=$qty%.4f limit=$limitPx%.2f px=$px%.2f netDelta=$netDelta%.4f maBias=$maBias band=($up%.2f,$down%.2f)",
+                      )
+                    )
+              ).getOrElse(Vector.empty)

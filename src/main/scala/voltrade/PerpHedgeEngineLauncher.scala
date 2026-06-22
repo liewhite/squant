@@ -43,13 +43,14 @@ import sttp.client4.DefaultSyncBackend
     val perp = BybitClient(backend, credentials) // 永续 (linear) 下单/查仓
     val opt = BybitOptionsClient(backend, credentials, dryRun = !live, testnet = testnet)
     val market = BybitMarketStream(backend)
-    // 一个 accountStream = Bybit 永续账户流 (持仓/订单回报) + 期权 greeks 注入流
-    val account = CompositeAccountStream(Exchange.Bybit, Seq(BybitAccountStream(perp, backend), OptionGreeksStream(opt, Exchange.Bybit, ccy, greeksPollMs)))
+    // 一个 accountStream = 期权 greeks 注入流 (先, 同步发 ccy 余额兜底) + Bybit 永续账户流 (持仓/订单回报)
+    val account = CompositeAccountStream(Exchange.Bybit, Seq(OptionGreeksStream(opt, Exchange.Bybit, ccy, greeksPollMs), BybitAccountStream(perp, backend)))
 
     val engine = Engine.start(gateways = Vector(ExchangeGateway(perp, market, Some(account))), dryRun = !live)
 
+    // greeks 陈旧阈值 = 4× 轮询间隔 (连续几次拉取失败即暂停对冲, 不按过期 delta 乱挂)
     val strategy = MakerHedgeStrategy(Exchange.Bybit, symbol, ccy, MaAsymHedgeBand(tightAtr, looseAtr),
-      offsetPct = offset, requoteMs = requoteMs, gammaAdjust = true)
+      offsetPct = offset, requoteMs = requoteMs, gammaAdjust = true, maxGreeksStaleMs = greeksPollMs * 4)
     // 历史 K 线预热 ATR/均线 (开机即就绪)
     opt.linearKlines(symbol, "60", 64) match
       case Right(bars) => strategy.prewarm(bars); logger.warn(s"prewarm ${bars.size} 根 1h K线 -> ATR/均线就绪")
