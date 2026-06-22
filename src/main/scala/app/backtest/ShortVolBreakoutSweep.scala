@@ -1,6 +1,8 @@
 package app.backtest
 
 import hft.domain.{Exchange, Symbol}
+import hft.indicator.RealizedVol
+import hft.option.BlackScholes
 import hft.strategy.Strategy
 import strategy.research.{BreakoutHedgeStrategy, HedgeExecution}
 import sttp.client4.DefaultSyncBackend
@@ -53,12 +55,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   val symbolMetas = ShortVolHedgeRunner.fetchSymbolMetas(backend)
 
   def annualizedRv(prices: Vector[Double]): Double =
-    val rets = prices.sliding(2).collect { case Vector(a, b) if a > 0 && b > 0 => math.log(b / a) }.toVector
-    if rets.sizeIs < 2 then 0.0
-    else
-      val mean = rets.sum / rets.size
-      val variance = rets.map(r => (r - mean) * (r - mean)).sum / (rets.size - 1)
-      math.sqrt(variance) * math.sqrt(365.0 * 24.0)
+    RealizedVol.annualizedSampleStdFromPrices(prices, BlackScholes.HoursPerYear)
 
   def maxDrawdown(equities: Vector[Double]): Double =
     var peak = Double.NegativeInfinity

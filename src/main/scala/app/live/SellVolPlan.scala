@@ -1,6 +1,7 @@
 package app.live
 
 import hft.indicator.RealizedVol
+import hft.option.BlackScholes
 
 import java.time.temporal.TemporalAdjusters
 import java.time.{DayOfWeek, Instant, LocalTime, ZoneId, ZonedDateTime}
@@ -8,7 +9,7 @@ import java.time.{DayOfWeek, Instant, LocalTime, ZoneId, ZonedDateTime}
 /** 卖方决策的**纯逻辑** (无 IO, 可单测): RV 计算 / 仓位倍数 / 选 21天 ATM 跨式 / 决策时点。 */
 object SellVolPlan:
   /** 5 分钟 bar 的年化基准: 365×24×12 */
-  val BarsPerYear5m: Double = 365.0 * 24.0 * 12.0
+  val BarsPerYear5m: Double = BlackScholes.HoursPerYear * 12.0
 
   /** 由 5 分钟收盘价序列 (最旧->最新) 算年化实现波动 (复用 hft RealizedVol 公式, SSOT) */
   def annualizedRv(closes: Seq[Double]): Double = RealizedVol.annualizedFromPrices(closes, BarsPerYear5m)

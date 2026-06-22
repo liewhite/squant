@@ -58,3 +58,26 @@ class RealizedVolSpec extends munit.FunSuite:
     assertEquals(k.rvShort, None)
     assertEquals(k.rvLong, None)
     assertEquals(k.volRatio, None)
+
+  // 由价格序列 (最旧->最新) 构造: 相邻对数收益恰为 rets
+  private def pricesFor(rets: Seq[Double], p0: Double = 1000.0): Vector[Double] =
+    rets.scanLeft(p0)((p, r) => p * math.exp(r)).toVector
+
+  test("annualizedFromPrices: 对零求和口径, 恒定收益 r -> |r|·sqrt(barsPerYear)"):
+    val r = 0.01
+    val prices = pricesFor(Seq.fill(5)(r))
+    near(RealizedVol.annualizedFromPrices(prices, barsPerYearHourly), r * math.sqrt(barsPerYearHourly))
+    near(RealizedVol.annualizedFromPrices(Vector(1000.0), barsPerYearHourly), 0.0) // 0 个收益
+    // 非正价被跳过, 不抛
+    val v = RealizedVol.annualizedFromPrices(Vector(1000.0, 0.0, 1010.0, 1020.0), barsPerYearHourly)
+    assert(v.isFinite && v >= 0.0)
+
+  test("annualizedSampleStdFromPrices: 去均值口径, 恒定收益 -> 0 (与对零求和不同)"):
+    val prices = pricesFor(Seq.fill(5)(0.01))
+    near(RealizedVol.annualizedSampleStdFromPrices(prices, barsPerYearHourly), 0.0) // 方差为 0
+    near(RealizedVol.annualizedSampleStdFromPrices(pricesFor(Seq(0.01)), barsPerYearHourly), 0.0) // < 2 收益
+
+  test("annualizedSampleStdFromPrices: 两收益 a,b -> |a-b|/√2 · sqrt(barsPerYear)"):
+    val a = 0.01; val b = 0.03
+    val expected = (math.abs(a - b) / math.sqrt(2.0)) * math.sqrt(barsPerYearHourly)
+    near(RealizedVol.annualizedSampleStdFromPrices(pricesFor(Seq(a, b)), barsPerYearHourly), expected)

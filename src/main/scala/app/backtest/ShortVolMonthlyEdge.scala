@@ -2,8 +2,9 @@ package app.backtest
 
 import hft.backtest.{BinanceDataKind, BinanceHistory}
 import hft.domain.{Exchange, Symbol}
-import hft.indicator.KlineSeries
+import hft.indicator.{KlineSeries, RealizedVol}
 import hft.messaging.EventData
+import hft.option.BlackScholes
 import hft.strategy.Strategy
 import strategy.research.{BreakoutHedgeStrategy, HedgeExecution}
 import sttp.client4.DefaultSyncBackend
@@ -70,12 +71,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   /** [tsFrom, tsTo) 内小时收益年化 RV */
   def rvBetween(tsFrom: Long, tsTo: Long): Double =
     val ps = closeArr.filter((ts, _) => ts >= tsFrom && ts < tsTo).map(_._2)
-    val rets = ps.sliding(2).collect { case Vector(a, b) if a > 0 && b > 0 => math.log(b / a) }.toVector
-    if rets.sizeIs < 2 then 0.0
-    else
-      val mean = rets.sum / rets.size
-      val variance = rets.map(r => (r - mean) * (r - mean)).sum / (rets.size - 1)
-      math.sqrt(variance) * math.sqrt(365.0 * 24.0)
+    RealizedVol.annualizedSampleStdFromPrices(ps, BlackScholes.HoursPerYear)
 
   def midnightMs(d: LocalDate): Long = d.atStartOfDay.toInstant(ZoneOffset.UTC).toEpochMilli
 

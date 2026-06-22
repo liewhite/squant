@@ -1,8 +1,9 @@
 package app.backtest
 
 import hft.backtest.{BinanceDataKind, BinanceHistory}
-import hft.indicator.KlineSeries
+import hft.indicator.{KlineSeries, RealizedVol}
 import hft.messaging.EventData
+import hft.option.BlackScholes
 import sttp.client4.DefaultSyncBackend
 
 import java.time.LocalDate
@@ -45,13 +46,8 @@ import java.time.LocalDate
   /** 每隔 stepMin 取一个收盘价, 算年化 RV */
   def annualizedRv(stepMin: Int): Double =
     val sampled = minCloses.indices.by(stepMin).map(minCloses).toVector
-    val rets = sampled.sliding(2).collect { case Vector(a, b) if a > 0 && b > 0 => math.log(b / a) }.toVector
-    if rets.sizeIs < 2 then 0.0
-    else
-      val mean = rets.sum / rets.size
-      val variance = rets.map(r => (r - mean) * (r - mean)).sum / (rets.size - 1)
-      val periodsPerYear = 365.0 * 24.0 * 60.0 / stepMin
-      math.sqrt(variance) * math.sqrt(periodsPerYear)
+    // stepMin 分钟 bar 的年化基准 = 每年小时数 × 每小时分钟数 / stepMin
+    RealizedVol.annualizedSampleStdFromPrices(sampled, BlackScholes.HoursPerYear * 60.0 / stepMin)
 
   val steps = Seq(1, 5, 15, 30, 60, 240, 1440)
   val rv60 = annualizedRv(60)

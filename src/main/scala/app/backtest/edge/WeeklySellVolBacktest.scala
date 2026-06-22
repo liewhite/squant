@@ -4,6 +4,7 @@ import hft.backtest.{BacktestEngine, BinanceDataKind, BinanceHistory, BsGreeksCo
 import hft.domain.*
 import hft.engine.StrategyRunner
 import hft.indicator.RealizedVol
+import hft.option.BlackScholes
 import hft.messaging.{EventData, IncomeEvent}
 import hft.sim.SimConfig
 import strategy.live.{MaAsymHedgeBand, MakerHedgeStrategy}
@@ -86,7 +87,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
         it.next().data match
           case EventData.MarketTradeUpdate(t) => if t.timestamp - lastTs >= 3_600_000L then { lastTs = t.timestamp; samples += t.price }
           case _                              => ()
-      RealizedVol.annualizedFromPrices(samples.toVector, 365.0 * 24.0)
+      RealizedVol.annualizedFromPrices(samples.toVector, BlackScholes.HoursPerYear)
     finally backend.close()
 
   /** 单 tranche: 卖空头跨式(负 straddles) + MaAsym 对冲, 持有到 21 天到期 */

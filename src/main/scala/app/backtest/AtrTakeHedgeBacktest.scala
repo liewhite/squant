@@ -3,6 +3,7 @@ package app.backtest
 import hft.backtest.{BacktestEngine, BinanceDataKind, BinanceHistory, BsGreeksConfig, BsGreeksSource, TradePrintBboSource}
 import hft.domain.*
 import hft.engine.StrategyRunner
+import hft.indicator.RealizedVol
 import hft.messaging.{EventData, IncomeEvent}
 import hft.option.BlackScholes
 import hft.sim.SimConfig
@@ -140,11 +141,6 @@ import scala.collection.mutable.ArrayBuffer
   println("==================================================================================")
   backend.close()
 
-/** 小时采样价格的年化实现波动 (对数收益) */
+/** 小时采样价格的年化实现波动 (对数收益, 对零求和口径) */
 private def realizedVolHourly(samples: Vector[Double]): Double =
-  if samples.sizeIs < 3 then 0.0
-  else
-    val rets = samples.sliding(2).map { case Vector(a, b) => math.log(b / a) }.toVector
-    val sumSq = rets.map(r => r * r).sum
-    val tYears = rets.size.toDouble / (365.0 * 24.0) // 每步 1 小时
-    math.sqrt(sumSq / tYears)
+  RealizedVol.annualizedFromPrices(samples, BlackScholes.HoursPerYear)

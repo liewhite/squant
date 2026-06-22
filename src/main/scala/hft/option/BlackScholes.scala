@@ -30,8 +30,14 @@ final case class BsGreeks(price: Double, delta: Double, gamma: Double, vega: Dou
 /** Black-Scholes 欧式期权定价与希腊字母 —— 纯函数，无副作用、无外部依赖，便于直接断言测试。 */
 object BlackScholes:
 
-  /** 一年的毫秒数 (365 日)，用于把到期时间差换算为年化剩余期限 */
-  val MillisPerYear: Double = 365.0 * 24 * 60 * 60 * 1000
+  /** 一年的天数 (365)，全仓年化基准的单一数据源 (派生 [[HoursPerYear]]/[[MillisPerYear]]) */
+  val DaysPerYear: Double = 365.0
+
+  /** 一年的小时数，逐小时采样年化的基准 (= DaysPerYear·24) */
+  val HoursPerYear: Double = DaysPerYear * 24.0
+
+  /** 一年的毫秒数，用于把到期时间差换算为年化剩余期限 */
+  val MillisPerYear: Double = HoursPerYear * 60 * 60 * 1000
 
   /** 标准正态分布概率密度函数 */
   def normPdf(x: Double): Double = math.exp(-0.5 * x * x) / math.sqrt(2 * math.Pi)

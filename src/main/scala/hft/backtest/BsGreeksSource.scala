@@ -31,10 +31,6 @@ final case class BsGreeksConfig(
     strangleWidthPct: Double = 0.0,
 )
 
-object BsGreeksSource:
-  /** 与 [[hft.option.BlackScholes.MillisPerYear]] 一致的天数基准，用于 theta 每年->每日换算 */
-  val DaysPerYear: Double = 365.0
-
 /** 回测用 BS 合成希腊字母数据源装饰器 (单只 ATM 跨式，持有到期，不滚动)。
   *
   * 监听上游标的 [[EventData.MarketTradeUpdate]] (真实逐笔成交价 S)，首笔成交开一份 ATM 长跨式，
@@ -45,7 +41,7 @@ object BsGreeksSource:
   * 单位约定同 Greeks 通道 (theta 每日、vega 对 1%)。
   */
 final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig) extends MarketDataSource:
-  import BsGreeksSource.DaysPerYear
+  import BlackScholes.DaysPerYear // theta 每年->每日 / tenor 钳制的天数基准 (框架 SSOT)
 
   private var strike = 0.0     // ATM 参考 (首笔成交价)
   private var callStrike = 0.0 // call 行权 (跨式=strike; 宽跨=strike·(1+w))

@@ -1,6 +1,8 @@
 package app.backtest
 
 import hft.domain.{Exchange, Symbol}
+import hft.indicator.RealizedVol
+import hft.option.BlackScholes
 import hft.strategy.Strategy
 import strategy.research.{BreakoutHedgeStrategy, HedgeExecution, MacdBiasOverlay, TargetDeltaHedgeStrategy}
 import sttp.client4.DefaultSyncBackend
@@ -73,12 +75,7 @@ import java.util.concurrent.Executors
 
   /** 年化实现波动: 小时对数收益的样本标准差 × √(每年小时数) */
   def annualizedRv(prices: Vector[Double]): Double =
-    val rets = prices.sliding(2).collect { case Vector(a, b) if a > 0 && b > 0 => math.log(b / a) }.toVector
-    if rets.sizeIs < 2 then 0.0
-    else
-      val mean = rets.sum / rets.size
-      val variance = rets.map(r => (r - mean) * (r - mean)).sum / (rets.size - 1)
-      math.sqrt(variance) * math.sqrt(365.0 * 24.0)
+    RealizedVol.annualizedSampleStdFromPrices(prices, BlackScholes.HoursPerYear)
 
   /** 净值曲线最大回撤 (从运行峰值回落比例) */
   def maxDrawdown(equities: Vector[Double]): Double =

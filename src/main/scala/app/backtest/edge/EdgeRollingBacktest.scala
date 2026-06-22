@@ -4,6 +4,7 @@ import hft.backtest.{BacktestEngine, BinanceDataKind, BinanceHistory, BsGreeksCo
 import hft.domain.*
 import hft.engine.StrategyRunner
 import hft.indicator.RealizedVol
+import hft.option.BlackScholes
 import hft.messaging.{EventData, IncomeEvent}
 import hft.sim.SimConfig
 import strategy.live.HedgeBand
@@ -99,7 +100,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
             if first == 0.0 then first = t.price
             if t.timestamp - lastTs >= 3_600_000L then { lastTs = t.timestamp; samples += t.price }
           case _ => ()
-      val rv = RealizedVol.annualizedFromPrices(samples.toVector, 365.0 * 24.0)
+      val rv = RealizedVol.annualizedFromPrices(samples.toVector, BlackScholes.HoursPerYear)
       if rv <= 0.0 || samples.sizeIs < 25 then
         System.err.println(f"[WARN] [$start..$end] 预扫样本异常: 小时采样=${samples.size} RV=$rv%.4f -> IV 可能退化, 该月结果不可信")
       (rv, first)

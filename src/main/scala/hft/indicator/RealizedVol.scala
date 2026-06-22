@@ -54,7 +54,22 @@ object RealizedVol:
   /** 由价格序列 (最旧->最新) 直接算年化实现波动: 取相邻对数收益 (跳过非正价) 后年化。
     * 框架级复用——各处预扫/demo 不再各写一遍 sliding(2)+log+annualized。 */
   def annualizedFromPrices(prices: collection.Seq[Double], barsPerYear: Double): Double =
-    val rets = prices.iterator.sliding(2).withPartial(false).collect {
+    annualized(logReturnsOf(prices), barsPerYear)
+
+  /** 由价格序列直接算年化实现波动, 采用"样本标准差去均值"(n-1) 口径:
+    *   sqrt( Σ(rᵢ−r̄)² / (n−1) ) · sqrt(barsPerYear)
+    * 与 [[annualizedFromPrices]] 的"对零求和"口径**并存且数值不同**——后者假设高频均值≈0,
+    * 本变体显式去均值, 适用于较长周期窗 (逐小时/逐分钟) 的统计口径。对数收益数 < 2 返回 0。 */
+  def annualizedSampleStdFromPrices(prices: collection.Seq[Double], barsPerYear: Double): Double =
+    val rets = logReturnsOf(prices)
+    if rets.sizeIs < 2 || barsPerYear <= 0.0 then 0.0
+    else
+      val mean = rets.sum / rets.size
+      val variance = rets.iterator.map { r => val d = r - mean; d * d }.sum / (rets.size - 1)
+      math.sqrt(variance) * math.sqrt(barsPerYear)
+
+  /** 相邻对数收益 (最旧->最新, 跳过非正价)，两套年化口径共享的单一取数实现 */
+  private def logReturnsOf(prices: collection.Seq[Double]): Vector[Double] =
+    prices.iterator.sliding(2).withPartial(false).collect {
       case scala.collection.Seq(a, b) if a > 0.0 && b > 0.0 => math.log(b / a)
     }.toVector
-    annualized(rets, barsPerYear)
