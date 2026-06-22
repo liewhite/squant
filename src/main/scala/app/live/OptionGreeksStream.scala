@@ -7,12 +7,12 @@ import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
 
 /** 把**期权账户净 greeks** 作为 [[AccountStream]] 注入实盘引擎的 income 总线 (与时钟/账户流同一条 bus)：
-  * 周期性查 Bybit 期权持仓 -> Σ(delta,gamma) -> 发 [[EventData.GreeksUpdate]]。引擎里的对冲策略经
-  * StateManager 读到, 与回测里 BsGreeksSource 喂 greeks 完全同机制。这样**对冲腿不必二次订阅行情**——
-  * BBO 复用引擎已有的 [[hft.exchange.bybit.BybitMarketStream]], 这里只补一个期权 greeks 源。
+  * 周期性经 [[OptionsExchange]] 查期权净 (delta,gamma) -> 发 [[EventData.GreeksUpdate]]。引擎里的对冲策略经
+  * StateManager 读到, 与回测里 BsGreeksSource 喂 greeks 完全同机制。**交易所无关** (Bybit/OKX 共用), 对冲腿
+  * 不必二次订阅行情——BBO 复用引擎已有的行情流, 这里只补一个期权 greeks 源。
   *
   * **关键**: `StateManager.greeks` 要求 greeks 与 `cashBalances(ccy)` 同时存在才返回总 delta; live 下
-  * 若 Bybit 钱包帧无该 ccy 条目 (余额 0 常不下发), greeks 永远读不到 -> 对冲静默不触发 -> 期权裸敞口!
+  * 若交易所钱包帧无该 ccy 条目 (余额 0 常不下发), greeks 永远读不到 -> 对冲静默不触发 -> 期权裸敞口!
   * 故 start 时**同步先发一条 ccy 余额 0** 兜底 (在永续账户流之前 -> 真实现货余额到达会覆盖, 无竞态)。 */
 final class OptionGreeksStream(opt: OptionsExchange, exch: Exchange, ccy: String, pollMs: Long = 3000L) extends AccountStream:
   private val logger = LoggerFactory.getLogger(classOf[OptionGreeksStream])

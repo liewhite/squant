@@ -26,6 +26,22 @@ class OkxOptionsClientSpec extends munit.FunSuite:
     assert(clOrdIdOf("vs-" + "9" * 40 + "-c").length <= 32)
     // 同输入恒得同输出 (幂等的基础)
     assertEquals(clOrdIdOf("vs-123-c"), clOrdIdOf("vs-123-c"))
+    // 不同周期/腿不得撞同一 clOrdId (否则交易所幂等去重会吞掉第二单)
+    assertNotEquals(clOrdIdOf("vs-100-c"), clOrdIdOf("vs-200-c"))
+    assertNotEquals(clOrdIdOf("vs-100-c"), clOrdIdOf("vs-100-p"))
+
+  test("sellOrderBody: PostOnly 带 px, 市价无 px; cross/sell 字段齐全"):
+    val limit = sellOrderBody("ETH-USD-240329-3000-C", 2.0, Some(12.5), "vs100c")
+    assert(limit.contains(""""instId":"ETH-USD-240329-3000-C""""))
+    assert(limit.contains(""""tdMode":"cross""""))
+    assert(limit.contains(""""side":"sell""""))
+    assert(limit.contains(""""ordType":"post_only""""))
+    assert(limit.contains(""""sz":"2""""))
+    assert(limit.contains(""""px":"12.5""""))
+    assert(limit.contains(""""clOrdId":"vs100c""""))
+    val market = sellOrderBody("ETH-USD-240329-3000-P", 1.0, None, "vs100p")
+    assert(market.contains(""""ordType":"market""""))
+    assert(!market.contains("px")) // 市价单不带价格字段
 
   test("Bar.parse: [ts,o,h,l,c,...] 取 ts/high/low/close"):
     assertEquals(Bar.parse(List("1711699200000", "3000", "3050", "2980", "3010", "100", "1")), Some(Bar(1711699200000L, 3050.0, 2980.0, 3010.0)))

@@ -7,10 +7,6 @@ import org.slf4j.LoggerFactory
 import sttp.client4.*
 import sttp.model.Uri
 
-import java.time.Instant
-import java.time.format.DateTimeFormatter
-import java.time.ZoneOffset
-
 /** OKX v5 **期权** REST 客户端 (instType=OPTION)——[[OptionsExchange]] 的 OKX 实现, 与 Bybit 实现并列
   * (开放封闭: 新增交易所 = 新增实现, 不改既有)。复用 hft 的 [[OkxClient]] 签名原语 (base64 HMAC + 头鉴权)
   * 与 [[OkxCredentials]] (含 passphrase)。
@@ -23,12 +19,15 @@ import java.time.ZoneOffset
   * **首次上真金白银前务必在模拟盘验证**: instId 格式 / 合约张数单位 (ctVal) / 最小下单量 / 价格精度 / clOrdId 规则。
   *
   * @param quote     永续计价币 (拼标的 instId, 默认 USDT)
+  * @param optionCcy 期权净 greeks 只统计该币种 (None=全部相加)。account/greeks 按币种分行, 单标的部署
+  *                  应传 Some(基础币) 避免多币种 delta 跨币量纲相加; 见 [[optionAccountGreeks]]。
   * @param simulated 模拟盘开关 (OKX 用请求头切换, 非独立域名)
   */
 final class OkxOptionsClient(
     backend: SyncBackend,
     credentials: Option[OkxCredentials],
     quote: String = "USDT",
+    optionCcy: Option[String] = None,
     simulated: Boolean = false,
 ) extends OptionsExchange:
   import OkxOptionsClient.*
@@ -57,7 +56,8 @@ final class OkxOptionsClient(
         env.asEither.flatMap { rows =>
           val bs = rows.flatMap(Bar.parse)
           val merged = acc ++ bs
-          if bs.isEmpty || merged.sizeIs >= bars then Right(merged)
+          // 终止按**去重后**数量判定 (OKX after 为开区间通常无重叠, 但防御重复行导致 need 偏小提前停)
+          if bs.isEmpty || merged.distinctBy(_.ts).sizeIs >= bars then Right(merged)
           else page(Some(bs.map(_.ts).min), bars - bs.size, merged)
         }
       }
@@ -75,21 +75,18 @@ final class OkxOptionsClient(
     }
 
   override def optionAccountGreeks(): Either[String, (Double, Double)] =
-    // OKX 账户级、按币种聚合的 BS 希腊字母 (与 hft OkxClient.fetchGreeks 同源)。
-    // 单标的部署即目标币种; 多币种时各行相加 = 全期权净敞口 (镜像 Bybit "Σ各持仓")。
+    // OKX 账户级、按币种(分行)聚合的 BS 希腊字母 (deltaBS/gammaBS, 与框架 hft.OkxClient.fetchGreeks 同字段同口径——
+    // 该路径已是 OKX 永续对冲使用的 delta 定义, 故复用一致)。optionCcy=Some 时只取该币行 (避免多币 delta 跨币相加)。
     signedGet[Envelope[GreeksItem]]("/api/v5/account/greeks", "").flatMap { env =>
       env.asEither.map { rows =>
-        (rows.flatMap(_.deltaBS.toDoubleOption).sum, rows.flatMap(_.gammaBS.toDoubleOption).sum)
+        val rel = optionCcy.fold(rows)(c => rows.filter(_.ccy == c))
+        (rel.flatMap(_.deltaBS.toDoubleOption).sum, rel.flatMap(_.gammaBS.toDoubleOption).sum)
       }
     }
 
   override def sellOption(symbol: String, qty: Double, limitPrice: Option[Double], orderLinkId: String): Either[String, String] =
-    val (ordType, pxField) = limitPrice match
-      case Some(p) => ("post_only", s""","px":"${fmt(p)}"""") // PostOnly 挂卖一才是 maker
-      case None    => ("market", "")
     val clOrdId = clOrdIdOf(orderLinkId)
-    val body =
-      s"""{"instId":"$symbol","tdMode":"cross","side":"sell","ordType":"$ordType","sz":"${fmt(qty)}"$pxField,"clOrdId":"$clOrdId"}"""
+    val body = sellOrderBody(symbol, qty, limitPrice, clOrdId)
     credentials match // 实盘下单, 无 dry-run
       case None => Left("缺少 OKX_API_KEY/SECRET/PASSPHRASE, 无法下单")
       case Some(_) =>
@@ -127,15 +124,8 @@ final class OkxOptionsClient(
       case None => Left("缺少 OKX 凭证")
       case Some(c) =>
         try
-          val ts = IsoMillisUtc.format(Instant.now())
-          val prehash = ts + method + pathQuery + body
-          val headers = simHeaders ++ Map(
-            "OK-ACCESS-KEY" -> c.apiKey,
-            "OK-ACCESS-SIGN" -> OkxClient.hmacSha256Base64(c.secret, prehash),
-            "OK-ACCESS-TIMESTAMP" -> ts,
-            "OK-ACCESS-PASSPHRASE" -> c.passphrase,
-            "Content-Type" -> "application/json",
-          )
+          // 签名头复用框架 OkxClient.signedHeaders (与永续客户端同一 SSOT), 叠加模拟盘头
+          val headers = simHeaders ++ OkxClient.signedHeaders(c, method, pathQuery, body)
           val baseReq = basicRequest
             .method(sttp.model.Method(method), Uri.unsafeParse(s"$base$pathQuery"))
             .response(asStringAlways)
@@ -147,10 +137,13 @@ final class OkxOptionsClient(
         catch case e: Throwable => Left(s"$method $pathQuery failed: ${e.getMessage}")
 
 object OkxOptionsClient:
-  private val IsoMillisUtc =
-    DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
-
-  private def fmt(d: Double): String = BigDecimal(d).underlying.stripTrailingZeros.toPlainString
+  /** OKX 卖出期权下单 body (纯函数, 便于断言)。limitPrice=Some -> post_only(maker)+px; None -> market。
+    * tdMode=cross (期权跨保证金), side=sell。数字格式复用框架 [[OkxClient.fmt]] (出站格式 SSOT)。 */
+  def sellOrderBody(instId: String, qty: Double, limitPrice: Option[Double], clOrdId: String): String =
+    val (ordType, pxField) = limitPrice match
+      case Some(p) => ("post_only", s""","px":"${OkxClient.fmt(p)}"""")
+      case None    => ("market", "")
+    s"""{"instId":"$instId","tdMode":"cross","side":"sell","ordType":"$ordType","sz":"${OkxClient.fmt(qty)}"$pxField,"clOrdId":"$clOrdId"}"""
 
   private def rightOf(optType: String): Option[OptionRight] = optType.toUpperCase match
     case "C" => Some(OptionRight.Call)

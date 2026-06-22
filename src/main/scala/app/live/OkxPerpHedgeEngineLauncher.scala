@@ -52,7 +52,7 @@ import sttp.client4.DefaultSyncBackend
   supervised:
     val backend = DefaultSyncBackend()
     val perp = OkxClient(backend, credentials, quote = quote) // 永续 (SWAP) 下单/查仓
-    val opt = OkxOptionsClient(backend, credentials, quote = quote, simulated = simulated)
+    val opt = OkxOptionsClient(backend, credentials, quote = quote, optionCcy = Some(ccy), simulated = simulated)
     val market = OkxMarketStream(perp, backend)
     // accountStream = 期权 greeks 注入流 (先, 同步发 ccy 余额兜底) + OKX 永续账户流 (持仓/订单回报/账户)
     val account = CompositeAccountStream(Exchange.Okx, Seq(OptionGreeksStream(opt, Exchange.Okx, ccy, greeksPollMs), OkxAccountStream(perp, backend)))

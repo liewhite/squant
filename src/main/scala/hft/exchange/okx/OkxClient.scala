@@ -41,6 +41,22 @@ object OkxClient:
   private val IsoMillisUtc =
     DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
 
+  /** OKX 签名请求头的**单一数据源** (prehash=ts+method+pathQuery+body, base64-HMAC)。框架永续客户端
+    * 与 [[app.live.OkxOptionsClient]] 期权客户端共用——签名规则只此一处, 杜绝改一处忘改另一处。
+    * `pathQuery` 须含 query string (OKX 要求 requestPath 参与签名), GET 的 `body` 传空串。 */
+  def signedHeaders(c: OkxCredentials, method: String, pathQuery: String, body: String): Map[String, String] =
+    val ts = IsoMillisUtc.format(Instant.now())
+    Map(
+      "OK-ACCESS-KEY" -> c.apiKey,
+      "OK-ACCESS-SIGN" -> hmacSha256Base64(c.secret, ts + method + pathQuery + body),
+      "OK-ACCESS-TIMESTAMP" -> ts,
+      "OK-ACCESS-PASSPHRASE" -> c.passphrase,
+      "Content-Type" -> "application/json",
+    )
+
+  /** 下单数量/价格格式化 (定点, 去尾零, 避免科学计数法被交易所拒)。出站数字格式的单一数据源。 */
+  def fmt(d: Double): String = BigDecimal(d).underlying.stripTrailingZeros.toPlainString
+
   /** 撤单时表示"订单不存在/已撤/已完成"的 OKX sCode，归一为 ExchangeError.OrderNotFound */
   private val OrderNotFoundCodes: Set[String] = Set("51400", "51401", "51402")
 
@@ -206,17 +222,9 @@ final class OkxClient(
     val headersE: Either[ExchangeError, Map[String, String]] =
       if !signed then Right(Map.empty)
       else
-        credentials.toRight(ExchangeError.Auth("OKX credentials required")).map { c =>
-          val ts = OkxClient.IsoMillisUtc.format(Instant.now())
-          val prehash = ts + method.method + path + body.getOrElse("")
-          Map(
-            "OK-ACCESS-KEY" -> c.apiKey,
-            "OK-ACCESS-SIGN" -> OkxClient.hmacSha256Base64(c.secret, prehash),
-            "OK-ACCESS-TIMESTAMP" -> ts,
-            "OK-ACCESS-PASSPHRASE" -> c.passphrase,
-            "Content-Type" -> "application/json",
-          )
-        }
+        credentials
+          .toRight(ExchangeError.Auth("OKX credentials required"))
+          .map(c => OkxClient.signedHeaders(c, method.method, path, body.getOrElse("")))
     headersE.flatMap(headers => send(method, s"$restBase$path", headers, body))
 
   private def send(
@@ -256,8 +264,7 @@ final class OkxClient(
     if code == "0" then Right(())
     else Left(ExchangeError.Other(s"OKX API error: code=$code msg=$msg"))
 
-  private def fmt(d: Double): String =
-    BigDecimal(d).underlying.stripTrailingZeros.toPlainString
+  private def fmt(d: Double): String = OkxClient.fmt(d)
 
   private def sideParam(side: Side): String = side match
     case Side.Long  => "buy"
