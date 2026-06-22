@@ -1,0 +1,16 @@
+{
+  "apiKey": "YOUR_BYBIT_API_KEY",
+  "apiSecret": "YOUR_BYBIT_API_SECRET",
+  "testnet": false,
+  "tuning": {
+    "symbol": "ETHUSDT",
+    "baseCoin": "ETH",
+    "targetDays": 21,
+    "gridHigh": 2.0,
+    "gridLow": 1.0,
+    "baseQty": 1.0,
+    "maxQty": 3.0,
+    "bars2w": 4032,
+    "runNow": false
+  }
+}

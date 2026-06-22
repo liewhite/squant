@@ -16,19 +16,17 @@ import strategy.research.FundingWatchStrategy
   * Fail-fast: 框架不做任何错误恢复 (包括 WS 重连)，任何异常都终止进程，由外层重新拉起，
   * 重启后的启动对齐保证状态正确。私有/公共连接均每 20s 发应用层 ping 维持。
   *
-  * 配置环境变量 BYBIT_API_KEY / BYBIT_API_SECRET 可接入私有流与真实下单 (此时应去掉 dryRun)。
+  * 可选 JSON 配置 (apiKey/apiSecret) 接入私有流 (路径=首个命令行参数, 默认 `conf/demo-bybit.json`;
+  * 缺省则纯公共行情)。模板见 `conf/demo.example.json`。本 demo 恒 dry-run, 不真实下单。
   *
-  * 运行: sbt "runMain app.live.BybitDemo"
+  * 运行: sbt "runMain app.live.demo.BybitDemo [conf/demo-bybit.json]"
   */
-@main def BybitDemo(): Unit =
+@main def BybitDemo(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")
   System.setProperty("org.slf4j.simpleLogger.dateTimeFormat", "HH:mm:ss.SSS")
 
-  val credentials =
-    for
-      key <- sys.env.get("BYBIT_API_KEY")
-      secret <- sys.env.get("BYBIT_API_SECRET")
-    yield BybitCredentials(key, secret)
+  val conf = DemoConfig.loadOrEmpty(args.headOption.getOrElse("conf/demo-bybit.json"))
+  val credentials = if conf.hasCreds then Some(BybitCredentials(conf.apiKey, conf.apiSecret)) else None
 
   supervised:
     val backend = DefaultSyncBackend()

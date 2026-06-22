@@ -9,23 +9,19 @@ import sttp.client4.DefaultSyncBackend
 
 /** BBO 做市策略入口: BTCUSDT 双边 BBO 外 0.01% 挂单 0.002 BTC，杠杆率上限 2。
   *
-  * 需要环境变量 BINANCE_API_KEY / BINANCE_API_SECRET (策略依赖账户净值与私有流订单回报)。
-  * 默认 dry-run；显式设置 LIVE=1 才会真实下单。
+  * JSON 配置 (apiKey/apiSecret 必填, 策略依赖账户净值与私有流订单回报; live 开关) 路径=首个命令行参数
+  * (默认 `conf/demo-maker.json`)。模板见 `conf/demo.example.json`。默认 dry-run; 配置 live=true 才真实下单。
   *
-  * 运行: BINANCE_API_KEY=.. BINANCE_API_SECRET=.. sbt "runMain app.live.MakerDemo"
+  * 运行: sbt "runMain app.live.demo.MakerDemo [conf/demo-maker.json]"
   */
-@main def MakerDemo(): Unit =
+@main def MakerDemo(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")
   System.setProperty("org.slf4j.simpleLogger.dateTimeFormat", "HH:mm:ss.SSS")
 
-  val credentials =
-    (for
-      key <- sys.env.get("BINANCE_API_KEY")
-      secret <- sys.env.get("BINANCE_API_SECRET")
-    yield BinanceCredentials(key, secret))
-      .getOrElse(throw IllegalStateException("MakerDemo requires BINANCE_API_KEY / BINANCE_API_SECRET"))
-
-  val live = sys.env.get("LIVE").contains("1")
+  val conf = DemoConfig.loadOrEmpty(args.headOption.getOrElse("conf/demo-maker.json"))
+  if !conf.hasCreds then throw IllegalStateException("MakerDemo 需在配置文件提供 apiKey/apiSecret (依赖账户净值与私有流)")
+  val credentials = BinanceCredentials(conf.apiKey, conf.apiSecret)
+  val live = conf.live
 
   supervised:
     val backend = DefaultSyncBackend()

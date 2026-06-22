@@ -27,7 +27,7 @@ import sttp.client4.DefaultSyncBackend
   * **OKX 符号约定**: tuning.symbol 用基础币 (ETH, 框架 OKX 统一 symbol 即基础币), 永续 instId 由框架按
   * `ETH-<quote>-SWAP` 转换; 对冲与现货修正的 ccy 同为基础币; tuning.klineBar 用 OKX 粒度 (如 "1H")。
   *
-  * 运行: sbt "runMain app.live.OkxPerpHedgeEngineLauncher [conf/perp-hedge-okx.json]"
+  * 运行: sbt "runMain app.live.hedge.OkxPerpHedgeEngineLauncher [conf/perp-hedge-okx.json]"
   */
 @main def OkxPerpHedgeEngineLauncher(args: String*): Unit =
   val logger = LoggerFactory.getLogger("OkxPerpHedgeEngineLauncher")

@@ -16,20 +16,17 @@ import strategy.research.FundingWatchStrategy
   * Fail-fast: 框架不做任何错误恢复 (包括 WS 重连)，任何异常都终止进程，
   * 由外层 (systemd/k8s) 重新拉起，重启后的启动对齐保证状态正确。
   *
-  * 配置环境变量 BINANCE_API_KEY / BINANCE_API_SECRET 可接入私有流与真实下单
-  * (此时应去掉 dryRun)。
+  * 可选 JSON 配置 (apiKey/apiSecret) 接入私有流 (路径=首个命令行参数, 默认 `conf/demo-binance.json`;
+  * 缺省则纯公共行情)。模板见 `conf/demo.example.json`。本 demo 恒 dry-run。
   *
-  * 运行: sbt "runMain app.live.HftDemo"
+  * 运行: sbt "runMain app.live.demo.HftDemo [conf/demo-binance.json]"
   */
-@main def HftDemo(): Unit =
+@main def HftDemo(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")
   System.setProperty("org.slf4j.simpleLogger.dateTimeFormat", "HH:mm:ss.SSS")
 
-  val credentials =
-    for
-      key <- sys.env.get("BINANCE_API_KEY")
-      secret <- sys.env.get("BINANCE_API_SECRET")
-    yield BinanceCredentials(key, secret)
+  val conf = DemoConfig.loadOrEmpty(args.headOption.getOrElse("conf/demo-binance.json"))
+  val credentials = if conf.hasCreds then Some(BinanceCredentials(conf.apiKey, conf.apiSecret)) else None
 
   supervised:
     val backend = DefaultSyncBackend()

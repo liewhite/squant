@@ -21,7 +21,7 @@ import sttp.client4.DefaultSyncBackend
   * (默认 `conf/perp-hedge-bybit.json`)。模板见 `conf/perp-hedge-bybit.example.json`。
   * **密钥在文件中明文 -> chmod 600 且勿入库** (真实配置已 .gitignore)。
   *
-  * 运行: sbt "runMain app.live.PerpHedgeEngineLauncher [conf/perp-hedge-bybit.json]"
+  * 运行: sbt "runMain app.live.hedge.PerpHedgeEngineLauncher [conf/perp-hedge-bybit.json]"
   */
 @main def PerpHedgeEngineLauncher(args: String*): Unit =
   val logger = LoggerFactory.getLogger("PerpHedgeEngineLauncher")
