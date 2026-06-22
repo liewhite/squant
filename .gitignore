@@ -10,3 +10,7 @@ project/target/
 
 # 回测历史数据缓存 (运行产物, 联网下载)
 data-cache/
+
+# 实盘配置 (含明文 API 密钥) —— 只提交 *.example.json 模板, 真实配置勿入库
+conf/*.json
+!conf/*.example.json

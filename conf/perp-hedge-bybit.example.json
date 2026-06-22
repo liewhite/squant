@@ -1,0 +1,16 @@
+{
+  "apiKey": "YOUR_BYBIT_API_KEY",
+  "apiSecret": "YOUR_BYBIT_API_SECRET",
+  "testnet": false,
+  "tuning": {
+    "symbol": "ETHUSDT",
+    "ccy": "ETH",
+    "klineBar": "60",
+    "greeksPollMs": 3000,
+    "offset": 0.0002,
+    "requoteMs": 5000,
+    "tightAtr": 1.0,
+    "looseAtr": 2.0,
+    "maxHedgeQty": 5.0
+  }
+}

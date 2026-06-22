@@ -1,0 +1,18 @@
+{
+  "apiKey": "YOUR_OKX_API_KEY",
+  "apiSecret": "YOUR_OKX_API_SECRET",
+  "passphrase": "YOUR_OKX_PASSPHRASE",
+  "quote": "USDT",
+  "simulated": false,
+  "tuning": {
+    "symbol": "ETH",
+    "ccy": "ETH",
+    "klineBar": "1H",
+    "greeksPollMs": 3000,
+    "offset": 0.0002,
+    "requoteMs": 5000,
+    "tightAtr": 1.0,
+    "looseAtr": 2.0,
+    "maxHedgeQty": 5.0
+  }
+}
