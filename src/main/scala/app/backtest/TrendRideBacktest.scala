@@ -63,7 +63,12 @@ import java.time.{LocalDate, ZoneOffset}
     val source = TradeBboAugmentSource(
       BinanceHistory.source(backend, Seq(symbol), period.start.minusDays(warmupDays), period.end, kinds = Seq(BinanceDataKind.Trades))
     )
-    val strategy = TrendRideStrategy(exchange = Exchange.Binance, symbol = symbol)
+    // 经分钟bar扫参确定的配置 (见 docs/trendride/analysis.md §改进与扫参)
+    val strategy = TrendRideStrategy(
+      exchange = Exchange.Binance, symbol = symbol,
+      mMax = 12.0, rMax = 3.0, band = 2.0, stepQty = 2.0,
+      convDead = 0.20, kSnrP = 2.5, mrTrendDecay = 1.0, trendEntryTaker = true,
+    )
     val runner = StrategyRunner.backtest(strategy, symbolMetas)
 
     val equityWriter = java.io.PrintWriter(s"$outDir/${period.label}_equity.csv")

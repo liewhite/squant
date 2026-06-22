@@ -37,9 +37,12 @@ final class TrendRideStrategy(
     convDead: Double = 0.05,
     passiveOffset: Double = 0.0008,
     priceTol: Double = 0.0015,
+    mrTrendDecay: Double = 0.0,
+    trendEntryTaker: Boolean = false,
 ) extends Strategy:
 
-  private val params = Params(mMax, rMax, stepQty, band, adverseCap, convDead, passiveOffset, priceTol)
+  private val params =
+    Params(mMax, rMax, stepQty, band, adverseCap, convDead, passiveOffset, priceTol, mrTrendDecay, trendEntryTaker)
   private val maxH = horizonsBars.map(_._1).max
 
   private val klines =

@@ -22,19 +22,27 @@ object TrendRideLogic:
   /** 策略系数 (币本位/比例)。 */
   final case class Params(
       mMax: Double,          // 满信念趋势仓上限
-      rMax: Double,          // 均值回归账规模
+      rMax: Double,          // 均值回归账规模 (|C|≈0 时的满额)
       stepQty: Quantity,     // 单笔 maker 分批量上限
       band: Double,          // 不交易带：|pos−target| 不超过它则不动 (抗手续费磨损)
       adverseCap: Double,    // 逆势仓硬上限：|逆势 pos| 超过即 taker 强平
       convDead: Double,      // 信念死区：|C|≤convDead 视为混乱 (对称轻仓)
       passiveOffset: Double, // maker 相对现价的被动偏移 (比例)
       priceTol: Double,      // resting 单价容差 (比例)：偏离期望价超过则撤换
+      mrTrendDecay: Double = 0.0, // 均值回归随信念衰减系数 ∈[0,1]：effRMax=rMax·(1−decay·|C|)。
+                                  // 0=不衰减 (旧行为，强趋势里 MR 反噬)；1=满信念时 MR 全关 (纯顺势)。
+      trendEntryTaker: Boolean = false, // 顺势动量加仓是否主动吃单 (taker)。被动 maker 在趋势里挂在错边、
+                                        // 价格越跑越远接不到 → 趋势仓建不起来。taker 主动参与才能骑上趋势 (代价: taker 费)。
   )
 
-  /** 信念 + 拉伸 → 目标净仓 (带符号)。安全带保证目标永不在逆势侧 (硬约束 #7 构造性满足)。 */
+  /** 信念 + 拉伸 → 目标净仓 (带符号)。安全带保证目标永不在逆势侧 (硬约束 #7 构造性满足)。
+    *
+    * 均值回归账规模随信念衰减 (`mrTrendDecay`)：强趋势 (|C|→1) 时压缩甚至关闭抄底/逃顶, 让趋势仓跑满；
+    * 混乱 (|C|→0) 时恢复满额, 轻仓高抛低吸。修复"短锚在单边趋势里恒判超买/超卖、持续反噬趋势"的病灶。 */
   def target(c: Double, z: Double, p: Params): Double =
+    val effRMax = p.rMax * (1.0 - p.mrTrendDecay * math.min(1.0, math.abs(c)))
     val core = c * p.mMax
-    val raw = core - z * p.rMax // 均值回归：超买(z>0)降目标、超卖(z<0)升目标
+    val raw = core - z * effRMax // 均值回归：超买(z>0)降目标、超卖(z<0)升目标
     val (lo, hi) =
       if c > p.convDead then (0.0, p.mMax)         // 看多：只允许净多
       else if c < -p.convDead then (-p.mMax, 0.0)  // 看空：只允许净空
@@ -67,10 +75,15 @@ object TrendRideLogic:
       else
         val reducing = pos != 0.0 && math.signum(gap) != math.signum(pos) // 朝零 = 减仓/止盈
         val qty = math.min(p.stepQty, math.abs(gap))
-        val px = side match
-          case Side.Long  => price * (1 - p.passiveOffset)
-          case Side.Short => price * (1 + p.passiveOffset)
-        Some(Desired(side, px, qty, reducing, Exec.Maker))
+        // 顺势动量加仓 = 非减仓 且 信念明确 (|C|>死区) 且 加仓方向与信念同向。混乱区 (|C|≤死区) 的开仓属均值回归, 仍走 maker。
+        val momentumAdd = !reducing && math.abs(c) > p.convDead && math.signum(gap) == math.signum(c)
+        if p.trendEntryTaker && momentumAdd then
+          Some(Desired(side, price, qty, reduceOnly = false, Exec.Taker)) // 主动吃单骑趋势
+        else
+          val px = side match
+            case Side.Long  => price * (1 - p.passiveOffset) // 减仓/混乱回归: 被动挂单等回调/反弹
+            case Side.Short => price * (1 + p.passiveOffset)
+          Some(Desired(side, px, qty, reducing, Exec.Maker))
 
   /** 现有挂单的精简视图 (对账用纯数据)。`isLimit=false` 即在飞的市价 (taker) 单。 */
   final case class Resting(id: OrderId, side: Side, reduceOnly: Boolean, isLimit: Boolean, price: Price, confirmed: Boolean)

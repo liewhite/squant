@@ -52,6 +52,16 @@ class TrendRideLogicSpec extends munit.FunSuite:
     assertEqualsDouble(TrendRideLogic.target(1.0, 0.0, p), p.mMax, 1e-9)
     assertEqualsDouble(TrendRideLogic.target(-1.0, 0.0, p), -p.mMax, 1e-9)
 
+  test("mrTrendDecay: 强趋势里 MR 被压制 (decay=1 满信念时几乎不被拉伸)"):
+    val pDecay = p.copy(mrTrendDecay = 1.0)
+    // 看多满信念 (C=0.99) + 中等超买 z=1：无衰减时被拉低, 衰减后几乎不动 (effRMax≈0)
+    val noDecay = TrendRideLogic.target(0.99, 1.0, p)          // effRMax = rMax
+    val withDecay = TrendRideLogic.target(0.99, 1.0, pDecay)   // effRMax ≈ 0
+    assert(withDecay > noDecay, s"decay=$withDecay should exceed noDecay=$noDecay")
+    assert(withDecay > 0.99 * p.mMax - 0.05, "满信念衰减后应贴近 core=0.99·mMax")
+    // 混乱 (C≈0) 时衰减几乎不起作用, 仍满额 MR
+    assertEqualsDouble(TrendRideLogic.target(0.0, 1.0, pDecay), TrendRideLogic.target(0.0, 1.0, p), 1e-9)
+
   // ===== 期望挂单：执行激进度由成因决定 =====
 
   test("不交易带内 → None"):
@@ -77,6 +87,17 @@ class TrendRideLogicSpec extends munit.FunSuite:
     assertEquals(d.reduceOnly, false)
     assertEqualsDouble(d.qty, p.stepQty, 1e-9)
     assert(d.price < 100.0)
+
+  test("trendEntryTaker: 顺势动量加仓 → taker; 但混乱区开仓与减仓仍 maker"):
+    val pt = p.copy(trendEntryTaker = true)
+    // 信念明确 (c=0.8) 顺势加多 → taker
+    assertEquals(TrendRideLogic.desired(pos = 0.0, target = 8.0, c = 0.8, price = 100.0, pt).get.exec, Exec.Taker)
+    // 混乱区 (|c|≤convDead) 开仓 = 均值回归 → 仍 maker
+    assertEquals(TrendRideLogic.desired(pos = 0.0, target = 1.0, c = 0.02, price = 100.0, pt).get.exec, Exec.Maker)
+    // 顺势减仓/止盈 → 仍 maker (被动卖在上方)
+    assertEquals(TrendRideLogic.desired(pos = 8.0, target = 5.0, c = 0.7, price = 100.0, pt).get.exec, Exec.Maker)
+    // 关闭时动量加仓仍 maker (回归旧行为)
+    assertEquals(TrendRideLogic.desired(pos = 0.0, target = 8.0, c = 0.8, price = 100.0, p).get.exec, Exec.Maker)
 
   test("超买部分止盈 (顺势减仓) → maker, reduceOnly=true, 卖挂现价上方"):
     val d = TrendRideLogic.desired(pos = 8.0, target = 5.0, c = 0.7, price = 100.0, p).get
