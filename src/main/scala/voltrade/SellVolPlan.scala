@@ -11,11 +11,7 @@ object SellVolPlan:
   val BarsPerYear5m: Double = 365.0 * 24.0 * 12.0
 
   /** 由 5 分钟收盘价序列 (最旧->最新) 算年化实现波动 (复用 hft RealizedVol 公式, SSOT) */
-  def annualizedRv(closes: Seq[Double]): Double =
-    val rets = closes.iterator.sliding(2).withPartial(false).collect {
-      case Seq(a, b) if a > 0 && b > 0 => math.log(b / a)
-    }.toVector
-    RealizedVol.annualized(rets, BarsPerYear5m)
+  def annualizedRv(closes: Seq[Double]): Double = RealizedVol.annualizedFromPrices(closes, BarsPerYear5m)
 
   /** 仓位倍数: 把最近 2 周 5min 收盘价对半分 (前半=上周, 后半=本周), 本周 RV **较上周上升**→[[gridHigh]] (卖更多),
     * 下降/持平→[[gridLow]]。返回 (倍数, 上周RV, 本周RV)。 */

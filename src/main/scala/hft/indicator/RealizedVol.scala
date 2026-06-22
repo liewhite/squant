@@ -50,3 +50,11 @@ object RealizedVol:
       val sumSq = logReturns.iterator.map(r => r * r).sum
       val tYears = logReturns.size.toDouble / barsPerYear
       if tYears <= 0.0 then 0.0 else math.sqrt(sumSq / tYears)
+
+  /** 由价格序列 (最旧->最新) 直接算年化实现波动: 取相邻对数收益 (跳过非正价) 后年化。
+    * 框架级复用——各处预扫/demo 不再各写一遍 sliding(2)+log+annualized。 */
+  def annualizedFromPrices(prices: collection.Seq[Double], barsPerYear: Double): Double =
+    val rets = prices.iterator.sliding(2).withPartial(false).collect {
+      case scala.collection.Seq(a, b) if a > 0.0 && b > 0.0 => math.log(b / a)
+    }.toVector
+    annualized(rets, barsPerYear)

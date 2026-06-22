@@ -98,10 +98,9 @@ import scala.concurrent.{Await, ExecutionContext, Future}
             if first == 0.0 then first = t.price
             if t.timestamp - lastTs >= 3_600_000L then { lastTs = t.timestamp; samples += t.price }
           case _ => ()
-      val rets = samples.toVector.sliding(2).collect { case Vector(a, b) if a > 0 && b > 0 => math.log(b / a) }.toVector
-      val rv = RealizedVol.annualized(rets, 365.0 * 24.0)
-      if rv <= 0.0 || rets.sizeIs < 24 then
-        System.err.println(f"[WARN] [$start..$end] 预扫样本异常: 小时采样=${samples.size} 收益=${rets.size} RV=$rv%.4f -> IV 可能退化, 该月结果不可信")
+      val rv = RealizedVol.annualizedFromPrices(samples.toVector, 365.0 * 24.0)
+      if rv <= 0.0 || samples.sizeIs < 25 then
+        System.err.println(f"[WARN] [$start..$end] 预扫样本异常: 小时采样=${samples.size} RV=$rv%.4f -> IV 可能退化, 该月结果不可信")
       (rv, first)
     finally backend.close()
 

@@ -2,7 +2,7 @@ package hft.backtest
 
 import hft.domain.*
 import hft.messaging.{EventData, IncomeEvent}
-import hft.option.{BlackScholes, OptionRight}
+import hft.option.{BlackScholes, Straddle}
 
 /** 单只 ATM 跨式的 BS 合成希腊字母配置 (不滚动，持有到 [[expiry]])。
   *
@@ -27,6 +27,8 @@ final case class BsGreeksConfig(
     /** 剩余期限下限 (天)：临近到期按此钳制，避免到期日 ATM gamma/theta 奇点 (T->0 时发散)。
       * 末段不再衰减 (保留约 minTenorDays 的时间价值)，对长周期影响可忽略。 */
     minTenorDays: Double = 1.0,
+    /** 宽跨 (strangle) 价外宽度：0=ATM 跨式 (call/put 同行权=首价)；>0=宽跨, call 行权=首价·(1+w)、put 行权=首价·(1−w)。 */
+    strangleWidthPct: Double = 0.0,
 )
 
 object BsGreeksSource:
@@ -45,7 +47,9 @@ object BsGreeksSource:
 final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig) extends MarketDataSource:
   import BsGreeksSource.DaysPerYear
 
-  private var strike = 0.0
+  private var strike = 0.0     // ATM 参考 (首笔成交价)
+  private var callStrike = 0.0 // call 行权 (跨式=strike; 宽跨=strike·(1+w))
+  private var putStrike = 0.0  // put  行权 (跨式=strike; 宽跨=strike·(1−w))
   private var entryPremium = 0.0
   private var inited = false
 
@@ -60,6 +64,8 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
           val s = t.price
           if !inited then
             strike = s // ATM = 首笔成交价
+            callStrike = s * (1.0 + config.strangleWidthPct)
+            putStrike = s * (1.0 - config.strangleWidthPct)
             entryPremium = straddleValue(s, now)
             inited = true
 
@@ -84,26 +90,20 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
   private def tYears(now: Timestamp): Double =
     math.max((config.expiry - now) / BlackScholes.MillisPerYear, config.minTenorDays / DaysPerYear)
 
-  /** 跨式在 (s, now) 的理论价值 */
+  /** 期权结构 (跨式/宽跨) 在 (s, now) 的理论价值 (框架级 [[Straddle]] 复用) */
   private def straddleValue(s: Double, now: Timestamp): Double =
-    val tY = tYears(now)
-    val call = BlackScholes.greeks(OptionRight.Call, s, strike, tY, config.impliedVol, config.riskFreeRate).price
-    val put = BlackScholes.greeks(OptionRight.Put, s, strike, tY, config.impliedVol, config.riskFreeRate).price
-    config.straddles * (call + put)
+    Straddle.value(config.straddles, s, callStrike, putStrike, tYears(now), config.impliedVol, config.riskFreeRate)
 
-  /** 跨式聚合为账户级 Greeks (单位: theta 每日、vega 对 1%，与通道约定一致) */
+  /** 期权结构聚合为账户级 Greeks (单位: theta 每日、vega 对 1%，与通道约定一致) */
   private def greeksAt(s: Double, now: Timestamp): Greeks =
-    val tY = tYears(now)
-    val call = BlackScholes.greeks(OptionRight.Call, s, strike, tY, config.impliedVol, config.riskFreeRate)
-    val put = BlackScholes.greeks(OptionRight.Put, s, strike, tY, config.impliedVol, config.riskFreeRate)
-    val n = config.straddles
+    val g = Straddle.greeks(config.straddles, s, callStrike, putStrike, tYears(now), config.impliedVol, config.riskFreeRate)
     Greeks(
       exchange = config.exchange,
       ccy = config.ccy,
-      delta = n * (call.delta + put.delta),
-      gamma = n * (call.gamma + put.gamma),
-      theta = n * (call.theta + put.theta) / DaysPerYear, // 每年 -> 每日
-      vega = n * (call.vega + put.vega) / 100.0,           // 对 1.0 -> 对 1%
+      delta = g.delta,
+      gamma = g.gamma,
+      theta = g.theta / DaysPerYear, // 每年 -> 每日
+      vega = g.vega / 100.0,         // 对 1.0 -> 对 1%
       timestamp = now,
     )
 

@@ -85,8 +85,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
         it.next().data match
           case EventData.MarketTradeUpdate(t) => if t.timestamp - lastTs >= 3_600_000L then { lastTs = t.timestamp; samples += t.price }
           case _                              => ()
-      val rets = samples.toVector.sliding(2).collect { case Vector(a, b) if a > 0 && b > 0 => math.log(b / a) }.toVector
-      RealizedVol.annualized(rets, 365.0 * 24.0)
+      RealizedVol.annualizedFromPrices(samples.toVector, 365.0 * 24.0)
     finally backend.close()
 
   /** 单 tranche: 卖空头跨式(负 straddles) + MaAsym 对冲, 持有到 21 天到期 */
