@@ -62,10 +62,24 @@ class SellVolPlanSpec extends munit.FunSuite:
       assert(next > from, s"next $next not after $from")
     }
 
-  test("targetExpiryMs: = 决策周五17:00 + targetDays, 落在 21 天后那个周五"):
+  test("targetExpiryMs: = 锚点 + targetDays, 锚点在周五 -> 仍落周五"):
     val zone = ZoneId.of("Asia/Shanghai")
-    val now = Instant.parse("2025-06-20T10:00:00Z").toEpochMilli // 北京周五 18:00 (已过 17:00 锚点)
-    val target = SellVolPlan.targetExpiryMs(now, 21)
-    val z = ZonedDateTime.ofInstant(Instant.ofEpochMilli(target), zone)
-    assertEquals(z.getDayOfWeek, DayOfWeek.FRIDAY)        // 21=3×7 -> 仍是周五
-    assertEquals(target - SellVolPlan.currentDecisionTime(now), 21L * 86_400_000L)
+    val anchor = SellVolPlan.currentDecisionTime(Instant.parse("2025-06-20T10:00:00Z").toEpochMilli) // 周五17:00
+    val target = SellVolPlan.targetExpiryMs(anchor, 21)
+    assertEquals(target - anchor, 21L * SellVolPlan.DayMs)
+    assertEquals(ZonedDateTime.ofInstant(Instant.ofEpochMilli(target), zone).getDayOfWeek, DayOfWeek.FRIDAY) // 21=3×7
+
+  test("decisionAnchor: runNow=上周五(lastDecisionTime), 常规=本周五; 周五当天二者差 7 天"):
+    val zone = ZoneId.of("Asia/Shanghai")
+    val fri = Instant.parse("2025-06-20T10:00:00Z").toEpochMilli // 北京周五 18:00 (>17:00)
+    val regular = SellVolPlan.decisionAnchor(fri, runNow = false)
+    val last = SellVolPlan.decisionAnchor(fri, runNow = true)
+    assertEquals(regular, SellVolPlan.currentDecisionTime(fri))
+    assertEquals(last, SellVolPlan.lastDecisionTime(fri))
+    assertEquals(regular - last, 7L * SellVolPlan.DayMs) // 周五当天: 本周五 vs 上周五
+    val z = ZonedDateTime.ofInstant(Instant.ofEpochMilli(last), zone)
+    assertEquals(z.getDayOfWeek, DayOfWeek.FRIDAY); assertEquals(z.getHour, 17)
+
+  test("decisionAnchor: 周中 runNow 与常规一致 (都=上周五)"):
+    val wed = Instant.parse("2025-06-18T00:00:00Z").toEpochMilli // 周三
+    assertEquals(SellVolPlan.decisionAnchor(wed, runNow = true), SellVolPlan.decisionAnchor(wed, runNow = false))

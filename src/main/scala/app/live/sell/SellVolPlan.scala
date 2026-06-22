@@ -26,15 +26,18 @@ object SellVolPlan:
       val mult = if rvThis > rvPrev then gridHigh else gridLow
       (mult, rvPrev, rvThis)
 
-  /** 目标到期 = **决策周五 + targetDays** (默认 21 天后那个周五的周度期权)。决策固定在周五,
-    * 且 21=3×7, 故 +targetDays 天仍落在周五; 实际周度期权恒在周五交割, [[selectStraddle]] 据此选最近到期。 */
-  def targetExpiryMs(
-      nowMs: Long,
-      targetDays: Int,
-      zone: ZoneId = ZoneId.of("Asia/Shanghai"),
-      decisionHour: Int = 17,
-  ): Long =
-    currentDecisionTime(nowMs, zone, decisionHour) + targetDays.toLong * 86_400_000L
+  /** 一天的毫秒数 (到期/锚点计算) */
+  val DayMs: Long = 86_400_000L
+
+  /** 决策锚点: 常规调度 = **本周五 17:00** ([[currentDecisionTime]]); **runNow = 上周五 17:00**
+    * ([[lastDecisionTime]])。targetExpiry 与 orderLinkId 共用此锚点, 保证 runNow 以上周五为基准且自洽幂等。 */
+  def decisionAnchor(nowMs: Long, runNow: Boolean, zone: ZoneId = ZoneId.of("Asia/Shanghai"), decisionHour: Int = 17): Long =
+    if runNow then lastDecisionTime(nowMs, zone, decisionHour) else currentDecisionTime(nowMs, zone, decisionHour)
+
+  /** 目标到期 = **决策锚点 + targetDays** (默认 21 天后那个周五的周度期权)。锚点在周五且 21=3×7,
+    * 故 +targetDays 仍落周五; 周度期权恒周五交割, [[selectStraddle]] 据此选最近到期。 */
+  def targetExpiryMs(anchorMs: Long, targetDays: Int): Long =
+    anchorMs + targetDays.toLong * DayMs
 
   /** 从期权链选 **离 targetExpiryMs 最近的到期、ATM** 的跨式 (call+put 同行权同到期)。
     * 先选交割时间最接近 targetExpiryMs 的到期, 再在该到期内取行权价最接近 spot 的 call/put。 */
@@ -73,6 +76,12 @@ object SellVolPlan:
     val cand = from.`with`(TemporalAdjusters.previousOrSame(DayOfWeek.FRIDAY)).`with`(LocalTime.of(decisionHour, 0))
     val anchor = if cand.isAfter(from) then cand.minusWeeks(1) else cand // prevOrSame 落在周五但时刻可能晚于 from
     anchor.toInstant.toEpochMilli
+
+  /** **上周五**决策锚点 = from 之前**严格最近**的"周五 decisionHour:00" (若 from 当天即周五也回退到上一周五)。
+    * runNow 用它: 以上周五为基准往后 targetDays 天选到期 (而非用本周五/当前时刻)。 */
+  def lastDecisionTime(fromMs: Long, zone: ZoneId = ZoneId.of("Asia/Shanghai"), decisionHour: Int = 17): Long =
+    val from = ZonedDateTime.ofInstant(Instant.ofEpochMilli(fromMs), zone)
+    from.`with`(TemporalAdjusters.previous(DayOfWeek.FRIDAY)).`with`(LocalTime.of(decisionHour, 0)).toInstant.toEpochMilli
 
   /** 按交易所 qtyStep 向下取整并校验 minQty: 返回合规下单量, 低于最小量返回 None。step<=0 时只校验 minQty。 */
   def quantizeQty(qty: Double, qtyStep: Double, minQty: Double): Option[Double] =

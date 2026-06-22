@@ -57,6 +57,15 @@ class VolSellSpec extends munit.FunSuite:
     // 幂等: 同一周期 plan 两次得相同 link
     assertEquals(VolSell.plan(FakeEx(), cfg, now + 1000).toOption.get.legs.map(_.orderLinkId).toSet, dec.legs.map(_.orderLinkId).toSet)
 
+  test("runNow=true -> 决策锚点用上周五 (orderLinkId 据此派生)"):
+    val ex = FakeEx()
+    val dec = VolSell.plan(ex, cfg, now, runNow = true).toOption.get
+    val anchor = SellVolPlan.lastDecisionTime(now) // 上周五
+    assertEquals(dec.legs.map(_.orderLinkId).toSet, Set(s"vs-$anchor-c", s"vs-$anchor-p"))
+    // 与常规 (本周五) 锚点不同周时, link 应不同
+    val regular = VolSell.plan(ex, cfg, now, runNow = false).toOption.get
+    assert(regular.legs.head.orderLinkId != dec.legs.head.orderLinkId || SellVolPlan.currentDecisionTime(now) == anchor)
+
   test("RV 降 -> 卖 1×"):
     assertEquals(VolSell.plan(FakeEx(choppy ++ flat), cfg, now).toOption.get.mult, 1.0)
 

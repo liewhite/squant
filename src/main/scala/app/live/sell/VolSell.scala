@@ -25,22 +25,23 @@ object VolSell:
   )
 
   /** 取数+决策, 产出**完整两腿** (call+put) 或 Left。任一腿数量不合规/无卖一报价 -> 整体 Left
-    * (绝不只下单腿, 避免裸方向敞口)。orderLinkId 由当周决策锚点派生 -> 幂等 (重启/重试不重复下单)。
-    * 目标到期 = 决策周五 + targetDays (默认 21 天后那个周五的周度期权), 在该到期内取最近 ATM 跨式。 */
-  def plan(ex: OptionsExchange, cfg: Config, nowMs: Long): Either[String, Decision] =
+    * (绝不只下单腿, 避免裸方向敞口)。orderLinkId 由决策锚点派生 -> 幂等 (重启/重试不重复下单)。
+    * 决策锚点: 常规=本周五, **runNow=上周五**; 目标到期 = 锚点 + targetDays (默认 21 天后那个周五的周度期权),
+    * 在该到期内取最近 ATM 跨式。 */
+  def plan(ex: OptionsExchange, cfg: Config, nowMs: Long, runNow: Boolean = false): Either[String, Decision] =
     for
       closes <- ex.underlyingCloses5m(cfg.symbol, cfg.bars2w)
       _ <- Either.cond(closes.sizeIs >= cfg.bars2w * 9 / 10, (), s"K线不足 ${closes.size}/${cfg.bars2w} (<90%), 跳过避免RV失真")
       spot <- closes.lastOption.toRight("无现价")
       chain <- ex.optionChain(cfg.baseCoin)
-      targetMs = SellVolPlan.targetExpiryMs(nowMs, cfg.targetDays)
+      anchor = SellVolPlan.decisionAnchor(nowMs, runNow)
+      targetMs = SellVolPlan.targetExpiryMs(anchor, cfg.targetDays)
       straddle <- SellVolPlan.selectStraddle(chain, nowMs, spot, targetMs).toRight("未找到 ~目标到期 ATM 跨式")
       (call, put) = straddle
       candidateStrikes = chain.iterator.filter(_.expiryMs == call.expiryMs).map(_.strike).distinct.toVector.sorted
-      period = SellVolPlan.currentDecisionTime(nowMs)
       (mult, rvPrev, rvThis) = SellVolPlan.decideMultiplier(closes, cfg.gridHigh, cfg.gridLow)
-      callLeg <- leg(ex, call, cfg.baseQty * mult, cfg.maxQty, period)
-      putLeg <- leg(ex, put, cfg.baseQty * mult, cfg.maxQty, period)
+      callLeg <- leg(ex, call, cfg.baseQty * mult, cfg.maxQty, anchor)
+      putLeg <- leg(ex, put, cfg.baseQty * mult, cfg.maxQty, anchor)
     yield Decision(mult, rvPrev, rvThis, spot, call.expiryMs, call.strike, candidateStrikes, Seq(callLeg, putLeg))
 
   private def leg(ex: OptionsExchange, inst: OptionInstrument, rawQty: Double, maxQty: Double, periodMs: Long): Either[String, Leg] =
