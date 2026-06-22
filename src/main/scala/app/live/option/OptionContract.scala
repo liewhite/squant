@@ -1,4 +1,4 @@
-package app.live
+package app.live.option
 
 /** 期权卖方实盘代码——**与 hft 回测/交易框架隔离**的独立 package (voltrade)。
   * 只复用 hft 里的纯数学工具 (RealizedVol/BlackScholes) 与底层 Bybit 签名原语, 不掺入 hft 交易引擎。 */

@@ -1,6 +1,6 @@
-package app.live
+package app.live.option
 
-import app.live.OkxOptionsClient.*
+import app.live.option.OkxOptionsClient.*
 
 /** OKX 期权客户端的**纯解析逻辑**单测 (不触网): instruments 字段映射、clOrdId 幂等清洗、candle 行解析、
   * 响应外壳 code 判定。IO 路径由模拟盘人工验证 (见类注释)。 */

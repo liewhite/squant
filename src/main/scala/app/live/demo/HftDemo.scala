@@ -1,4 +1,4 @@
-package app.live
+package app.live.demo
 
 import hft.engine.{Engine, ExchangeGateway}
 import hft.exchange.binance.{BinanceAccountStream, BinanceClient, BinanceCredentials, BinanceMarketStream}

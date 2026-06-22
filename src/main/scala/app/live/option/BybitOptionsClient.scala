@@ -1,4 +1,4 @@
-package app.live
+package app.live.option
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import com.github.plokhotnyuk.jsoniter_scala.macros.*

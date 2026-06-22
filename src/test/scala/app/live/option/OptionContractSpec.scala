@@ -1,4 +1,4 @@
-package app.live
+package app.live.option
 
 class OptionContractSpec extends munit.FunSuite:
   test("parseSymbol: Bybit 期权符号 -> (base, strike, right)"):

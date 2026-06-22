@@ -1,4 +1,4 @@
-package app.live
+package app.live.demo
 
 import hft.domain.Exchange
 import hft.engine.{Engine, ExchangeGateway}

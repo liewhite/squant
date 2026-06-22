@@ -1,4 +1,4 @@
-package app.live
+package app.live.option
 
 /** 期权交易所边界 (隔离 Bybit 细节, 便于单测策略 / 换交易所)。错误以 Left(String) 显式返回, 不静默。 */
 trait OptionsExchange:

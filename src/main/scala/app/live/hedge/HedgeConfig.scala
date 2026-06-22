@@ -1,4 +1,4 @@
-package app.live
+package app.live.hedge
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import com.github.plokhotnyuk.jsoniter_scala.macros.*
