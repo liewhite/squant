@@ -6,7 +6,7 @@ import hft.engine.StrategyRunner
 import hft.messaging.{EventData, IncomeEvent}
 import hft.option.BlackScholes
 import hft.sim.SimConfig
-import hft.strategy.AtrTakeHedgeStrategy
+import strategy.research.AtrTakeHedgeStrategy
 import sttp.client4.DefaultSyncBackend
 
 import java.time.{LocalDate, ZoneOffset}

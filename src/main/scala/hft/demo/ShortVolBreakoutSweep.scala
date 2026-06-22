@@ -1,7 +1,8 @@
 package hft.demo
 
 import hft.domain.{Exchange, Symbol}
-import hft.strategy.{BreakoutHedgeStrategy, HedgeExecution, Strategy}
+import hft.strategy.Strategy
+import strategy.research.{BreakoutHedgeStrategy, HedgeExecution}
 import sttp.client4.DefaultSyncBackend
 
 import java.time.LocalDate
@@ -37,14 +38,12 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   val initBalance = ShortVolHedgeRunner.InitialBalanceUsdt
   val optionPositionEth = math.abs(straddles)
 
-  /** (标签, 窗口小时, delta 阈值占比) —— 见类注释的设计逻辑 */
+  /** (标签, 窗口小时, delta 阈值占比) —— 固定阈值 10%, 沿窗口轴向长端延伸 (前测 8h 优于 3h/5h, 看是否继续单调) */
   val combos: Seq[(String, Double, Double)] = Seq(
-    ("5h_10%", 5.0, 0.10),  // 锚点 (前序三段最优)
-    ("3h_10%", 3.0, 0.10),  // 窗口轴: 更短 (预期更差, 噪声混入)
-    ("8h_10%", 8.0, 0.10),  // 窗口轴: 更长 (更强过滤)
-    ("5h_6%", 5.0, 0.06),   // 阈值轴: 更紧 (对冲更多, 预期成本更高)
-    ("5h_15%", 5.0, 0.15),  // 阈值轴: 更松 (对冲更少)
-    ("8h_15%", 8.0, 0.15),  // 角点: 两轴都松, 成本最小
+    ("8h_10%", 8.0, 0.10),
+    ("12h_10%", 12.0, 0.10),
+    ("16h_10%", 16.0, 0.10),
+    ("20h_10%", 20.0, 0.10),
   )
 
   val curveDir = sys.env.getOrElse("CURVE_DIR", "/tmp/shortvol_sweep")

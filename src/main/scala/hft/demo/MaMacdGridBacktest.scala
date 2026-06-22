@@ -5,7 +5,7 @@ import hft.domain.{Exchange, Side}
 import hft.engine.StrategyRunner
 import hft.messaging.{EventData, IncomeEvent}
 import hft.sim.SimConfig
-import hft.strategy.MaMacdGridStrategy
+import strategy.research.MaMacdGridStrategy
 import sttp.client4.DefaultSyncBackend
 
 import java.time.LocalDate

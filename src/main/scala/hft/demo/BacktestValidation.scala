@@ -6,7 +6,7 @@ import hft.engine.StrategyRunner
 import hft.messaging.{EventData, IncomeEvent}
 import hft.option.{BlackScholes, OptionRight}
 import hft.sim.SimConfig
-import hft.strategy.{GammaScalpStrategy, MacdBiasMode}
+import strategy.research.{GammaScalpStrategy, MacdBiasMode}
 
 /** 回测引擎 + 期权回测的**正确性验证** (非策略盈利性)。
   *

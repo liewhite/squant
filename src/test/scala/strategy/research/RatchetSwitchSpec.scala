@@ -1,4 +1,6 @@
-package hft.strategy
+package strategy.research
+
+import hft.strategy.{OutcomeEvent, Strategy}
 
 /** 棘轮开关单测：初始启用 / 大反弹关闭 / 关闭期下杀重启(返回 true) / 阈值边界。 */
 class RatchetSwitchSpec extends munit.FunSuite:

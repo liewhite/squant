@@ -5,7 +5,8 @@ import hft.domain.{Exchange, Position, Symbol, SymbolMeta}
 import hft.engine.StrategyRunner
 import hft.messaging.{EventData, IncomeEvent}
 import hft.sim.{FillRecorder, SimConfig}
-import hft.strategy.{HedgeExecution, LimitRepegHedgeExecution, MarketHedgeExecution, Strategy}
+import hft.strategy.Strategy
+import strategy.research.{HedgeExecution, LimitRepegHedgeExecution, MarketHedgeExecution}
 import sttp.client4.SyncBackend
 
 import java.nio.file.Path
@@ -30,6 +31,12 @@ final case class ShortVolParams(
     impliedVol: Double = 0.5,
     /** 跨式份数 (负=卖方 short straddle) */
     straddles: Double = -10.0,
+    /** 宽跨价外宽度 (0=ATM 跨式; >0=宽跨, call/put 行权 = 首价·(1±w)) */
+    strangleWidthPct: Double = 0.0,
+    /** 行情->策略延迟 (ms)：交易所事件到策略收到的时延 */
+    exchangeToStrategyDelayMs: Long = 100,
+    /** 下单->交易所延迟 (ms)：策略下单到柜台撮合的时延 */
+    orderToExchangeDelayMs: Long = 50,
     /** Some=把成交写入该 CSV (CLI 单跑用); None=不落盘 (批量实验用) */
     recorderPath: Option[Path] = None,
 )
@@ -119,6 +126,7 @@ object ShortVolHedgeRunner:
       riskFreeRate = RiskFreeRate,
       spotHolding = 0.0,
       emitIntervalMs = 1000,
+      strangleWidthPct = params.strangleWidthPct,
     )
     val greeksSource = BsGreeksSource(tradeSourceFactory(), greeksConfig)
     // 市价对冲需 BBO 撮合取对手价 -> 附加零价差 BBO; 限价走 trade-print 无需 BBO
@@ -128,7 +136,7 @@ object ShortVolHedgeRunner:
       if params.useMarket then MarketHedgeExecution(Exchange_, Symbol)
       else LimitRepegHedgeExecution(Exchange_, Symbol, repegMs = 3000)
     val strategy = params.strategyFactory(Exchange_, Symbol, Ccy, execution)
-    val runner = StrategyRunner(strategy, symbolMetas)
+    val runner = StrategyRunner.backtest(strategy, symbolMetas)
 
     // 旁路观察者: 跟踪最新标的价与时间，用于回测末期期权腿 MTM 估值
     var lastMid = atmStrike
@@ -155,8 +163,8 @@ object ShortVolHedgeRunner:
         source = source,
         runners = Seq(runner),
         config = SimConfig(
-          exchangeToStrategyDelayMs = 100,
-          orderToExchangeDelayMs = 50,
+          exchangeToStrategyDelayMs = params.exchangeToStrategyDelayMs,
+          orderToExchangeDelayMs = params.orderToExchangeDelayMs,
           initialBalanceUsdt = InitialBalanceUsdt,
           makerFeeRate = params.feeRate,
           takerFeeRate = params.feeRate,

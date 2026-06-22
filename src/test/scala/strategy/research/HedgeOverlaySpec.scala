@@ -1,4 +1,6 @@
-package hft.strategy
+package strategy.research
+
+import hft.strategy.{OutcomeEvent, Strategy}
 
 /** 方向 overlay 单测：
   *   - KamaTrendOverlay：预热前中性宽带 / 上升趋势顺势正目标且带收紧 / 下降趋势负目标 / 震荡目标≈0 宽带留敞口。

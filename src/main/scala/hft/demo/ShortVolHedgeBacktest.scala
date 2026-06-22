@@ -1,7 +1,7 @@
 package hft.demo
 
 import hft.backtest.BsGreeksConfig
-import hft.strategy.{AdaptiveBandScaler, DeltaKamaFilter, HedgeOverlay, KamaTrendOverlay, MacdBiasOverlay, RatchetSwitch, TargetDeltaHedgeStrategy}
+import strategy.research.{AdaptiveBandScaler, DeltaKamaFilter, HedgeExecution, HedgeOverlay, KamaTrendOverlay, MacdBiasOverlay, RatchetSwitch, TargetDeltaHedgeStrategy}
 import sttp.client4.DefaultSyncBackend
 
 import java.nio.file.Path
@@ -57,7 +57,7 @@ import java.time.LocalDate
   val useKamaTrend = args.lift(12).map(_.toLowerCase).contains("kama")
   // 对冲策略工厂 (每次产新实例)：TargetDeltaHedgeStrategy + 注入的 overlay/棘轮/自适应/滤波。
   // KAMA-趋势模式下 tilt=0 时用内置默认幅度 0.01 (顺势超量系数)。
-  val strategyFactory: (hft.domain.Exchange, String, String, hft.strategy.HedgeExecution) => hft.strategy.Strategy =
+  val strategyFactory: (hft.domain.Exchange, String, String, HedgeExecution) => hft.strategy.Strategy =
     (ex, sym, c, exec) =>
       val overlay: HedgeOverlay =
         if useKamaTrend then KamaTrendOverlay(tiltMoveRatio = if tilt > 0 then tilt else 0.01)

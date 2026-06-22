@@ -1,4 +1,6 @@
-package hft.strategy
+package strategy.research
+
+import hft.strategy.{OutcomeEvent, Strategy}
 
 import hft.domain.{Price, Quantity, Timestamp}
 import hft.indicator.{Kama, KlineSeries}

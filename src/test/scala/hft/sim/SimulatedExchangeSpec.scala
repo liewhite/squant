@@ -4,7 +4,7 @@ import hft.domain.*
 import hft.engine.{Engine, ExchangeGateway}
 import hft.exchange.{ExchangeClient, MarketDataStream, SubscriptionKind}
 import hft.messaging.{EventBus, EventData, IncomeEvent}
-import hft.strategy.BboMakerStrategy
+import strategy.research.BboMakerStrategy
 import ox.{Ox, fork, supervised}
 
 import java.util.concurrent.ConcurrentLinkedQueue

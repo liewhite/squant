@@ -1,4 +1,6 @@
-package hft.strategy
+package strategy.research
+
+import hft.strategy.{OutcomeEvent, Strategy}
 
 import hft.domain.*
 import hft.exchange.SubscriptionKind
@@ -8,8 +10,9 @@ import hft.messaging.{EventData, IncomeEvent, StateManager}
 /** **突破式中性 delta 对冲** (空 gamma 友好)：用最近 N (默认 5h) 的 Donchian 通道高/低点做突破判据，
   * 配 delta 阈值 (以期权头寸 ETH 名义为基数) 决定何时把净 delta 中和到 0。
   *
-  *   - **向上突破**近窗高点 (价 > [[Donchian.windowHigh]]，此时空跨式 delta 转负、需买) 或**向下突破**低点
-  *     (价 < windowLow、需卖) -> 顺突破方向, 用阈值 [[minThresholdPct]] (及时对冲新趋势敞口)；
+  *   - **发生突破** (价 > [[Donchian.windowHigh]] 或 价 < windowLow, 方向无关) -> 用阈值 [[minThresholdPct]]
+  *     把净 delta 中和到 0 (及时对冲突破带来的趋势敞口)。方向无关使其对**空 gamma (卖方) 与多 gamma
+  *     (买方)** 都成立: 卖方 delta 恒顺突破方向, 买方恒逆突破方向, 二者在"突破即归零"下统一;
   *   - **未突破** (仍在通道内) -> 由 [[maxThresholdPct]] 决定:
   *       - `Some(p)` (双阈值模式): |净 delta| 达 p·头寸即对冲 (容忍区间漂移但设绝对上限, 防静默失控)；
   *       - `None` (**纯突破闸门模式**): 区间内**完全不对冲**, 只有突破 5h 高/低点 且达阈值才动作 ——
@@ -74,11 +77,11 @@ final class BreakoutHedgeStrategy(
     yield
       val netDelta = greeks.delta + symbolState.positionSize(exchange)
       val needBuy = netDelta < 0 // 偏空 -> 买回中性
-      // 向上突破且需买、或向下突破且需卖 = 顺突破方向 -> 用小阈值及时对冲
+      // 发生突破 (方向无关) -> 中和 delta。卖方 delta 顺突破、买方逆突破, 都在此统一为"突破即归零"
       val brokeUp = channel.windowHigh.exists(refPrice > _)
       val brokeDown = channel.windowLow.exists(refPrice < _)
-      val eager = (brokeUp && needBuy) || (brokeDown && !needBuy)
-      // 顺突破方向 -> minThreshold; 否则用区间内容忍阈值 (None=纯闸门, 区间内不对冲)
+      val eager = brokeUp || brokeDown
+      // 突破 -> minThreshold; 否则用区间内容忍阈值 (None=纯闸门, 区间内不对冲)
       val threshold: Option[Double] = if eager then Some(minThreshold) else maxThreshold
       val side = if needBuy then Side.Long else Side.Short
       val req = threshold

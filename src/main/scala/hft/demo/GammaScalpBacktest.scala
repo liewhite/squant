@@ -5,7 +5,7 @@ import hft.domain.Exchange
 import hft.engine.StrategyRunner
 import hft.messaging.{EventData, IncomeEvent}
 import hft.sim.{FillRecorder, SimConfig}
-import hft.strategy.GammaScalpStrategy
+import strategy.research.{GammaScalpStrategy, MacdBiasMode}
 import sttp.client4.DefaultSyncBackend
 
 import java.nio.file.Path
@@ -48,8 +48,8 @@ import java.time.{LocalDate, ZoneOffset}
   val dirSkewRatio = args.lift(3).map(_.toDouble).getOrElse(0.0005)
   // 方向模式，第 5 参：sign=只看柱符号(±1) / graded=颜色×趋势分级(±2，默认)
   val biasMode = args.lift(4).map(_.toLowerCase) match
-    case Some("sign") => hft.strategy.MacdBiasMode.Sign
-    case _            => hft.strategy.MacdBiasMode.Graded
+    case Some("sign") => MacdBiasMode.Sign
+    case _            => MacdBiasMode.Graded
 
   val backend = DefaultSyncBackend()
   val publicClient = hft.exchange.binance.BinanceClient(backend, credentials = None)

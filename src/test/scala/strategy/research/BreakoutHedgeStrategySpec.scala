@@ -1,12 +1,13 @@
-package hft.strategy
+package strategy.research
+
+import hft.strategy.{OutcomeEvent, Strategy}
 
 import hft.domain.*
 import hft.messaging.{EventData, IncomeEvent, StateManager}
 
 /** 突破式双阈值对冲单测：
   *   - 通道内 (未突破)：|净 delta| 达 **max** 阈值才对冲、未达则容忍；
-  *   - 顺突破方向 (向上突破且需买 / 向下突破且需卖)：降到 **min** 阈值即对冲 (及时)；
-  *   - 逆突破方向 (向上突破却需卖)：仍用 max 阈值 (不因突破而过早反向对冲)；
+  *   - 发生突破 (方向无关, 向上或向下)：降到 **min** 阈值即把 delta 中和到 0 (及时, 买/卖方通用)；
   *   - 通道预热不足：退化为 max 阈值。
   * 阈值 = pct·optionPositionEth；本测 optionPositionEth=100 -> max=3, min=1 (ETH)。
   */
@@ -78,10 +79,12 @@ class BreakoutHedgeStrategySpec extends munit.FunSuite:
     assertEquals(o.side, Side.Long)
     assertEquals(o.quantity, 2.0)
 
-  test("向上突破但需卖 (逆突破方向) -> 仍用 max 阈值, |净delta|<max 不对冲"):
+  test("向上突破 + 需卖 (买方/多 gamma 情形) -> 方向无关, 达 min 即卖对冲"):
     val (s, sm) = warmedChannel
-    ready(sm, rawDelta = 2.0) // 净 delta=+2 需卖; 价102 向上突破但方向不顺 -> max=3
-    assertEquals(trigger(s, sm, 102.0), Vector.empty)
+    ready(sm, rawDelta = 2.0) // 净 delta=+2 需卖; 价102 向上突破 -> 方向无关 min=1 -> 对冲
+    val o = placed(trigger(s, sm, 102.0))
+    assertEquals(o.side, Side.Short)
+    assertEquals(o.quantity, 2.0)
 
   test("向下突破 + 需卖 + |净delta| 达 min -> 及时卖对冲"):
     val (s, sm) = warmedChannel
@@ -105,14 +108,16 @@ class BreakoutHedgeStrategySpec extends munit.FunSuite:
     ready(sm, rawDelta = 10.0) // |10| 远超任何阈值, 但价100在通道内 -> 纯闸门不对冲
     assertEquals(trigger(s, sm, 100.0), Vector.empty)
 
-  test("纯闸门: 顺突破方向 + |净delta| 达 min -> 对冲"):
+  test("纯闸门: 突破 + 需买 + |净delta| 达 min -> 对冲 (卖方/空 gamma 情形)"):
     val (s, sm) = warmedGate
     ready(sm, rawDelta = -2.0) // 需买; |2| ≥ min=1
     val o = placed(trigger(s, sm, 102.0)) // 向上突破
     assertEquals(o.side, Side.Long)
     assertEquals(o.quantity, 2.0)
 
-  test("纯闸门: 逆突破方向 -> 不对冲 (无 max 兜底)"):
+  test("纯闸门: 突破 + 需卖 -> 方向无关同样对冲 (买方/多 gamma 情形)"):
     val (s, sm) = warmedGate
-    ready(sm, rawDelta = 5.0) // 净 delta=+5 需卖; 价102 向上突破但方向不顺 -> 无 max -> 不对冲
-    assertEquals(trigger(s, sm, 102.0), Vector.empty)
+    ready(sm, rawDelta = 5.0) // 净 delta=+5 需卖; 价102 向上突破 -> 方向无关 -> 卖对冲到 0
+    val o = placed(trigger(s, sm, 102.0))
+    assertEquals(o.side, Side.Short)
+    assertEquals(o.quantity, 5.0)

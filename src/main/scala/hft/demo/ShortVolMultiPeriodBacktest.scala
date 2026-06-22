@@ -1,7 +1,8 @@
 package hft.demo
 
 import hft.domain.{Exchange, Symbol}
-import hft.strategy.{BreakoutHedgeStrategy, HedgeExecution, MacdBiasOverlay, Strategy, TargetDeltaHedgeStrategy}
+import hft.strategy.Strategy
+import strategy.research.{BreakoutHedgeStrategy, HedgeExecution, MacdBiasOverlay, TargetDeltaHedgeStrategy}
 import sttp.client4.DefaultSyncBackend
 
 import java.time.LocalDate

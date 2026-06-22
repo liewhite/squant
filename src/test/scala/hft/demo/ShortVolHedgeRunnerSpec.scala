@@ -3,7 +3,7 @@ package hft.demo
 import hft.backtest.MarketDataSource
 import hft.domain.*
 import hft.messaging.{EventData, IncomeEvent}
-import hft.strategy.{MacdBiasOverlay, TargetDeltaHedgeStrategy}
+import strategy.research.{MacdBiasOverlay, TargetDeltaHedgeStrategy}
 
 import java.time.LocalDate
 

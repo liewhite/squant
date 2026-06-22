@@ -3,7 +3,7 @@ package hft.demo
 import hft.domain.Exchange
 import hft.engine.{Engine, ExchangeGateway}
 import hft.exchange.binance.{BinanceAccountStream, BinanceClient, BinanceCredentials, BinanceMarketStream}
-import hft.strategy.BboMakerStrategy
+import strategy.research.BboMakerStrategy
 import ox.supervised
 import sttp.client4.DefaultSyncBackend
 

@@ -4,7 +4,7 @@ import hft.backtest.{BacktestEngine, BinanceHistoryDownloader, BinanceHistorySou
 import hft.domain.Exchange
 import hft.engine.StrategyRunner
 import hft.sim.{FillRecorder, SimConfig}
-import hft.strategy.CrashChaseStrategy
+import strategy.research.CrashChaseStrategy
 import sttp.client4.DefaultSyncBackend
 
 import java.nio.file.Path

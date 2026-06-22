@@ -4,7 +4,7 @@ import hft.domain.Exchange
 import hft.engine.{Engine, ExchangeGateway}
 import hft.exchange.binance.{BinanceClient, BinanceMarketStream}
 import hft.sim.{FillRecorder, SimConfig, SimulatedExchange}
-import hft.strategy.BboMakerStrategy
+import strategy.research.BboMakerStrategy
 import ox.supervised
 import sttp.client4.DefaultSyncBackend
 
