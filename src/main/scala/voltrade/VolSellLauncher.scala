@@ -4,16 +4,16 @@ import hft.exchange.bybit.BybitCredentials
 import org.slf4j.LoggerFactory
 import sttp.client4.DefaultSyncBackend
 
-/** 卖方期权实盘启动器 (Bybit, 隔离 package)。
+/** 卖方期权**实盘**启动器 (Bybit, 隔离 package)。**无 dry-run, 启动即真实下单** —— 用小资金测试。
   *
   * 每**北京时间周五 15:00** 决策一次: 取标的最近 2 周 5min K 线算 RV → 本周较上周升则卖 2×、降则 1× →
-  * 选 ~21 天到期 ATM 跨式 → 以最优买价 PostOnly 卖出 call+put。
+  * 选 ~21 天到期 ATM 跨式 → 以最优卖价 PostOnly 卖出 call+put。
   *
-  * **安全默认**: dryRun (只打日志不下单)。设 `VOLSELL_LIVE=1` + BYBIT_API_KEY/SECRET 才真实下单;
-  * `VOLSELL_TESTNET=1` 走 testnet (上线前务必先 testnet 跑通: 符号/张数单位/精度/最小量)。
-  * `VOLSELL_NOW=1` 立即决策一次 (便于 dry-run 观察, 不等周五)。
+  * **安全护栏** (替代 dry-run): ① 必须有 API key; ② `VOLSELL_QTY` 小仓 (默认1); ③ `VOLSELL_MAX_QTY`
+  * 单腿张数硬上限 (默认=基准×3, 超出整体跳过+告警, 防 scale bug 误下巨单); ④ 幂等 orderLinkId + 当周防重。
+  * `VOLSELL_TESTNET=1` 走 testnet (real order, 非 dry-run)。`VOLSELL_NOW=1` 立即决策一次 (不等周五)。
   *
-  * 运行: VOLSELL_NOW=1 sbt "runMain voltrade.VolSellLauncher"
+  * 运行: BYBIT_API_KEY=.. BYBIT_API_SECRET=.. sbt "runMain voltrade.VolSellLauncher"
   */
 @main def VolSellLauncher(): Unit =
   val logger = LoggerFactory.getLogger("VolSellLauncher")
@@ -23,20 +23,22 @@ import sttp.client4.DefaultSyncBackend
   val gridHigh = sys.env.get("VOLSELL_GRID_HIGH").map(_.toDouble).getOrElse(2.0)
   val gridLow = sys.env.get("VOLSELL_GRID_LOW").map(_.toDouble).getOrElse(1.0)
   val baseQty = sys.env.get("VOLSELL_QTY").map(_.toDouble).getOrElse(1.0) // 基准张数, 默认 1 (小仓)
+  val maxQty = sys.env.get("VOLSELL_MAX_QTY").map(_.toDouble).getOrElse(baseQty * 3) // 单腿硬上限 (sanity)
   val bars2w = sys.env.get("VOLSELL_RV_BARS").map(_.toInt).getOrElse(2 * 7 * 24 * 12) // 2周5min=4032
-  val live = sys.env.get("VOLSELL_LIVE").contains("1")
   val testnet = sys.env.get("VOLSELL_TESTNET").contains("1")
   val runNow = sys.env.get("VOLSELL_NOW").contains("1")
 
   val credentials =
     for k <- sys.env.get("BYBIT_API_KEY"); s <- sys.env.get("BYBIT_API_SECRET") yield BybitCredentials(k, s)
+  if credentials.isEmpty then
+    logger.error("缺 BYBIT_API_KEY/SECRET, 实盘下单需签名, 退出")
+    sys.exit(1)
   val backend = DefaultSyncBackend()
-  val ex: OptionsExchange = BybitOptionsClient(backend, credentials, dryRun = !live, testnet = testnet)
-  val cfg = VolSell.Config(symbol, baseCoin, targetDays, gridHigh, gridLow, baseQty, bars2w)
+  val ex: OptionsExchange = BybitOptionsClient(backend, credentials, testnet = testnet)
+  val cfg = VolSell.Config(symbol, baseCoin, targetDays, gridHigh, gridLow, baseQty, bars2w, maxQty)
 
-  logger.warn(s"VolSell 启动: $cfg")
-  logger.warn(s"模式: ${if live then "*** 实盘 LIVE ***" else "dry-run (不下单)"}  ${if testnet then "testnet" else "mainnet"}  credentials=${credentials.isDefined}")
-  if live && credentials.isEmpty then logger.error("VOLSELL_LIVE=1 但缺少 API key, 将无法下单")
+  logger.warn(s"VolSell *** 实盘 LIVE *** (无 dry-run, 真实下单): $cfg")
+  logger.warn(s"${if testnet then "testnet" else "mainnet"}  单腿硬上限=$maxQty")
 
   // 幂等防护: 记录上次成功决策的周期锚点, 同一周不重复决策 (叠加 orderLinkId 幂等双保险)
   var lastPeriod = -1L

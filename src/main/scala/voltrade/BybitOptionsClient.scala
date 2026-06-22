@@ -14,13 +14,12 @@ import java.time.Instant
   * 已实现 (按官方 v5 文档): 标的 5min K 线 (category=linear, 公共)、期权链 instruments-info (category=option, 公共)、
   * 期权 tickers 最优买价 (公共)、下单 order/create (category=option, 签名)。
   *
-  * **安全**: dryRun=true 时下单只打日志不真实提交; testnet=true 走 api-testnet。**实盘前务必在 testnet 验证**
+  * **实盘**: sellOption 直接提交真实订单 (无 dry-run); testnet=true 走 api-testnet。**首次上真金白银前务必在 testnet 验证**
   * (符号格式/合约张数单位/最小下单量/价格精度), 本客户端未做精度对齐与撤单/持仓查询 (按需补)。
   */
 final class BybitOptionsClient(
     backend: SyncBackend,
     credentials: Option[BybitCredentials],
-    dryRun: Boolean = true,
     testnet: Boolean = false,
 ) extends OptionsExchange:
   import BybitOptionsClient.*
@@ -102,16 +101,11 @@ final class BybitOptionsClient(
       case None    => ("Market", "", "IOC")
     val body =
       s"""{"category":"option","symbol":"$symbol","side":"Sell","orderType":"$ordType","qty":"${fmt(qty)}"$pxField,"timeInForce":"$tif","orderLinkId":"$orderLinkId"}"""
-    if dryRun then
-      logger.warn(s"[DRY-RUN] 不提交真实订单: SELL $symbol qty=$qty ${limitPrice.fold("MKT")(p => s"@$p PostOnly")} link=$orderLinkId  body=$body")
-      Right(s"dryrun-$orderLinkId")
-    else
-      credentials match
-        case None => Left("缺少 BYBIT_API_KEY/SECRET, 无法实盘下单")
-        case Some(c) =>
-          signedPost[Envelope[OrderResult]](c, "/v5/order/create", body).flatMap { env =>
-            env.asEither.map(_.orderId)
-          }
+    credentials match // 实盘下单, 无 dry-run
+      case None => Left("缺少 BYBIT_API_KEY/SECRET, 无法下单")
+      case Some(c) =>
+        logger.warn(s"[实盘] 提交: SELL $symbol qty=$qty ${limitPrice.fold("MKT")(p => s"@$p PostOnly")} link=$orderLinkId")
+        signedPost[Envelope[OrderResult]](c, "/v5/order/create", body).flatMap(_.asEither.map(_.orderId))
 
   // ---- HTTP ----
   private def publicGet[T: JsonValueCodec](pathQuery: String): Either[String, T] =

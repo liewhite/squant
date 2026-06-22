@@ -39,6 +39,8 @@ final class MakerHedgeStrategy(
     maxGreeksStaleMs: Long = 0L,
     barIntervalMs: Long = 3_600_000L,
     minHedgeQty: Quantity = 0.001,
+    /** 单笔对冲张数硬上限 (sanity): 超出则不下单 + 告警 (防 delta/gamma 计算 bug 误下巨单)。默认不限 (回测) */
+    maxHedgeQty: Quantity = Double.MaxValue,
 ) extends Strategy:
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[MakerHedgeStrategy])
   private var warnCnt = 0L
@@ -131,6 +133,9 @@ final class MakerHedgeStrategy(
                   val netDelta = greeks.delta + gammaAdj + ss.positionSize(exchange)
                   val qty = math.abs(netDelta)
                   if qty < minHedgeQty then Vector.empty
+                  else if qty > maxHedgeQty then
+                    warnThrottled(s"对冲量 $qty 超硬上限 $maxHedgeQty -> 不下单 (疑似 delta/gamma bug, 请查)")
+                    Vector.empty
                   else
                     val side = if netDelta > 0 then Side.Short else Side.Long // 净多→卖, 净空→买
                     val limitPx = if side == Side.Short then px * (1.0 + offsetPct) else px * (1.0 - offsetPct)

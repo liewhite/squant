@@ -66,6 +66,11 @@ class VolSellSpec extends munit.FunSuite:
     val bigMin = chain.map(_.copy(minQty = 100.0))
     assert(VolSell.plan(FakeEx(chainV = bigMin), cfg, now).isLeft)
 
+  test("数量超 maxQty 硬上限 -> 整体 Left (防 scale bug 误下巨单)"):
+    // baseQty=1, mult=2 (RV升) -> qty=2; maxQty=1.5 -> 超限 -> Left
+    assert(VolSell.plan(FakeEx(), cfg.copy(maxQty = 1.5), now).isLeft)
+    assert(VolSell.plan(FakeEx(), cfg.copy(maxQty = 2.0), now).isRight) // 恰好不超
+
   test("无卖一报价 -> Left (不市价砸盘)"):
     assert(VolSell.plan(FakeEx(asks = Map.empty), cfg, now).isLeft)
 

@@ -10,6 +10,7 @@ object VolSell:
       gridLow: Double = 1.0,
       baseQty: Double = 1.0,
       bars2w: Int = 2 * 7 * 24 * 12,
+      maxQty: Double = Double.MaxValue, // 单腿张数硬上限 (sanity, 防 scale bug 误下巨单)
   )
 
   /** 一条待下单腿 (PostOnly 卖)。price=None 表示无报价 (plan 不会产出 None 腿, 见下) */
@@ -28,14 +29,15 @@ object VolSell:
       (call, put) = straddle
       period = SellVolPlan.currentDecisionTime(nowMs)
       (mult, rvPrev, rvThis) = SellVolPlan.decideMultiplier(closes, cfg.gridHigh, cfg.gridLow)
-      callLeg <- leg(ex, call, cfg.baseQty * mult, period)
-      putLeg <- leg(ex, put, cfg.baseQty * mult, period)
+      callLeg <- leg(ex, call, cfg.baseQty * mult, cfg.maxQty, period)
+      putLeg <- leg(ex, put, cfg.baseQty * mult, cfg.maxQty, period)
     yield Decision(mult, rvPrev, rvThis, spot, call.expiryMs, Seq(callLeg, putLeg))
 
-  private def leg(ex: OptionsExchange, inst: OptionInstrument, rawQty: Double, periodMs: Long): Either[String, Leg] =
+  private def leg(ex: OptionsExchange, inst: OptionInstrument, rawQty: Double, maxQty: Double, periodMs: Long): Either[String, Leg] =
     for
       qty <- SellVolPlan.quantizeQty(rawQty, inst.qtyStep, inst.minQty)
         .toRight(s"${inst.symbol} 数量 $rawQty 不合规 (step=${inst.qtyStep} min=${inst.minQty})")
+      _ <- Either.cond(qty <= maxQty, (), s"${inst.symbol} 数量 $qty 超硬上限 $maxQty -> 整体跳过 (疑似 scale bug)")
       askOpt <- ex.optionBestAsk(inst.symbol)
       ask <- askOpt.toRight(s"${inst.symbol} 无卖一报价, 跳过 (不市价砸)")
     yield

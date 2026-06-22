@@ -66,6 +66,15 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
     feed(sm, s, ordUpd(OrderStatus.Filled, Side.Short, 105.04, 8 * hour + 100)) // 成交 -> center=105.04
     assertEquals(feed(sm, s, bbo(105.04, 9 * hour)), Vector.empty) // dev=0 -> 不下单
 
+  test("对冲量超 maxHedgeQty 硬上限 -> 不下单 (防 delta/gamma bug)"):
+    val sm = StateManager(Iterable(sym), orderTimeoutMs = 60000)
+    sm.apply(IncomeEvent(0, 0, EventData.BalanceUpdate(Balance(ex, ccy, 0.0, 0))))
+    sm.apply(IncomeEvent(0, 0, EventData.GreeksUpdate(Greeks(ex, ccy, 0.5, 0.01, -0.5, 1.0, 0))))
+    val s = MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
+      atrPeriodBars = 5, rvShortWindowBars = 3, rvLongWindowBars = 6, maSmaPeriod = 5, maxHedgeQty = 0.3, barIntervalMs = hour, minHedgeQty = 0.001)
+    (0 to 7).foreach(i => feed(sm, s, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
+    assertEquals(feed(sm, s, bbo(104.0, 8 * hour)), Vector.empty) // netDelta 0.5 > maxHedge 0.3 -> 不下
+
   test("无 ccy 余额 -> greeks()=None -> 不对冲 (实盘由 OptionGreeksStream 同步兜底余额)"):
     val sm = StateManager(Iterable(sym), orderTimeoutMs = 60000)
     sm.apply(IncomeEvent(0, 0, EventData.GreeksUpdate(Greeks(ex, ccy, 0.5, 0.01, -0.5, 1.0, 0)))) // 只 greeks, 无 Balance

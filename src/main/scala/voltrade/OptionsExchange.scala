@@ -14,7 +14,7 @@ trait OptionsExchange:
   /** 期权最优卖价 ask1 (卖方 PostOnly 挂单价：挂在卖一才是 maker, 挂买一会越价被拒)；无报价返回 None */
   def optionBestAsk(symbol: String): Either[String, Option[Double]]
 
-  /** 卖出期权 (做空)。limitPrice=Some -> PostOnly 限价, None -> 市价。返回交易所 orderId (dry-run 返回合成 id)。 */
+  /** 卖出期权 (做空, 真实下单)。limitPrice=Some -> PostOnly 限价, None -> 市价。返回交易所 orderId。 */
   def sellOption(symbol: String, qty: Double, limitPrice: Option[Double], orderLinkId: String): Either[String, String]
 
   /** 期权账户**净 (delta, gamma)** = Σ各期权持仓 delta/gamma (Bybit position/list 已按方向/张数给出)。需 API key。
