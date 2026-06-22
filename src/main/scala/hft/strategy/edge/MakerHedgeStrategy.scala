@@ -32,6 +32,9 @@ final class MakerHedgeStrategy(
     rvShortWindowBars: Int = 24,
     rvLongWindowBars: Int = 168,
     maSmaPeriod: Int = 20,
+    /** 是否用 gamma 一阶修正 delta (两次 greeks 更新间用现价刷新, tick 级新鲜)。回测中 greeks 每秒已重算,
+      * 默认关 (行为不变); 实盘 greeks 轮询较慢, 开启可消除轮询间的 delta 滞后。 */
+    gammaAdjust: Boolean = false,
     barIntervalMs: Long = 3_600_000L,
     minHedgeQty: Quantity = 0.001,
 ) extends Strategy:
@@ -48,6 +51,14 @@ final class MakerHedgeStrategy(
   private var restingId: Option[OrderId] = None // 当前挂单的撮合 orderId (来自回流)
   private var restingAt: Timestamp = 0L
   private var awaitingAck: Boolean = false // 已下单、等待 Pending 回流确认
+  private var greeksRefMid: Double = Double.NaN // 上次 greeks 更新时的中间价 (gamma 修正基准)
+
+  /** 启动预热: 用历史 (high, low, close) 喂 K 线 (h/l/c 当三笔 tick), 使 ATR/均线在开机即就绪,
+    * 避免实盘冷启动需等数十根 BBO 累积才敢对冲。最旧->最新。 */
+  def prewarm(bars: Seq[(Double, Double, Double)]): Unit =
+    bars.zipWithIndex.foreach { case ((h, l, c), i) =>
+      val t = i.toLong * barIntervalMs; klines.update(t, h); klines.update(t, l); klines.update(t, c)
+    }
 
   override def publicStreams: Map[Exchange, Set[SubscriptionKind]] =
     Map(exchange -> Set(SubscriptionKind.BBO(symbol)))
@@ -73,7 +84,10 @@ final class MakerHedgeStrategy(
         if center.isNaN then center = px
         manage(px, event.exchangeTs, state)
       case EventData.GreeksUpdate(g) if g.exchange == exchange && g.ccy == ccy =>
-        state.symbolState(symbol).flatMap(_.bbo(exchange)).map(b => manage(b.midPrice, event.exchangeTs, state)).getOrElse(Vector.empty)
+        state.symbolState(symbol).flatMap(_.bbo(exchange)).map { b =>
+          greeksRefMid = b.midPrice // 记录本次 greeks 对应的现价, 供 gamma 修正
+          manage(b.midPrice, event.exchangeTs, state)
+        }.getOrElse(Vector.empty)
       case _ => Vector.empty
 
   private def manage(px: Price, now: Timestamp, state: StateManager): Vector[OutcomeEvent] =
@@ -98,7 +112,9 @@ final class MakerHedgeStrategy(
             val crossed = (px - center > up) || (center - px > down)
             if !crossed then Vector.empty
             else
-              val netDelta = greeks.delta + ss.positionSize(exchange)
+              // gamma 一阶修正: 两次 greeks 间用现价相对基准价刷新 delta (tick 级)
+              val gammaAdj = if gammaAdjust && !greeksRefMid.isNaN then greeks.gamma * (px - greeksRefMid) else 0.0
+              val netDelta = greeks.delta + gammaAdj + ss.positionSize(exchange)
               val qty = math.abs(netDelta)
               if qty < minHedgeQty then Vector.empty
               else

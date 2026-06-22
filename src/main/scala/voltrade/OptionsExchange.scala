@@ -17,9 +17,9 @@ trait OptionsExchange:
   /** 卖出期权 (做空)。limitPrice=Some -> PostOnly 限价, None -> 市价。返回交易所 orderId (dry-run 返回合成 id)。 */
   def sellOption(symbol: String, qty: Double, limitPrice: Option[Double], orderLinkId: String): Either[String, String]
 
-  /** 期权账户**净 delta** = Σ各期权持仓 delta (Bybit position/list 已按方向/张数给出每仓 delta)。需 API key。
-    * 永续对冲腿据此把账户对冲到 delta 中性。 */
-  def optionAccountDelta(): Either[String, Double]
+  /** 期权账户**净 (delta, gamma)** = Σ各期权持仓 delta/gamma (Bybit position/list 已按方向/张数给出)。需 API key。
+    * 对冲腿据此把账户对冲到 delta 中性; gamma 供两次轮询之间用现价一阶修正 delta (tick 级新鲜)。 */
+  def optionAccountGreeks(): Either[String, (Double, Double)]
 
   /** 永续 K 线 (category=linear) 的 (high, low, close), 最旧->最新, 供对冲带算 ATR/均线。 */
   def linearKlines(symbol: String, interval: String, bars: Int): Either[String, Vector[(Double, Double, Double)]]

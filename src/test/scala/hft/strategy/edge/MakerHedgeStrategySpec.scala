@@ -65,3 +65,16 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
     feed(sm, s, ordUpd(OrderStatus.Pending, Side.Short, 105.04, 8 * hour))
     feed(sm, s, ordUpd(OrderStatus.Filled, Side.Short, 105.04, 8 * hour + 100)) // 成交 -> center=105.04
     assertEquals(feed(sm, s, bbo(105.04, 9 * hour)), Vector.empty) // dev=0 -> 不下单
+
+  test("gammaAdjust: 两次 greeks 间用 gamma×价差修正净 delta"):
+    // greeks: delta=0.0, gamma=0.1; greeksRefMid=100 (greeks 更新时); 现价 104 -> 修正 delta = 0.1×(104-100)=0.4
+    val sm = StateManager(Iterable(sym), orderTimeoutMs = 60000)
+    sm.apply(IncomeEvent(0, 0, EventData.BalanceUpdate(Balance(ex, ccy, 0.0, 0))))
+    sm.apply(IncomeEvent(0, 0, EventData.GreeksUpdate(Greeks(ex, ccy, 0.0, 0.1, -0.5, 1.0, 0)))) // delta0=0, gamma=0.1
+    val s = MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
+      atrPeriodBars = 5, rvShortWindowBars = 3, rvLongWindowBars = 6, maSmaPeriod = 5, gammaAdjust = true, barIntervalMs = hour, minHedgeQty = 0.001)
+    (0 to 7).foreach(i => feed(sm, s, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
+    feed(sm, s, IncomeEvent(8 * hour, 8 * hour, EventData.GreeksUpdate(Greeks(ex, ccy, 0.0, 0.1, -0.5, 1.0, 8 * hour)))) // 设 greeksRefMid≈101
+    // 现价 104: gammaAdj=0.1×(104-101)=0.3, 净delta≈0.3 -> 卖 0.3
+    val q = placed(feed(sm, s, bbo(104.0, 8 * hour + 1))).quantity
+    assert(math.abs(q - 0.1 * (104.0 - 101.0)) < 1e-9, s"qty=$q")

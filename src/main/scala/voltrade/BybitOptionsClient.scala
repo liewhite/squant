@@ -58,12 +58,14 @@ final class BybitOptionsClient(
       }
     }
 
-  override def optionAccountDelta(): Either[String, Double] =
+  override def optionAccountGreeks(): Either[String, (Double, Double)] =
     credentials match
-      case None => Left("optionAccountDelta 需 API key")
+      case None => Left("optionAccountGreeks 需 API key")
       case Some(c) =>
         signedGet[Envelope[PositionListResult]](c, "/v5/position/list", "category=option").flatMap { env =>
-          env.asEither.map(_.list.flatMap(_.delta.toDoubleOption).sum)
+          env.asEither.map { r =>
+            (r.list.flatMap(_.delta.toDoubleOption).sum, r.list.flatMap(_.gamma.toDoubleOption).sum)
+          }
         }
 
   override def optionChain(baseCoin: String): Either[String, Vector[OptionInstrument]] =
@@ -170,7 +172,7 @@ object BybitOptionsClient:
   final case class TickerItem(symbol: String, ask1Price: String)
   final case class TickersResult(list: List[TickerItem])
   final case class OrderResult(orderId: String, orderLinkId: String)
-  final case class PositionItem(symbol: String, delta: String)
+  final case class PositionItem(symbol: String, delta: String, gamma: String)
   final case class PositionListResult(list: List[PositionItem])
 
   given klineCodec: JsonValueCodec[Envelope[KlineResult]] = JsonCodecMaker.make
