@@ -28,10 +28,10 @@ class SellVolPlanSpec extends munit.FunSuite:
       OptionInstrument("ETH-B-3000-P", 21 * d, 3000, OptionRight.Put),
       OptionInstrument("ETH-B-3100-C", 21 * d, 3100, OptionRight.Call),
     )
-    val res = SellVolPlan.selectStraddle(chain, nowMs = 0, spot = 2990, targetDays = 21)
-    assertEquals(res.map((c, p) => (c.symbol, p.symbol)), Some(("ETH-B-3000-C", "ETH-B-3000-P"))) // 21天到期, ATM=3000
+    val res = SellVolPlan.selectStraddle(chain, nowMs = 0, spot = 2990, targetExpiryMs = 21 * d)
+    assertEquals(res.map((c, p) => (c.symbol, p.symbol)), Some(("ETH-B-3000-C", "ETH-B-3000-P"))) // 离 21d 最近的到期, ATM=3000
     // 缺 put 则无跨式
-    assertEquals(SellVolPlan.selectStraddle(chain.filterNot(_.right == OptionRight.Put), 0, 2990, 21), None)
+    assertEquals(SellVolPlan.selectStraddle(chain.filterNot(_.right == OptionRight.Put), 0, 2990, 21 * d), None)
 
   test("quantizeQty: 向下取整到 step 并校验 minQty"):
     assertEquals(SellVolPlan.quantizeQty(1.0, 0.1, 0.1), Some(1.0))
@@ -41,23 +41,31 @@ class SellVolPlanSpec extends munit.FunSuite:
     assertEquals(SellVolPlan.quantizeQty(1.0, 0.0, 0.1), Some(1.0))    // 无 step
     assertEquals(SellVolPlan.quantizeQty(0.05, 0.0, 0.1), None)
 
-  test("currentDecisionTime: 当下或之前最近的北京周五15:00, 且不晚于 now、距今<7天"):
+  test("currentDecisionTime: 当下或之前最近的北京周五17:00, 且不晚于 now、距今<7天"):
     val zone = ZoneId.of("Asia/Shanghai")
-    Seq("2025-06-21T00:00:00Z", "2025-06-20T08:00:00Z", "2025-06-23T00:00:00Z").foreach { s =>
+    Seq("2025-06-21T00:00:00Z", "2025-06-20T10:00:00Z", "2025-06-23T00:00:00Z").foreach { s =>
       val now = Instant.parse(s).toEpochMilli
       val anchor = SellVolPlan.currentDecisionTime(now)
       val z = ZonedDateTime.ofInstant(Instant.ofEpochMilli(anchor), zone)
-      assertEquals(z.getDayOfWeek, DayOfWeek.FRIDAY, s); assertEquals(z.getHour, 15, s)
+      assertEquals(z.getDayOfWeek, DayOfWeek.FRIDAY, s); assertEquals(z.getHour, 17, s)
       assert(anchor <= now && now - anchor < 7L * 86_400_000L, s)
     }
 
-  test("nextDecisionTime: 永远是北京周五15:00 且在 from 之后"):
+  test("nextDecisionTime: 永远是北京周五17:00 且在 from 之后"):
     val zone = ZoneId.of("Asia/Shanghai")
-    Seq("2025-06-16T00:00:00Z", "2025-06-20T06:59:00Z", "2025-06-20T08:00:00Z", "2025-06-21T00:00:00Z").foreach { s =>
+    Seq("2025-06-16T00:00:00Z", "2025-06-20T08:59:00Z", "2025-06-20T10:00:00Z", "2025-06-21T00:00:00Z").foreach { s =>
       val from = Instant.parse(s).toEpochMilli
       val next = SellVolPlan.nextDecisionTime(from)
       val z = ZonedDateTime.ofInstant(Instant.ofEpochMilli(next), zone)
       assertEquals(z.getDayOfWeek, DayOfWeek.FRIDAY, s)
-      assertEquals(z.getHour, 15, s); assertEquals(z.getMinute, 0, s)
+      assertEquals(z.getHour, 17, s); assertEquals(z.getMinute, 0, s)
       assert(next > from, s"next $next not after $from")
     }
+
+  test("targetExpiryMs: = 决策周五17:00 + targetDays, 落在 21 天后那个周五"):
+    val zone = ZoneId.of("Asia/Shanghai")
+    val now = Instant.parse("2025-06-20T10:00:00Z").toEpochMilli // 北京周五 18:00 (已过 17:00 锚点)
+    val target = SellVolPlan.targetExpiryMs(now, 21)
+    val z = ZonedDateTime.ofInstant(Instant.ofEpochMilli(target), zone)
+    assertEquals(z.getDayOfWeek, DayOfWeek.FRIDAY)        // 21=3×7 -> 仍是周五
+    assertEquals(target - SellVolPlan.currentDecisionTime(now), 21L * 86_400_000L)

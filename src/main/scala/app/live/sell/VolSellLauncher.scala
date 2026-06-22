@@ -7,7 +7,7 @@ import sttp.client4.DefaultSyncBackend
 
 /** 卖方期权**实盘**启动器 (Bybit)。**无 dry-run, 启动即真实下单** —— 用小资金测试。
   *
-  * 每**北京时间周五 15:00** 决策一次 (调度/下单见 [[SellRunner]]): 取标的最近 2 周 5min K 线算 RV →
+  * 每**北京时间周五 17:00** 决策一次 (调度/下单见 [[SellRunner]]): 取标的最近 2 周 5min K 线算 RV →
   * 本周较上周升则卖 gridHigh×、降则 gridLow× → 选 ~targetDays 到期 ATM 跨式 → 最优卖价 PostOnly 卖 call+put。
   *
   * **配置**: 全部参数 (含 API 密钥) 走 JSON 文件 [[BybitSellConfig]], 路径=首个命令行参数

@@ -26,19 +26,28 @@ object SellVolPlan:
       val mult = if rvThis > rvPrev then gridHigh else gridLow
       (mult, rvPrev, rvThis)
 
-  /** 从期权链选 **~targetDays 到期、ATM** 的跨式 (call+put 同行权同到期)。
-    * 先选交割时间最接近 now+targetDays 的到期, 再在该到期内取行权价最接近 spot 的 call/put。 */
+  /** 目标到期 = **决策周五 + targetDays** (默认 21 天后那个周五的周度期权)。决策固定在周五,
+    * 且 21=3×7, 故 +targetDays 天仍落在周五; 实际周度期权恒在周五交割, [[selectStraddle]] 据此选最近到期。 */
+  def targetExpiryMs(
+      nowMs: Long,
+      targetDays: Int,
+      zone: ZoneId = ZoneId.of("Asia/Shanghai"),
+      decisionHour: Int = 17,
+  ): Long =
+    currentDecisionTime(nowMs, zone, decisionHour) + targetDays.toLong * 86_400_000L
+
+  /** 从期权链选 **离 targetExpiryMs 最近的到期、ATM** 的跨式 (call+put 同行权同到期)。
+    * 先选交割时间最接近 targetExpiryMs 的到期, 再在该到期内取行权价最接近 spot 的 call/put。 */
   def selectStraddle(
       chain: Seq[OptionInstrument],
       nowMs: Long,
       spot: Double,
-      targetDays: Int,
+      targetExpiryMs: Long,
   ): Option[(OptionInstrument, OptionInstrument)] =
-    val targetMs = nowMs + targetDays.toLong * 86_400_000L
     val futures = chain.filter(_.expiryMs > nowMs)
     if futures.isEmpty then None
     else
-      val expiry = futures.minBy(i => math.abs(i.expiryMs - targetMs)).expiryMs
+      val expiry = futures.minBy(i => math.abs(i.expiryMs - targetExpiryMs)).expiryMs
       val atExpiry = futures.filter(_.expiryMs == expiry)
       val strikes = atExpiry.map(_.strike).distinct
       if strikes.isEmpty then None
@@ -50,8 +59,8 @@ object SellVolPlan:
         yield (call, put)
 
   /** 下一个**决策时点** = from 之后最近的"周五 decisionHour:00" (在 zone 时区), 返回 ms epoch。
-    * 默认 zone=Asia/Shanghai (北京时间)、decisionHour=15。 */
-  def nextDecisionTime(fromMs: Long, zone: ZoneId = ZoneId.of("Asia/Shanghai"), decisionHour: Int = 15): Long =
+    * 默认 zone=Asia/Shanghai (北京时间)、decisionHour=17 (晚于期权 16:00 北京交割, 当周已结算)。 */
+  def nextDecisionTime(fromMs: Long, zone: ZoneId = ZoneId.of("Asia/Shanghai"), decisionHour: Int = 17): Long =
     val from = ZonedDateTime.ofInstant(Instant.ofEpochMilli(fromMs), zone)
     val thisFri = from.`with`(TemporalAdjusters.nextOrSame(DayOfWeek.FRIDAY)).`with`(LocalTime.of(decisionHour, 0))
     val next = if thisFri.isAfter(from) then thisFri else thisFri.plusWeeks(1)
@@ -59,7 +68,7 @@ object SellVolPlan:
 
   /** 当前**决策周期锚点** = from 当下或之前最近的"周五 decisionHour:00" (ms epoch)。
     * 用于派生**幂等** orderLinkId (同一周决策无论重启/重试都得同一 link, 交易所据此拒重复单)。 */
-  def currentDecisionTime(fromMs: Long, zone: ZoneId = ZoneId.of("Asia/Shanghai"), decisionHour: Int = 15): Long =
+  def currentDecisionTime(fromMs: Long, zone: ZoneId = ZoneId.of("Asia/Shanghai"), decisionHour: Int = 17): Long =
     val from = ZonedDateTime.ofInstant(Instant.ofEpochMilli(fromMs), zone)
     val cand = from.`with`(TemporalAdjusters.previousOrSame(DayOfWeek.FRIDAY)).`with`(LocalTime.of(decisionHour, 0))
     val anchor = if cand.isAfter(from) then cand.minusWeeks(1) else cand // prevOrSame 落在周五但时刻可能晚于 from

@@ -3,7 +3,7 @@ package app.live.sell
 import app.live.option.OptionsExchange
 import org.slf4j.LoggerFactory
 
-/** 卖方腿的**调度编排** (交易所无关, Bybit/OKX 两个启动器共用)：每北京周五 15:00 决策一次,
+/** 卖方腿的**调度编排** (交易所无关, Bybit/OKX 两个启动器共用)：每北京周五 17:00 决策一次,
   * 取数+定量+选腿由 [[VolSell.plan]]、下单由 [[VolSell.execute]]。幂等防重 (当周锚点 + clOrdId 双保险),
   * 两腿其一失败显式告警裸敞口。把这段循环抽出来, 两个启动器只负责构造交易所实现, 不重复编排逻辑。 */
 object SellRunner:
@@ -25,7 +25,9 @@ object SellRunner:
           case Left(err) => logger.error(s"本次决策跳过: $err")
           case Right(d) =>
             logger.warn(f"决策: spot=${d.spot}%.2f 上周RV=${d.rvPrev}%.3f 本周RV=${d.rvThis}%.3f -> ${if d.rvThis > d.rvPrev then "↑卖" else "↓卖"} ${d.mult}×")
-            logger.warn(s"跨式 (到期=${java.time.Instant.ofEpochMilli(d.expiryMs)}): ${d.legs.map(l => s"${l.symbol} qty=${l.qty}@${l.price}").mkString(" + ")}")
+            // 列出目标到期下全部可选行权价, 印证选了最近 ATM
+            logger.warn(s"期权链 @到期 ${java.time.Instant.ofEpochMilli(d.expiryMs)}: 可选行权 [${d.candidateStrikes.mkString(",")}] (${d.candidateStrikes.size}个), 现价=${d.spot} -> 选中 ATM=${d.atmStrike}")
+            logger.warn(s"跨式: ${d.legs.map(l => s"${l.symbol} qty=${l.qty}@${l.price}").mkString(" + ")}")
             val results = VolSell.execute(ex, d)
             results.foreach {
               case (l, Right(id)) => logger.warn(s"卖出 ${l.symbol} qty=${l.qty} @${l.price} PostOnly -> $id")
@@ -37,10 +39,10 @@ object SellRunner:
 
     if runNow then decideOnce(System.currentTimeMillis)
 
-    // 常驻: 每周五 15:00 北京时间决策
+    // 常驻: 每周五 17:00 北京时间决策
     while true do
       val now = System.currentTimeMillis
       val next = SellVolPlan.nextDecisionTime(now)
-      logger.warn(s"下次决策: ${java.time.Instant.ofEpochMilli(next)} (北京周五15:00), 等待 ${(next - now) / 60000} 分钟")
+      logger.warn(s"下次决策: ${java.time.Instant.ofEpochMilli(next)} (北京周五17:00), 等待 ${(next - now) / 60000} 分钟")
       Thread.sleep(math.max(1000L, next - now))
       decideOnce(System.currentTimeMillis)
