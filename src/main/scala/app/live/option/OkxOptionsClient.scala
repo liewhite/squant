@@ -69,9 +69,12 @@ final class OkxOptionsClient(
       env.asEither.map(_.flatMap(instrumentOf).toVector)
     }
 
-  override def optionBestAsk(symbol: String): Either[String, Option[Double]] =
+  override def optionQuote(symbol: String): Either[String, Option[Quote]] =
     publicGet[Envelope[TickerItem]](s"/api/v5/market/ticker?instId=$symbol").map { env =>
-      env.result.flatMap(_.askPx.toDoubleOption).filter(_ > 0)
+      env.result.flatMap { t =>
+        for bid <- t.bidPx.toDoubleOption.filter(_ > 0); ask <- t.askPx.toDoubleOption.filter(_ > 0)
+        yield Quote(bid, ask)
+      }
     }
 
   override def optionAccountGreeks(): Either[String, (Double, Double)] =
@@ -84,13 +87,13 @@ final class OkxOptionsClient(
       }
     }
 
-  override def sellOption(symbol: String, qty: Double, limitPrice: Option[Double], orderLinkId: String): Either[String, String] =
+  override def sellOption(symbol: String, qty: Double, price: Double, postOnly: Boolean, orderLinkId: String): Either[String, String] =
     val clOrdId = clOrdIdOf(orderLinkId)
-    val body = sellOrderBody(symbol, qty, limitPrice, clOrdId)
+    val body = sellOrderBody(symbol, qty, price, postOnly, clOrdId)
     credentials match // 实盘下单, 无 dry-run
       case None => Left("缺少 OKX_API_KEY/SECRET/PASSPHRASE, 无法下单")
       case Some(_) =>
-        logger.warn(s"[实盘] 提交: SELL $symbol sz=$qty ${limitPrice.fold("MKT")(p => s"@$p PostOnly")} clOrdId=$clOrdId")
+        logger.warn(s"[实盘] 提交: SELL $symbol sz=$qty @$price ${if postOnly then "post_only" else "ioc(taker)"} clOrdId=$clOrdId")
         signedPost[Envelope[OrderItem]]("/api/v5/trade/order", body).flatMap { env =>
           env.asEither.flatMap { items =>
             items.headOption.toRight("OKX 下单无返回数据").flatMap { d =>
@@ -137,13 +140,11 @@ final class OkxOptionsClient(
         catch case e: Throwable => Left(s"$method $pathQuery failed: ${e.getMessage}")
 
 object OkxOptionsClient:
-  /** OKX 卖出期权下单 body (纯函数, 便于断言)。limitPrice=Some -> post_only(maker)+px; None -> market。
-    * tdMode=cross (期权跨保证金), side=sell。数字格式复用框架 [[OkxClient.fmt]] (出站格式 SSOT)。 */
-  def sellOrderBody(instId: String, qty: Double, limitPrice: Option[Double], clOrdId: String): String =
-    val (ordType, pxField) = limitPrice match
-      case Some(p) => ("post_only", s""","px":"${OkxClient.fmt(p)}"""")
-      case None    => ("market", "")
-    s"""{"instId":"$instId","tdMode":"cross","side":"sell","ordType":"$ordType","sz":"${OkxClient.fmt(qty)}"$pxField,"clOrdId":"$clOrdId"}"""
+  /** OKX 卖出期权下单 body (纯函数, 便于断言)。postOnly -> post_only(maker); 否则 ioc(taker 限价)。
+    * tdMode=cross (期权跨保证金), side=sell, 均为限价带 px。数字格式复用框架 [[OkxClient.fmt]] (出站格式 SSOT)。 */
+  def sellOrderBody(instId: String, qty: Double, price: Double, postOnly: Boolean, clOrdId: String): String =
+    val ordType = if postOnly then "post_only" else "ioc"
+    s"""{"instId":"$instId","tdMode":"cross","side":"sell","ordType":"$ordType","sz":"${OkxClient.fmt(qty)}","px":"${OkxClient.fmt(price)}","clOrdId":"$clOrdId"}"""
 
   private def rightOf(optType: String): Option[OptionRight] = optType.toUpperCase match
     case "C" => Some(OptionRight.Call)
@@ -188,7 +189,7 @@ object OkxOptionsClient:
       if code == "0" then Right(data) else Left(s"OKX code=$code: $msg")
 
   final case class InstrumentItem(instId: String, stk: String, optType: String, expTime: String, lotSz: String, minSz: String, tickSz: String)
-  final case class TickerItem(askPx: String)
+  final case class TickerItem(bidPx: String, askPx: String)
   final case class OrderItem(ordId: String, clOrdId: String, sCode: String, sMsg: String)
   final case class GreeksItem(ccy: String, deltaBS: String, gammaBS: String)
 

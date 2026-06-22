@@ -25,9 +25,9 @@ object SellRunner:
           case Left(err) => logger.error(s"本次决策跳过: $err")
           case Right(d) =>
             logger.warn(f"决策: spot=${d.spot}%.2f 上周RV=${d.rvPrev}%.3f 本周RV=${d.rvThis}%.3f -> ${if d.rvThis > d.rvPrev then "↑卖" else "↓卖"} ${d.mult}×")
-            // 列出目标到期下全部可选行权价, 印证选了最近 ATM
-            logger.warn(s"期权链 @到期 ${java.time.Instant.ofEpochMilli(d.expiryMs)}: 可选行权 [${d.candidateStrikes.mkString(",")}] (${d.candidateStrikes.size}个), 现价=${d.spot} -> 选中 ATM=${d.atmStrike}")
-            logger.warn(s"跨式: ${d.legs.map(l => s"${l.symbol} qty=${l.qty}@${l.price}").mkString(" + ")}")
+            // 列出目标到期下全部可选行权价, 印证宽跨选了贴近现价两侧
+            logger.warn(s"期权链 @到期 ${java.time.Instant.ofEpochMilli(d.expiryMs)}: 可选行权 [${d.candidateStrikes.mkString(",")}] (${d.candidateStrikes.size}个), 现价=${d.spot} -> 宽跨 put=${d.putStrike}/call=${d.callStrike}")
+            logger.warn(s"宽跨: ${d.legs.map(l => s"${l.symbol} qty=${l.qty}@${l.price}${if l.postOnly then "(maker)" else "(taker)"}").mkString(" + ")}")
             val results = VolSell.execute(ex, d)
             results.foreach {
               case (l, Right(id)) => logger.warn(s"卖出 ${l.symbol} qty=${l.qty} @${l.price} PostOnly -> $id")

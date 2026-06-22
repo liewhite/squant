@@ -35,13 +35,25 @@ object SellVolPlan:
     if runNow then lastDecisionTime(nowMs, zone, decisionHour) else currentDecisionTime(nowMs, zone, decisionHour)
 
   /** 目标到期 = **决策锚点 + targetDays** (默认 21 天后那个周五的周度期权)。锚点在周五且 21=3×7,
-    * 故 +targetDays 仍落周五; 周度期权恒周五交割, [[selectStraddle]] 据此选最近到期。 */
+    * 故 +targetDays 仍落周五; 周度期权恒周五交割, [[selectStrangle]] 据此选最近到期。 */
   def targetExpiryMs(anchorMs: Long, targetDays: Int): Long =
     anchorMs + targetDays.toLong * DayMs
 
-  /** 从期权链选 **离 targetExpiryMs 最近的到期、ATM** 的跨式 (call+put 同行权同到期)。
-    * 先选交割时间最接近 targetExpiryMs 的到期, 再在该到期内取行权价最接近 spot 的 call/put。 */
-  def selectStraddle(
+  /** 卖价决策的两个参数 (微观结构相关, 命名常量替代魔法值): 价差 ≤ [[SpreadTakerCutoff]] 用对手价 taker,
+    * 否则中价 − [[PassiveOffset]] 挂 maker。 */
+  val SpreadTakerCutoff: Double = 0.3
+  val PassiveOffset: Double = 0.2
+
+  /** 由盘口 [[Quote]] 定卖价与下单方式: 价差 ≤ cutoff -> (对手价=买一, taker); 否则 (中价 − offset, maker)。
+    * 返回 (卖价, postOnly)。 */
+  def sellQuote(q: Quote, cutoff: Double = SpreadTakerCutoff, offset: Double = PassiveOffset): (Double, Boolean) =
+    if q.spread <= cutoff then (q.bid, false)      // 价差窄: 对手价(买一)直接成交 (taker)
+    else (q.mid - offset, true)                     // 价差宽: 公允(中)价 − offset 挂单 (maker)
+
+  /** 从期权链选 **离 targetExpiryMs 最近的到期、当前价位最近的宽跨 (strangle)**:
+    * 同一到期内, call 取**严格高于 spot 的最小行权** (OTM), put 取**严格低于 spot 的最大行权** (OTM)。
+    * 任一侧无价外行权 (spot 超出行权范围) 则无宽跨。 */
+  def selectStrangle(
       chain: Seq[OptionInstrument],
       nowMs: Long,
       spot: Double,
@@ -52,14 +64,12 @@ object SellVolPlan:
     else
       val expiry = futures.minBy(i => math.abs(i.expiryMs - targetExpiryMs)).expiryMs
       val atExpiry = futures.filter(_.expiryMs == expiry)
-      val strikes = atExpiry.map(_.strike).distinct
-      if strikes.isEmpty then None
-      else
-        val atm = strikes.minBy(k => math.abs(k - spot))
-        for
-          call <- atExpiry.find(i => i.strike == atm && i.right == OptionRight.Call)
-          put <- atExpiry.find(i => i.strike == atm && i.right == OptionRight.Put)
-        yield (call, put)
+      for
+        callK <- atExpiry.filter(i => i.right == OptionRight.Call && i.strike > spot).map(_.strike).minOption
+        putK <- atExpiry.filter(i => i.right == OptionRight.Put && i.strike < spot).map(_.strike).maxOption
+        call <- atExpiry.find(i => i.strike == callK && i.right == OptionRight.Call)
+        put <- atExpiry.find(i => i.strike == putK && i.right == OptionRight.Put)
+      yield (call, put)
 
   /** 下一个**决策时点** = from 之后最近的"周五 decisionHour:00" (在 zone 时区), 返回 ms epoch。
     * 默认 zone=Asia/Shanghai (北京时间)、decisionHour=17 (晚于期权 16:00 北京交割, 当周已结算)。 */

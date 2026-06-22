@@ -11,11 +11,12 @@ trait OptionsExchange:
   /** baseCoin (如 ETH) 的期权链 */
   def optionChain(baseCoin: String): Either[String, Vector[OptionInstrument]]
 
-  /** 期权最优卖价 ask1 (卖方 PostOnly 挂单价：挂在卖一才是 maker, 挂买一会越价被拒)；无报价返回 None */
-  def optionBestAsk(symbol: String): Either[String, Option[Double]]
+  /** 期权盘口最优买卖价 (bid1/ask1)；任一边缺失/≤0 返回 None (无法两边定价)。卖价决策据此算价差/中价。 */
+  def optionQuote(symbol: String): Either[String, Option[Quote]]
 
-  /** 卖出期权 (做空, 真实下单)。limitPrice=Some -> PostOnly 限价, None -> 市价。返回交易所 orderId。 */
-  def sellOption(symbol: String, qty: Double, limitPrice: Option[Double], orderLinkId: String): Either[String, String]
+  /** 卖出期权 (做空, 真实限价下单)。postOnly=true -> 只做 maker (越价被拒); false -> taker (IOC, 立即成交)。
+    * 返回交易所 orderId。 */
+  def sellOption(symbol: String, qty: Double, price: Double, postOnly: Boolean, orderLinkId: String): Either[String, String]
 
   /** 期权账户**净 (delta, gamma)** = Σ各期权持仓 delta/gamma (Bybit position/list 已按方向/张数给出)。需 API key。
     * 对冲腿据此把账户对冲到 delta 中性; gamma 供两次轮询之间用现价一阶修正 delta (tick 级新鲜)。 */

@@ -18,20 +18,28 @@ class SellVolPlanSpec extends munit.FunSuite:
     assertEquals(SellVolPlan.decideMultiplier(choppy ++ flat, 2.0, 1.0)._1, 1.0) // 后半更平 -> 1x
     assertEquals(SellVolPlan.decideMultiplier(Vector(100.0), 2.0, 1.0)._1, 1.0)  // 样本不足 -> 1x
 
-  test("selectStraddle: 选 ~21天到期 + ATM 行权的 call/put"):
+  test("selectStrangle: 离目标到期最近的到期 + 贴近现价两侧的价外 call/put"):
     val d = 86_400_000L
     val chain = Vector(
-      OptionInstrument("ETH-A-2900-C", 10 * d, 2900, OptionRight.Call),
-      OptionInstrument("ETH-A-3000-C", 10 * d, 3000, OptionRight.Call),
-      OptionInstrument("ETH-B-2900-C", 21 * d, 2900, OptionRight.Call),
-      OptionInstrument("ETH-B-3000-C", 21 * d, 3000, OptionRight.Call),
-      OptionInstrument("ETH-B-3000-P", 21 * d, 3000, OptionRight.Put),
-      OptionInstrument("ETH-B-3100-C", 21 * d, 3100, OptionRight.Call),
+      OptionInstrument("ETH-A-3000-C", 10 * d, 3000, OptionRight.Call), // 错误到期
+      OptionInstrument("ETH-B-2900-P", 21 * d, 2900, OptionRight.Put),  // <spot 较远
+      OptionInstrument("ETH-B-3000-P", 21 * d, 3000, OptionRight.Put),  // <spot 最近 -> 选
+      OptionInstrument("ETH-B-3100-C", 21 * d, 3100, OptionRight.Call), // >spot 最近 -> 选
+      OptionInstrument("ETH-B-3200-C", 21 * d, 3200, OptionRight.Call), // >spot 较远
     )
-    val res = SellVolPlan.selectStraddle(chain, nowMs = 0, spot = 2990, targetExpiryMs = 21 * d)
-    assertEquals(res.map((c, p) => (c.symbol, p.symbol)), Some(("ETH-B-3000-C", "ETH-B-3000-P"))) // 离 21d 最近的到期, ATM=3000
-    // 缺 put 则无跨式
-    assertEquals(SellVolPlan.selectStraddle(chain.filterNot(_.right == OptionRight.Put), 0, 2990, 21 * d), None)
+    val res = SellVolPlan.selectStrangle(chain, nowMs = 0, spot = 3060, targetExpiryMs = 21 * d)
+    assertEquals(res.map((c, p) => (c.symbol, p.symbol)), Some(("ETH-B-3100-C", "ETH-B-3000-P")))
+    // spot 恰在行权上 -> 严格价外 (跳过等于 spot 的行权)
+    val onStrike = SellVolPlan.selectStrangle(chain, 0, 3000, 21 * d) // put 须严格 <3000 -> 2900
+    assertEquals(onStrike.map((c, p) => (c.strike, p.strike)), Some((3100.0, 2900.0)))
+    // 某侧无价外行权 -> 无宽跨
+    assertEquals(SellVolPlan.selectStrangle(chain.filterNot(_.right == OptionRight.Put), 0, 3060, 21 * d), None)
+
+  test("sellQuote: 价差≤0.3 -> 对手价(买一) taker; >0.3 -> 中价-0.2 maker"):
+    assertEquals(SellVolPlan.sellQuote(Quote(bid = 49.9, ask = 50.0)), (49.9, false)) // 价差0.1
+    assertEquals(SellVolPlan.sellQuote(Quote(bid = 10.0, ask = 10.2)), (10.0, false)) // 价差0.2 -> taker
+    near(SellVolPlan.sellQuote(Quote(bid = 39.0, ask = 40.0))._1, 39.3)               // 价差1.0 -> 中价39.5-0.2
+    assertEquals(SellVolPlan.sellQuote(Quote(bid = 39.0, ask = 40.0))._2, true)        // maker
 
   test("quantizeQty: 向下取整到 step 并校验 minQty"):
     assertEquals(SellVolPlan.quantizeQty(1.0, 0.1, 0.1), Some(1.0))

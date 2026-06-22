@@ -30,6 +30,16 @@
       "args": [],
       "jvmOptions": [],
       "env": {}
+    },
+    {
+      "type": "scala",
+      "request": "launch",
+      "name": "VolSellLauncher",
+      "mainClass": "app.live.sell.VolSellLauncher",
+      "buildTarget": "file:/Users/liewhite/projects/ox-demo/?id=root",
+      "args": [],
+      "jvmOptions": [],
+      "env": {}
     }
   ]
 }

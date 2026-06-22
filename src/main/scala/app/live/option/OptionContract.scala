@@ -26,6 +26,11 @@ final case class OptionInstrument(
     tickSize: Double = 0.0,
 )
 
+/** 期权盘口最优买卖价 (bid1/ask1)。供卖价决策: 价差 = ask−bid, 公允(中)价 = (bid+ask)/2。 */
+final case class Quote(bid: Double, ask: Double):
+  def mid: Double = (bid + ask) / 2.0
+  def spread: Double = ask - bid
+
 object OptionContract:
   /** 从 Bybit 期权符号解析 (base, strike, right)；兼容币本位 `BASE-EXPIRY-STRIKE-{C|P}` 与
     * USDT 结算 `BASE-EXPIRY-STRIKE-{C|P}-USDT` (Bybit ETH/BTC 期权实际为后者)。expiry 不从符号解析

@@ -90,21 +90,23 @@ final class BybitOptionsClient(
       }
     page(None, Vector.empty)
 
-  override def optionBestAsk(symbol: String): Either[String, Option[Double]] =
+  override def optionQuote(symbol: String): Either[String, Option[Quote]] =
     publicGet[Envelope[TickersResult]](s"/v5/market/tickers?category=option&symbol=$symbol").map { env =>
-      env.result.flatMap(_.list.headOption).flatMap(_.ask1Price.toDoubleOption).filter(_ > 0)
+      env.result.flatMap(_.list.headOption).flatMap { t =>
+        for bid <- t.bid1Price.toDoubleOption.filter(_ > 0); ask <- t.ask1Price.toDoubleOption.filter(_ > 0)
+        yield Quote(bid, ask)
+      }
     }
 
-  override def sellOption(symbol: String, qty: Double, limitPrice: Option[Double], orderLinkId: String): Either[String, String] =
-    val (ordType, pxField, tif) = limitPrice match
-      case Some(p) => ("Limit", s""","price":"${fmt(p)}"""", "PostOnly")
-      case None    => ("Market", "", "IOC")
+  override def sellOption(symbol: String, qty: Double, price: Double, postOnly: Boolean, orderLinkId: String): Either[String, String] =
+    // postOnly -> 只做 maker (越价被拒); 否则 IOC 限价 (taker, 立即成交且限定最差价)
+    val tif = if postOnly then "PostOnly" else "IOC"
     val body =
-      s"""{"category":"option","symbol":"$symbol","side":"Sell","orderType":"$ordType","qty":"${fmt(qty)}"$pxField,"timeInForce":"$tif","orderLinkId":"$orderLinkId"}"""
+      s"""{"category":"option","symbol":"$symbol","side":"Sell","orderType":"Limit","qty":"${fmt(qty)}","price":"${fmt(price)}","timeInForce":"$tif","orderLinkId":"$orderLinkId"}"""
     credentials match // 实盘下单, 无 dry-run
       case None => Left("缺少 BYBIT_API_KEY/SECRET, 无法下单")
       case Some(c) =>
-        logger.warn(s"[实盘] 提交: SELL $symbol qty=$qty ${limitPrice.fold("MKT")(p => s"@$p PostOnly")} link=$orderLinkId")
+        logger.warn(s"[实盘] 提交: SELL $symbol qty=$qty @$price ${if postOnly then "PostOnly" else "IOC(taker)"} link=$orderLinkId")
         signedPost[Envelope[OrderResult]](c, "/v5/order/create", body).flatMap(_.asEither.map(_.orderId))
 
   // ---- HTTP ----
@@ -163,7 +165,7 @@ object BybitOptionsClient:
   final case class PriceFilter(tickSize: String)
   final case class InstrumentItem(symbol: String, deliveryTime: String, lotSizeFilter: Option[LotSizeFilter], priceFilter: Option[PriceFilter])
   final case class InstrumentsResult(list: List[InstrumentItem], nextPageCursor: Option[String])
-  final case class TickerItem(symbol: String, ask1Price: String)
+  final case class TickerItem(symbol: String, bid1Price: String, ask1Price: String)
   final case class TickersResult(list: List[TickerItem])
   final case class OrderResult(orderId: String, orderLinkId: String)
   final case class PositionItem(symbol: String, delta: String, gamma: String)
