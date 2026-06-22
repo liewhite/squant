@@ -12,7 +12,7 @@ import sttp.client4.DefaultSyncBackend
   * 需要环境变量 BINANCE_API_KEY / BINANCE_API_SECRET (策略依赖账户净值与私有流订单回报)。
   * 默认 dry-run；显式设置 LIVE=1 才会真实下单。
   *
-  * 运行: BINANCE_API_KEY=.. BINANCE_API_SECRET=.. sbt "runMain hft.demo.MakerDemo"
+  * 运行: BINANCE_API_KEY=.. BINANCE_API_SECRET=.. sbt "runMain app.live.MakerDemo"
   */
 @main def MakerDemo(): Unit =
   System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")

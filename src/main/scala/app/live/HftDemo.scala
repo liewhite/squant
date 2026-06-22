@@ -19,7 +19,7 @@ import strategy.research.FundingWatchStrategy
   * 配置环境变量 BINANCE_API_KEY / BINANCE_API_SECRET 可接入私有流与真实下单
   * (此时应去掉 dryRun)。
   *
-  * 运行: sbt "runMain hft.demo.HftDemo"
+  * 运行: sbt "runMain app.live.HftDemo"
   */
 @main def HftDemo(): Unit =
   System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")

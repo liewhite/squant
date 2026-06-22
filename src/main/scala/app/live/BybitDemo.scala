@@ -18,7 +18,7 @@ import strategy.research.FundingWatchStrategy
   *
   * 配置环境变量 BYBIT_API_KEY / BYBIT_API_SECRET 可接入私有流与真实下单 (此时应去掉 dryRun)。
   *
-  * 运行: sbt "runMain hft.demo.BybitDemo"
+  * 运行: sbt "runMain app.live.BybitDemo"
   */
 @main def BybitDemo(): Unit =
   System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")

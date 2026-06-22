@@ -26,7 +26,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   *
   * **关键不变量**: 期权腿 MTM 与对冲规则无关 (同周期+IV 下各组合恒相等), 故组合差异**全部**落在对冲腿。
   *
-  * 运行: sbt "runMain hft.demo.ShortVolBreakoutSweep [start] [end] [iv] [straddles] [fee]"
+  * 运行: sbt "runMain app.backtest.ShortVolBreakoutSweep [start] [end] [iv] [straddles] [fee]"
   *   默认 [2025-04-10 .. 2026-06-15], IV=70%, straddles=-10, fee=0.0005 (市价 taker)
   */
 @main def ShortVolBreakoutSweep(args: String*): Unit =

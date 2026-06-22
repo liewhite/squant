@@ -19,7 +19,7 @@ import java.time.LocalDate
   *   B. 引擎 + 空策略 (订阅 trades, 不下单)     -> 引擎成本 (撮合/调度/状态)
   *   C. 引擎 + 真实 MaMacd 策略                 -> 总成本 (B 之上即策略成本)
   *
-  * 运行: sbt "runMain hft.demo.BacktestPerf [SYMBOL] [START] [END] [CACHE_DIR]"
+  * 运行: sbt "runMain app.backtest.BacktestPerf [SYMBOL] [START] [END] [CACHE_DIR]"
   */
 @main def BacktestPerf(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")

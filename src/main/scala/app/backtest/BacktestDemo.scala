@@ -16,8 +16,8 @@ import java.time.format.DateTimeFormatter
   * 与实盘/模拟盘**完全相同的策略代码** (BboMakerStrategy) —— 差异只在驱动层 ([[BacktestEngine]]
   * 单线程虚拟时间 vs 实盘并发墙钟)。首跑联网下载历史数据并落 [[LocalFsDataCache]]，二跑命中缓存。
   *
-  * 运行: sbt "runMain hft.demo.BacktestDemo [SYMBOL] [START yyyy-MM-dd] [END yyyy-MM-dd]"
-  * 例:   sbt "runMain hft.demo.BacktestDemo BTCUSDT 2024-01-01 2024-01-01"
+  * 运行: sbt "runMain app.backtest.BacktestDemo [SYMBOL] [START yyyy-MM-dd] [END yyyy-MM-dd]"
+  * 例:   sbt "runMain app.backtest.BacktestDemo BTCUSDT 2024-01-01 2024-01-01"
   */
 @main def BacktestDemo(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")

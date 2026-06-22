@@ -33,7 +33,7 @@ import scala.collection.mutable
   *     价格反转下行时跟着下移 (靠小反弹成交)。仍是 maker 限价单，接不住"无反弹瀑布"(那需主动 taker，另议)。
   *   - 持仓上限 maxPositionCoin 限制单向累积，超限即停止该方向加仓 (平仓不受限)。
   *
-  * 系数 (档距/每档量/持仓上限) 由回测确定，见 hft.demo.MaMacdGridBacktest。
+  * 系数 (档距/每档量/持仓上限) 由回测确定，见 app.backtest.MaMacdGridBacktest。
   */
 final class MaMacdGridStrategy(
     exchange: Exchange,
@@ -61,7 +61,7 @@ final class MaMacdGridStrategy(
       * 让浮盈在反转前更快兑现，压低净值冲高回落的回吐。 */
     closeMinFraction: Double = 0.0,
     /** 【方案2】价偏离均线超过 atrStretchN×ATR 时进入移动止盈 且 停止该方向加仓 (0=关闭)。
-      * N 由历史 |price−ma|/atr 分布定 (见 hft.demo.MaDeviationAnalysis)，度量趋势拉伸/超买超卖。 */
+      * N 由历史 |price−ma|/atr 分布定 (见 app.backtest.MaDeviationAnalysis)，度量趋势拉伸/超买超卖。 */
     atrStretchN: Double = 0.0,
     /** ATR 周期 (根)，方案2 用 */
     atrPeriodBars: Int = 14,

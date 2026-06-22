@@ -13,7 +13,7 @@ import java.time.LocalDate
   * N 不能拍脑袋, 须由历史分布决定: 统计每根**已收盘**小时 bar 的 |close − ma| / atr, 给出分位数,
   * 取较高分位 (如 85~90%) 作 N —— 即"价格极少越过该拉伸度", 越过即均值回归概率高。
   *
-  * 运行: sbt "runMain hft.demo.MaDeviationAnalysis [SYMBOL] [START] [END]"
+  * 运行: sbt "runMain app.backtest.MaDeviationAnalysis [SYMBOL] [START] [END]"
   */
 @main def MaDeviationAnalysis(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")

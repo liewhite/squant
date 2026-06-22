@@ -21,7 +21,7 @@ import java.time.{LocalDate, ZoneOffset}
   * 撮合按 **maker 手续费** 计 (对冲单全为 PostOnly)。回测 P&L = 永续对冲的 maker scalp 净收益
   * (毛 gamma 收益 - 手续费)；期权 theta/权利金为已知结构性成本，不在永续 P&L 内建模。
   *
-  * 运行: sbt "runMain hft.demo.GammaScalpBacktest [START yyyy-MM-dd] [END yyyy-MM-dd]"
+  * 运行: sbt "runMain app.backtest.GammaScalpBacktest [START yyyy-MM-dd] [END yyyy-MM-dd]"
   * 缺省回测最近一周 (end = 今天-2, 留出 Binance Vision 数据上架延迟)。
   */
 @main def GammaScalpBacktest(args: String*): Unit =

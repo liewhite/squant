@@ -19,7 +19,7 @@ import java.time.LocalDate
   * P&L = 期权腿 (short 跨式: 进场权利金 − 现价值，含 theta 收入) + 永续对冲腿 (含方向 overlay 损益 + 手续费)。
   * 限价对冲单成交为 **maker**，按 makerFeeRate 计费。
   *
-  * 运行: sbt "runMain hft.demo.ShortVolHedgeBacktest [start] [end] [fee] [tilt] [band] [market|limit] [iv]
+  * 运行: sbt "runMain app.backtest.ShortVolHedgeBacktest [start] [end] [fee] [tilt] [band] [market|limit] [iv]
   *          [ratchet on|off] [adaptive on|off] [switch on|off] [straddles] [kama on|off]"
   * 缺省回测最近一周 (end = 今天-2, 留出 Binance Vision 数据上架延迟)。
   */

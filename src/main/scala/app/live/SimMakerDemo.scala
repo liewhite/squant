@@ -19,7 +19,7 @@ import java.time.format.DateTimeFormatter
   *
   * 延迟被如实建模：撮合用上游实时行情，策略看到的是延迟行情；下单亦有在途延迟。
   *
-  * 运行: sbt "runMain hft.demo.SimMakerDemo"
+  * 运行: sbt "runMain app.live.SimMakerDemo"
   */
 @main def SimMakerDemo(): Unit =
   System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")

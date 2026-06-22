@@ -22,7 +22,7 @@ import scala.collection.mutable.ArrayBuffer
   * 数据链: 原始 trades -> BsGreeksSource(注入 greeks, 透传 trades) -> TradePrintBboSource(trades 合成零价差盘口),
   * 故期权源见 trades (定 greeks/行权)、策略见盘口 (market take)。
   *
-  * 运行: sbt "runMain hft.demo.AtrTakeHedgeBacktest [START] [END] [IV] [atrMult] [straddles]"
+  * 运行: sbt "runMain app.backtest.AtrTakeHedgeBacktest [START] [END] [IV] [atrMult] [straddles]"
   */
 @main def AtrTakeHedgeBacktest(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")

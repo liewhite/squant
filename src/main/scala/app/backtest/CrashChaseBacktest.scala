@@ -18,8 +18,8 @@ import java.time.LocalDate
   * 数据：币安自 2024 年中起停发 futures 每日 bookTicker，较新合约 (如 SIRENUSDT) 只有 trades，
   * 故用 [[TradePrintBboSource]] 把成交印记合成零价差 L1 行情后再撮合。首跑联网下载并落 data-cache。
   *
-  * 运行: sbt "runMain hft.demo.CrashChaseBacktest [SYMBOL] [START yyyy-MM-dd] [END yyyy-MM-dd]"
-  * 例:   sbt "runMain hft.demo.CrashChaseBacktest SIRENUSDT 2026-06-04 2026-06-14"
+  * 运行: sbt "runMain app.backtest.CrashChaseBacktest [SYMBOL] [START yyyy-MM-dd] [END yyyy-MM-dd]"
+  * 例:   sbt "runMain app.backtest.CrashChaseBacktest SIRENUSDT 2026-06-04 2026-06-14"
   */
 @main def CrashChaseBacktest(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.showDateTime", "true")

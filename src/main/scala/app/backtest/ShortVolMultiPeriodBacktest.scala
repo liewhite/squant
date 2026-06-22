@@ -27,7 +27,7 @@ import java.util.concurrent.Executors
   *   - `breakout` : **纯突破闸门** ([[BreakoutHedgeStrategy]] maxThresholdPct=None)——只有价突破近 5h
   *                  Donchian 高/低点 且 |净 delta| 达阈值才对冲；区间内来回完全不对冲 (省 gamma 滑点/手续费)。
   *
-  * 运行: sbt "runMain hft.demo.ShortVolMultiPeriodBacktest [fee] [iv] [band|breakout] [param] [straddles] [windowH]"
+  * 运行: sbt "runMain app.backtest.ShortVolMultiPeriodBacktest [fee] [iv] [band|breakout] [param] [straddles] [windowH]"
   *   param  : band 模式=死区比例(默认 0.01); breakout 模式=delta 阈值占比(默认 0.10, ×|straddles|)
   *   windowH: breakout 模式的 Donchian 高/低窗口小时数 (默认 5h)
   */

@@ -23,9 +23,9 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   * 每方案各跑一遍, 输出成交数 / 已实现盈亏 / 末净值 / 收益率 / 资金利用率, 并落净值+仓位曲线 CSV 供画图。
   *
   * 运行:
-  *   sbt "runMain hft.demo.MaMacdGridBacktest [SYMBOL] [START] [END] [baseQty] [maxPos] [atrN]"
+  *   sbt "runMain app.backtest.MaMacdGridBacktest [SYMBOL] [START] [END] [baseQty] [maxPos] [atrN]"
   * 例:
-  *   sbt "runMain hft.demo.MaMacdGridBacktest ETHUSDT 2025-04-10 2026-06-15 5 100 3.0"
+  *   sbt "runMain app.backtest.MaMacdGridBacktest ETHUSDT 2025-04-10 2026-06-15 5 100 3.0"
   */
 @main def MaMacdGridBacktest(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")

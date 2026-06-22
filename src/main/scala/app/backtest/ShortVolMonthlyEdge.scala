@@ -27,7 +27,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   *   - IV = 该窗 30 天小时收益年化 RV (**完美前视定价**——非可交易, 仅为隔离 edge 的受控实验)；
   *   - 末窗不足 30 天按剩余天数, tenor = 实际窗长。
   *
-  * 运行: sbt "runMain hft.demo.ShortVolMonthlyEdge [start] [end] [windowDays] [windowH] [thrPct] [fee]"
+  * 运行: sbt "runMain app.backtest.ShortVolMonthlyEdge [start] [end] [windowDays] [windowH] [thrPct] [fee]"
   *   默认 [2025-04-10 .. 2026-06-15], 30 天窗, 8h 窗口, 10% 阈值, fee 0.0005。
   */
 @main def ShortVolMonthlyEdge(args: String*): Unit =

@@ -32,7 +32,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   * 保留详细数据供分析：周度汇总 / 小时净值曲线 / 逐笔对冲成交。汇总解析"建仓周内恒定1×"对照
   * (P&L 随份数线性, total/mult), 看越跌越买的缩放贡献。
   *
-  * 运行: sbt "runMain hft.demo.edge.WeeklyIvGridBacktest"
+  * 运行: sbt "runMain app.backtest.edge.WeeklyIvGridBacktest"
   * 可调 env: EDGE_SIZE_MODE(step|drop) / EDGE_HEDGE(on|off) / EDGE_SEED_IV / EDGE_GRID_UP / EDGE_GRID_DOWN /
   *           EDGE_DROP_SCALE / EDGE_DROP_CAP / EDGE_ATR_MULT / EDGE_MIN_TENOR_DAYS / EDGE_STRADDLES /
   *           EDGE_TAKER_FEE / EDGE_DELAY_MS / EDGE_MAX_WEEKS / EDGE_WEEKLY_CSV / EDGE_CURVE_CSV / EDGE_FILLS_CSV / EDGE_PAR / DATA_CACHE

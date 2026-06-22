@@ -31,7 +31,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   * 对照变体 (均价格主导触发、delta 定量 take、成交后中心重置；区别只在[[HedgeBand]])：
   *   baseline-sym (对称基线) / vol-regime (波动放大收带) / directional (MACD 方向不对称) / composite (二者叠加)。
   *
-  * 运行: sbt "runMain hft.demo.edge.EdgeRollingBacktest [trailing|fair|inflated:1.2] [startMonth yyyy-MM] [endMonth yyyy-MM]"
+  * 运行: sbt "runMain app.backtest.edge.EdgeRollingBacktest [trailing|fair|inflated:1.2] [startMonth yyyy-MM] [endMonth yyyy-MM]"
   */
 @main def EdgeRollingBacktest(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")

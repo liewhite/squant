@@ -18,7 +18,7 @@ import java.time.LocalDate
   * 这能直接量化"按小时 IV 定价、却在分钟级对冲"多付了多少方差, 解释逐月 IV=RV 下对冲仍稳定亏的来源
   * (是真实市场成本, 非回测 bug)。
   *
-  * 运行: sbt "runMain hft.demo.RvTermStructure [start] [end]"
+  * 运行: sbt "runMain app.backtest.RvTermStructure [start] [end]"
   */
 @main def RvTermStructure(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")
