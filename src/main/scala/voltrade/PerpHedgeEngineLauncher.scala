@@ -3,7 +3,7 @@ package voltrade
 import hft.domain.Exchange
 import hft.engine.{Engine, ExchangeGateway}
 import hft.exchange.bybit.{BybitAccountStream, BybitClient, BybitCredentials, BybitMarketStream}
-import hft.strategy.edge.{MaAsymHedgeBand, MakerHedgeStrategy}
+import strategy.live.{MaAsymHedgeBand, MakerHedgeStrategy}
 import org.slf4j.LoggerFactory
 import ox.supervised
 import sttp.client4.DefaultSyncBackend

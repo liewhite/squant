@@ -1,4 +1,6 @@
-package hft.strategy.edge
+package strategy.research
+
+import strategy.live.{HedgeBand, HedgeCtx}
 
 /** 复合带：同时叠加波动体制收放 ([[VolRegimeBand]]) 与方向不对称 ([[DirectionalBand]])——
   * 基宽 = [[atrMult]]×ATR×regimeFactor，再按 MACD 方向上下不对称。两个 edge 旋钮组合，

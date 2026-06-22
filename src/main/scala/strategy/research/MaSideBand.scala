@@ -1,4 +1,6 @@
-package hft.strategy.edge
+package strategy.research
+
+import strategy.live.{HedgeBand, HedgeCtx}
 
 /** 均线分界的不对称带：以 MA(默认 MA20) 为界，只调制**卖单侧 (上带)**——
   *   - 均线上 (maBias>0)：卖单距离更大 (上带 ×(1+skew))，不急于卖、让多头 delta 顺势多跑；

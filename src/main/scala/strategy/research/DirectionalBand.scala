@@ -1,4 +1,6 @@
-package hft.strategy.edge
+package strategy.research
+
+import strategy.live.{HedgeBand, HedgeCtx}
 
 /** 方向不对称带：基宽 = [[atrMult]]×ATR，按 MACD 方向 [[HedgeBand.skewOf]] 上下不对称——
   * 偏多时上带放宽 (顺势的多头 delta 多跑一会、兑现趋势)、下带收窄 (逆势快速对冲)，偏空镜像。

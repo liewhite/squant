@@ -1,4 +1,6 @@
-package hft.strategy.edge
+package strategy.research
+
+import strategy.live.{HedgeBand, HedgeCtx, MaAsymHedgeBand}
 
 /** 对冲带策略 (纯函数) 单测：对称基线、波动体制收放、方向不对称、复合，及共享因子的 clamp 行为。 */
 class HedgeBandSpec extends munit.FunSuite:

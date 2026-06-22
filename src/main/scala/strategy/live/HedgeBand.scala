@@ -1,4 +1,4 @@
-package hft.strategy.edge
+package strategy.live
 
 /** 一次对冲决策的上下文 (纯数据)：当前价、对冲中心、就绪的 ATR，以及供"找 edge"的体制/方向信号。
   *

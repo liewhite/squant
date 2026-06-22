@@ -1,4 +1,4 @@
-package hft.strategy.edge
+package strategy.live
 
 import hft.domain.*
 import hft.messaging.{EventData, IncomeEvent, StateManager}

@@ -1,4 +1,6 @@
-package hft.strategy.edge
+package strategy.research
+
+import strategy.live.{HedgeBand, HedgeCtx}
 
 /** 波动体制自适应带 (对称)：基宽 = [[atrMult]]×ATR，再乘 [[HedgeBand.regimeFactor]]——
   * 近端波动放大 (volRatio>1) 时收窄、更频繁对冲以更细兑现实现方差；平静时放宽、减少摩擦。

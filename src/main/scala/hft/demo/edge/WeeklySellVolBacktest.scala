@@ -6,7 +6,8 @@ import hft.engine.StrategyRunner
 import hft.indicator.RealizedVol
 import hft.messaging.{EventData, IncomeEvent}
 import hft.sim.SimConfig
-import hft.strategy.edge.{BandHedgeStrategy, MaAsymHedgeBand, MakerHedgeStrategy}
+import strategy.live.{MaAsymHedgeBand, MakerHedgeStrategy}
+import strategy.research.BandHedgeStrategy
 import sttp.client4.DefaultSyncBackend
 
 import java.nio.file.{Files, Path}

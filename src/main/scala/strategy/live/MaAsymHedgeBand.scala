@@ -1,4 +1,4 @@
-package hft.strategy.edge
+package strategy.live
 
 /** 均线分界、上下不对称的对冲带——专为**空头跨式 (卖方, 负 gamma)** 设计 (但对买方同样可用)。
   *

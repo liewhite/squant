@@ -1,4 +1,6 @@
-package hft.strategy.edge
+package strategy.research
+
+import strategy.live.{HedgeBand, HedgeCtx}
 
 import hft.domain.*
 import hft.messaging.{EventData, IncomeEvent, StateManager}

@@ -6,7 +6,8 @@ import hft.engine.StrategyRunner
 import hft.indicator.RealizedVol
 import hft.messaging.{EventData, IncomeEvent}
 import hft.sim.SimConfig
-import hft.strategy.edge.{CompositeBand, DirectionalBand, HedgeBand, MaSideBand, SymmetricAtrBand, VolRegimeBand}
+import strategy.live.HedgeBand
+import strategy.research.{BandHedgeStrategy, CompositeBand, DirectionalBand, MaSideBand, SymmetricAtrBand, VolRegimeBand}
 import sttp.client4.DefaultSyncBackend
 
 import java.nio.file.{Files, Path}
@@ -116,7 +117,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       )
       val withGreeks = BsGreeksSource(tradeSource(backend, start, end), cfg)
       val source = TradePrintBboSource(withGreeks)
-      val strategy = hft.strategy.edge.BandHedgeStrategy(Exchange.Binance, symbol, ccy, band)
+      val strategy = BandHedgeStrategy(Exchange.Binance, symbol, ccy, band)
       val runner = StrategyRunner.backtest(strategy, symbolMetas)
 
       var lastMid = 0.0; var lastTs = 0L
