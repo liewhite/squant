@@ -8,8 +8,8 @@ import hft.indicator.RealizedVol
 import hft.option.BlackScholes
 import hft.messaging.{EventData, IncomeEvent}
 import hft.sim.SimConfig
-import strategy.makerhedge.logic.{MaAsymHedgeBand, MakerHedgeStrategy}
-import strategy.bandhedge.logic.BandHedgeStrategy
+import strategy.strategies.makerhedge.logic.{MaAsymHedgeBand, MakerHedgeStrategy}
+import strategy.strategies.bandhedge.logic.BandHedgeStrategy
 import sttp.client4.DefaultSyncBackend
 
 import java.nio.file.{Files, Path}

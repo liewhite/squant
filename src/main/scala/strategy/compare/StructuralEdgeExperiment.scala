@@ -3,8 +3,8 @@ import strategy.utils.backtest.{ShortVolHedgeRunner, ShortVolParams, ShortVolOut
 
 import hft.domain.{Exchange, Symbol}
 import hft.strategy.Strategy
-import strategy.breakouthedge.logic.BreakoutHedgeStrategy
-import strategy.targetdeltahedge.logic.TargetDeltaHedgeStrategy
+import strategy.strategies.breakouthedge.logic.BreakoutHedgeStrategy
+import strategy.strategies.targetdeltahedge.logic.TargetDeltaHedgeStrategy
 import strategy.utils.hedge.{HedgeExecution, KamaTrendOverlay, MacdBiasOverlay}
 import sttp.client4.DefaultSyncBackend
 

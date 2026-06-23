@@ -7,7 +7,7 @@ import hft.exchange.SubscriptionKind
 import hft.messaging.{EventData, IncomeEvent, StateManager}
 import hft.sim.SimConfig
 import hft.strategy.{OutcomeEvent, Strategy}
-import strategy.mamacdgrid.logic.MaMacdGridStrategy
+import strategy.strategies.mamacdgrid.logic.MaMacdGridStrategy
 import sttp.client4.DefaultSyncBackend
 
 import java.time.LocalDate

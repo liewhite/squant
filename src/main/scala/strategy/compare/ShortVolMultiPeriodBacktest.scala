@@ -5,8 +5,8 @@ import hft.domain.{Exchange, Symbol}
 import hft.indicator.RealizedVol
 import hft.option.BlackScholes
 import hft.strategy.Strategy
-import strategy.breakouthedge.logic.BreakoutHedgeStrategy
-import strategy.targetdeltahedge.logic.TargetDeltaHedgeStrategy
+import strategy.strategies.breakouthedge.logic.BreakoutHedgeStrategy
+import strategy.strategies.targetdeltahedge.logic.TargetDeltaHedgeStrategy
 import strategy.utils.hedge.{HedgeExecution, MacdBiasOverlay}
 import sttp.client4.DefaultSyncBackend
 
