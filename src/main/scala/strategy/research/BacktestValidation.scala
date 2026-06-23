@@ -1,4 +1,4 @@
-package strategy.utils.backtest
+package strategy.research
 
 import hft.backtest.{BacktestEngine, BsGreeksConfig, BsGreeksSource, MarketDataSource}
 import hft.domain.*
@@ -23,7 +23,7 @@ import strategy.utils.hedge.MacdBiasMode
   *      多种子蒙特卡洛取均值。—— 这是定价×希腊字母×撮合×账本×P&L 端到端联立正确的充要特征,
   *      任一环节有 bug (theta 符号、delta、成交价、盈亏记账) 都会破坏该单调穿零结构。
   *
-  * 运行: sbt "runMain strategy.utils.backtest.BacktestValidation [seeds] [days]"
+  * 运行: sbt "runMain strategy.research.BacktestValidation [seeds] [days]"
   */
 @main def BacktestValidation(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "error")

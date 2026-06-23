@@ -61,7 +61,7 @@ final class MaMacdGridStrategy(
       * 让浮盈在反转前更快兑现，压低净值冲高回落的回吐。 */
     closeMinFraction: Double = 0.0,
     /** 【方案2】价偏离均线超过 atrStretchN×ATR 时进入移动止盈 且 停止该方向加仓 (0=关闭)。
-      * N 由历史 |price−ma|/atr 分布定 (见 strategy.utils.backtest.MaDeviationAnalysis)，度量趋势拉伸/超买超卖。 */
+      * N 由历史 |price−ma|/atr 分布定 (见 strategy.mamacdgrid.backtest.MaDeviationAnalysis)，度量趋势拉伸/超买超卖。 */
     atrStretchN: Double = 0.0,
     /** ATR 周期 (根)，方案2 用 */
     atrPeriodBars: Int = 14,

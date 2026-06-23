@@ -1,4 +1,5 @@
-package strategy.utils.backtest
+package strategy.compare
+import strategy.utils.backtest.{ShortVolHedgeRunner, ShortVolParams, EquityPoint}
 
 import hft.backtest.{BinanceDataKind, BinanceHistory}
 import hft.domain.{Exchange, Symbol}
@@ -27,7 +28,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   * 因 IV=RV, 期权腿无系统性溢价, 三者差异只反映**对冲是否削减/放大了方向波动**。卖宽跨 (strangleWidthPct>0)
   * 时 call/put 行权外移, 近端 gamma 更低、两腿间有"死区", 对照其对三种对冲的影响。
   *
-  * 运行: sbt "runMain strategy.utils.backtest.ShortVolMonthlyHedgeCompare [strangleWidthPct] [start] [end] [windowDays] [bandRatio] [breakoutH] [thrPct] [fee]"
+  * 运行: sbt "runMain strategy.compare.ShortVolMonthlyHedgeCompare [strangleWidthPct] [start] [end] [windowDays] [bandRatio] [breakoutH] [thrPct] [fee]"
   *   strangleWidthPct: 0=ATM 跨式; 如 0.15=±15% 宽跨。默认 0。
   */
 @main def ShortVolMonthlyHedgeCompare(args: String*): Unit =

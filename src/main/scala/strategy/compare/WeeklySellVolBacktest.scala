@@ -1,4 +1,5 @@
-package strategy.utils.backtest
+package strategy.compare
+import strategy.utils.backtest.{WeeklyIvGrid, WeekPlan, WeekResult, WeekRec, pct, writeWeekly, writeFills, summarize}
 
 import hft.backtest.{BacktestEngine, BinanceDataKind, BinanceHistory, BsGreeksConfig, BsGreeksSource, TradePrintBboSource}
 import hft.domain.*
@@ -31,7 +32,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   * 卖方追求**稳定为正 (高胜率)**, 故重点报: 胜率 / 最差 tranche / 最大回撤 / 均值, 而非仅总收益。
   * 详细数据: tranche 汇总 / 逐笔对冲成交 / 按到期日的累计净值曲线。
   *
-  * 运行: sbt "runMain strategy.utils.backtest.WeeklySellVolBacktest"
+  * 运行: sbt "runMain strategy.compare.WeeklySellVolBacktest"
   * env: EDGE_STRADDLES(基准份数,取绝对值做空) / EDGE_GRID_HIGH / EDGE_GRID_LOW / EDGE_TIGHT_ATR / EDGE_LOOSE_ATR /
   *      EDGE_TENOR_DAYS(默认21) / EDGE_TAKER_FEE / EDGE_DELAY_MS / EDGE_MAX_TRANCHES / EDGE_*_CSV / EDGE_PAR / DATA_CACHE
   */

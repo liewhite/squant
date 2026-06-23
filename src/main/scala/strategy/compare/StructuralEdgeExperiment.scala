@@ -1,4 +1,5 @@
-package strategy.utils.backtest
+package strategy.compare
+import strategy.utils.backtest.{ShortVolHedgeRunner, ShortVolParams, ShortVolOutcome, pct}
 
 import hft.domain.{Exchange, Symbol}
 import hft.strategy.Strategy
@@ -22,7 +23,7 @@ import java.time.LocalDate
   * 输出每个 (周 × 规则) 的两腿拆解表。判据：**区制自适应带**能否在两个区制都不劣于固定带
   * (趋势里护住、震荡里少漏血)——若是则为真结构性优势，否则只是方差搬运/调参。
   *
-  * 运行: sbt "runMain strategy.utils.backtest.StructuralEdgeExperiment [fee] [market|limit]"
+  * 运行: sbt "runMain strategy.compare.StructuralEdgeExperiment [fee] [market|limit]"
   */
 @main def StructuralEdgeExperiment(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")
