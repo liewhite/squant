@@ -42,7 +42,7 @@ object OkxClient:
     DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'").withZone(ZoneOffset.UTC)
 
   /** OKX 签名请求头的**单一数据源** (prehash=ts+method+pathQuery+body, base64-HMAC)。框架永续客户端
-    * 与 [[app.live.OkxOptionsClient]] 期权客户端共用——签名规则只此一处, 杜绝改一处忘改另一处。
+    * 与 [[strategy.utils.option.OkxOptionsClient]] 期权客户端共用——签名规则只此一处, 杜绝改一处忘改另一处。
     * `pathQuery` 须含 query string (OKX 要求 requestPath 参与签名), GET 的 `body` 传空串。 */
   def signedHeaders(c: OkxCredentials, method: String, pathQuery: String, body: String): Map[String, String] =
     val ts = IsoMillisUtc.format(Instant.now())
