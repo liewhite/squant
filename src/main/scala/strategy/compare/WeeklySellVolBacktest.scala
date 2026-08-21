@@ -8,7 +8,7 @@ import hft.indicator.RealizedVol
 import hft.option.BlackScholes
 import hft.messaging.{EventData, IncomeEvent}
 import hft.sim.SimConfig
-import strategy.strategies.makerhedge.logic.{MaAsymHedgeBand, MakerHedgeStrategy}
+import strategy.strategies.makerhedge.logic.{AsymHedgeBand, MakerHedgeStrategy}
 import strategy.strategies.bandhedge.logic.BandHedgeStrategy
 import sttp.client4.DefaultSyncBackend
 
@@ -23,10 +23,11 @@ import scala.concurrent.{Await, ExecutionContext, Future}
 /** **卖方 short-vol** 周度滚动回测 (镜像买方实验, 收 theta / 赚波动均值回复)。
   *
   * 规则 (只用过去信息)：
-  *   - **每周开始卖出一份 21 天 (3 周) ATM 空头跨式**, 持有到该 tranche 到期 (窗口重叠, 每个 tranche 独立模拟)。
+  *   - **每周开始卖出一份下周到期 (7 天) ATM 空头跨式**, 持有到该 tranche 到期 (tenor 默认 1 周, 可 EDGE_TENOR_DAYS 调)。
   *   - **仓位**: 本周 RV 较上周**上升**→卖 [[gridHigh]]×(默认 2), **下降**→卖 [[gridLow]]×(默认 1)。
   *     (波动刚涨→IV 定得高→卖更多, 赚回落) 用 [[WeeklyIvGrid.StepGrid]](up=低倍, down=高倍) 作用于**负** straddles。
-  *   - **对冲**: [[MaAsymHedgeBand]] —— 均线上对上涨紧对冲 (1ATR)、回落松 (2ATR); 均线下反之。
+  *   - **对冲**: [[AsymHedgeBand]].byMa —— 价在 **MA20 上方** (看多)→上带紧 1ATR(负 delta 1ATR 对冲到 0)、
+  *     下带松 2ATR(正 delta 2ATR 对冲到 0); 价在 **MA20 下方** (看空) 则镜像。执行: maker 在 BBO 外 0.01% 挂被动单, 5s 未成交撤单重挂。
   *   - IV = 上一周已实现 RV (滞后, 不预测未来)。
   *
   * 卖方追求**稳定为正 (高胜率)**, 故重点报: 胜率 / 最差 tranche / 最大回撤 / 均值, 而非仅总收益。
@@ -34,7 +35,8 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   *
   * 运行: sbt "runMain strategy.compare.WeeklySellVolBacktest"
   * env: EDGE_STRADDLES(基准份数,取绝对值做空) / EDGE_GRID_HIGH / EDGE_GRID_LOW / EDGE_TIGHT_ATR / EDGE_LOOSE_ATR /
-  *      EDGE_TENOR_DAYS(默认21) / EDGE_TAKER_FEE / EDGE_DELAY_MS / EDGE_MAX_TRANCHES / EDGE_*_CSV / EDGE_PAR / DATA_CACHE
+  *      EDGE_TENOR_DAYS(默认7) / EDGE_MAKER_OFFSET(默认0.0001) / EDGE_REQUOTE_MS(默认5000) /
+  *      EDGE_MAKER_FEE / EDGE_TAKER_FEE / EDGE_DELAY_MS / EDGE_MAX_TRANCHES / EDGE_*_CSV / EDGE_PAR / DATA_CACHE
   */
 @main def WeeklySellVolBacktest(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")
@@ -47,34 +49,42 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   val gridLow = sys.env.get("EDGE_GRID_LOW").map(_.toDouble).getOrElse(1.0)   // 波动下降 -> 卖更少
   val tightAtr = sys.env.get("EDGE_TIGHT_ATR").map(_.toDouble).getOrElse(1.0)
   val looseAtr = sys.env.get("EDGE_LOOSE_ATR").map(_.toDouble).getOrElse(2.0)
-  val tenorDays = sys.env.get("EDGE_TENOR_DAYS").map(_.toInt).getOrElse(21)
+  val tenorDays = sys.env.get("EDGE_TENOR_DAYS").map(_.toInt).getOrElse(7)  // 卖下周期权 = 1 周 tenor
   val takerFee = sys.env.get("EDGE_TAKER_FEE").map(_.toDouble).getOrElse(0.0)
   val makerFee = sys.env.get("EDGE_MAKER_FEE").map(_.toDouble).getOrElse(0.0)
   val delayMs = sys.env.get("EDGE_DELAY_MS").map(_.toLong).getOrElse(0L)
-  // 对冲执行: take(市价吃单) | maker(现价外挂被动单, 省费+赚价差, 5s重挂)
-  val hedgeExec = sys.env.getOrElse("EDGE_HEDGE_EXEC", "take")
-  val makerOffset = sys.env.get("EDGE_MAKER_OFFSET").map(_.toDouble).getOrElse(0.0002)
+  // 对冲执行: maker(BBO 外被动 PostOnly, 5s 重挂) | take(市价 at-touch 立即成交, 理想离散对冲基准)
+  val hedgeExec = sys.env.getOrElse("EDGE_HEDGE_EXEC", "maker")
+  val makerOffset = sys.env.get("EDGE_MAKER_OFFSET").map(_.toDouble).getOrElse(0.0001) // BBO 外 0.01%
   val requoteMs = sys.env.get("EDGE_REQUOTE_MS").map(_.toLong).getOrElse(5000L)
   val maxTranches = sys.env.get("EDGE_MAX_TRANCHES").map(_.toInt).getOrElse(Int.MaxValue)
+  // IV 口径: lag=上周已实现 RV (滞后, 可交易) | rv=期权存续期实际 RV (iv=rv, 完美预知, **不可交易**, 仅检验对冲腿 edge)
+  val ivMode = sys.env.getOrElse("EDGE_IV_MODE", "lag")
   val initialBalance = 1_000_000.0
   val weeklyCsv = sys.env.getOrElse("EDGE_WEEKLY_CSV", "/tmp/sellvol_tranches.csv")
   val curveCsv = sys.env.getOrElse("EDGE_CURVE_CSV", "/tmp/sellvol_curve.csv")
   val fillsCsv = sys.env.getOrElse("EDGE_FILLS_CSV", "/tmp/sellvol_fills.csv")
-  val tenorWeeks = math.max(1, math.round(tenorDays / 7.0).toInt) // 21d -> 3 周
+  val tenorWeeks = math.max(1, math.round(tenorDays / 7.0).toInt) // 7d -> 1 周
 
   val meta = SymbolMeta(Exchange.Binance, symbol, tickSize = 0.01, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
   val symbolMetas = Map((Exchange.Binance, symbol) -> meta)
   // 仓位: 波动下降(iv<ivPrev)→gridLow, 上升→gridHigh; StepGrid(up=低,down=高)
   val sizePolicy = WeeklyIvGrid.StepGrid(up = gridLow, down = gridHigh)
-  val band = MaAsymHedgeBand(tightMult = tightAtr, looseMult = looseAtr)
+  // 对冲带: ma=MA20 不对称(顺势紧逆势松) | sym=对称(上下均 tightAtr×ATR, 无方向, iv=rv 应盈亏平衡的基准)
+  val bandMode = sys.env.getOrElse("EDGE_BAND_MODE", "ma")
+  val band =
+    if bandMode == "sym" then AsymHedgeBand.symmetric(tightAtr)                          // 纯 1ATR delta 对冲基准
+    else AsymHedgeBand.byMa(trendSideMult = tightAtr, counterTrendMult = looseAtr)        // MA20: 价在上→上带紧
 
   val weeks = WeeklyIvGrid.weekWindows(weekDates(cacheDir, symbol))
   if weeks.sizeIs < tenorWeeks + 2 then sys.error(s"缓存周数不足 (${weeks.size}, 需 >= ${tenorWeeks + 2})")
 
+  val ivDesc = if ivMode == "rv" then "iv=rv(存续期实际RV, 完美预知/不可交易)" else "iv=上周RV(滞后/可交易)"
   println("==================== 卖方 short-vol 周度滚动回测 ====================")
-  println(f"symbol=$symbol  周数=${weeks.size}  tenor=${tenorDays}d(${tenorWeeks}周)  基准卖=${baseStraddles}份")
-  val execDesc = if hedgeExec == "maker" then f"maker(现价外${makerOffset * 100}%.3f%%, ${requoteMs}ms重挂, makerFee=${makerFee * 100}%.3f%%)" else f"take(taker费${takerFee * 100}%.3f%%)"
-  println(f"仓位: 波动↑卖${gridHigh}×/↓卖${gridLow}×   对冲带: 均线上 上${tightAtr}%.1fATR/下${looseAtr}%.1fATR, 均线下反之   执行=$execDesc  delay=${delayMs}ms")
+  println(f"symbol=$symbol  周数=${weeks.size}  tenor=${tenorDays}d(${tenorWeeks}周)  基准卖=${baseStraddles}份  IV口径: $ivDesc")
+  val execDesc = if hedgeExec == "take" then f"take(市价at-touch, takerFee=${takerFee * 100}%.3f%%)" else f"maker(BBO外${makerOffset * 100}%.3f%%, ${requoteMs}ms重挂, makerFee=${makerFee * 100}%.3f%%)"
+  val bandDesc = if bandMode == "sym" then f"对称${tightAtr}%.1fATR(无方向, 基准)" else f"MA20上 上${tightAtr}%.1fATR/下${looseAtr}%.1fATR, MA20下反之"
+  println(f"仓位: 波动↑卖${gridHigh}×/↓卖${gridLow}×   对冲带: $bandDesc   执行=$execDesc  delay=${delayMs}ms")
 
   def tradeSource(backend: sttp.client4.SyncBackend, s: LocalDate, e: LocalDate) =
     BinanceHistory.source(backend, Seq(symbol), s, e, kinds = Seq(BinanceDataKind.Trades), cacheDir = cacheDir)
@@ -104,8 +114,8 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       val withGreeks = BsGreeksSource(tradeSource(backend, start, end), cfg)
       val source = TradePrintBboSource(withGreeks)
       val hedgeStrat =
-        if hedgeExec == "maker" then MakerHedgeStrategy(Exchange.Binance, symbol, ccy, band, offsetPct = makerOffset, requoteMs = requoteMs)
-        else BandHedgeStrategy(Exchange.Binance, symbol, ccy, band)
+        if hedgeExec == "take" then BandHedgeStrategy(Exchange.Binance, symbol, ccy, band) // 市价 at-touch
+        else MakerHedgeStrategy(Exchange.Binance, symbol, ccy, band, offsetPct = makerOffset, requoteMs = requoteMs)
       val runner = StrategyRunner.backtest(hedgeStrat, symbolMetas)
       var lastMid = 0.0; var lastTs = 0L; var curveLastTs = 0L
       val curve = ArrayBuffer.empty[(Long, Double, Double)]
@@ -140,8 +150,12 @@ import scala.concurrent.{Await, ExecutionContext, Future}
     val rvByWeek = Await.result(Future.sequence(weeks.zipWithIndex.map { case ((s, e), i) => Future(i -> prepass(s, e)) }), Duration.Inf).toMap
     // tranche i: 起于第 i 周, 跨 tenorWeeks 周; 需 i>=2 (RV(i-2)) 且 i+tenorWeeks-1 <= 末周
     val trancheIdx = (2 to (weeks.size - tenorWeeks)).take(maxTranches)
+    // iv=rv: 卖出 IV = 期权存续期实际 RV (完美预知, 不可交易) -> 用 windowRvRms 作可观测 IV 喂 planObservedIv
+    def windowRv(j: Int): Double = WeeklyIvGrid.windowRvRms(j, tenorWeeks, rvByWeek)
     val plans = trancheIdx.map { i =>
-      val p = WeeklyIvGrid.planWeek(i, 0.55, j => rvByWeek(j), sizePolicy)
+      val p =
+        if ivMode == "rv" then WeeklyIvGrid.planObservedIv(i, windowRv, sizePolicy)
+        else WeeklyIvGrid.planWeek(i, 0.55, j => rvByWeek(j), sizePolicy)
       val start = weeks(i)._1
       val end = weeks(i + tenorWeeks - 1)._2
       WeekPlan(i, start, end, rvByWeek(i), p.iv, p.ivPrev, p.mult, -baseStraddles * p.mult) // 负=做空

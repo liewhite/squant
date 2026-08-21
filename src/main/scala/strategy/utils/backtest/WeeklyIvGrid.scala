@@ -59,6 +59,25 @@ object WeeklyIvGrid:
     val ivPrev = if idx <= 1 then seedIv else rv(idx - 2)
     Plan(iv, ivPrev, policy.mult(iv, ivPrev, idx))
 
+  /** 计算第 idx 周 (0 基) 的计划，IV 为**进场时可观测的市场 IV** (如 Bybit IV 指数, 非滞后 RV)。
+    *
+    * 与 [[planWeek]] 的区别: 市场 IV 在开仓时即可见, 无需滞后一周 -> iv(idx)=ivAt(idx)、ivPrev=ivAt(idx-1)
+    * (首周 ivPrev=iv 使 [[SizePolicy]] 退化为 1×)。`ivAt` 应在连续可用周上为全函数。 */
+  def planObservedIv(idx: Int, ivAt: Int => Double, policy: SizePolicy): Plan =
+    val iv = ivAt(idx)
+    val ivPrev = if idx == 0 then iv else ivAt(idx - 1)
+    Plan(iv, ivPrev, policy.mult(iv, ivPrev, idx))
+
+  /** tranche 持有期 (第 idx 周起、跨 tenorWeeks 周) 的**已实现 RV** = 各周 RV 的均方根 (RMS)。
+    *
+    * 同时长不相交子区间的方差可加, 故区间年化波动 = sqrt(各周年化方差均值) = sqrt(mean(rv²))；tenorWeeks=1
+    * 时退化为 `rv(idx)`。供"卖出 IV = 期权存续期实际 RV (iv=rv, 完美预知, **不可交易**)"的 edge 检验:
+    * 以此作 `ivAt` 喂 [[planObservedIv]] 即得 iv=本期实现 RV、ivPrev=上期实现 RV。 */
+  def windowRvRms(idx: Int, tenorWeeks: Int, rv: Int => Double): Double =
+    val n = math.max(1, tenorWeeks)
+    val sumSq = (0 until n).map(k => { val v = rv(idx + k); v * v }).sum
+    math.sqrt(sumSq / n)
+
   /** 从已有日期集合切出**长 lenDays、步长 stepDays** 的窗口 (升序, 含起止日)：
     * 从最早日期起按 stepDays 推进; 含缺天的窗口整窗跳过 (不回退对齐)。stepDays<lenDays 时窗口重叠。 */
   def windows(dates: Set[LocalDate], lenDays: Int, stepDays: Int): Seq[(LocalDate, LocalDate)] =

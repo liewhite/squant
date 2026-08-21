@@ -66,6 +66,9 @@ trait Macd extends KlineSeries:
   def macdSignalSeries: RingSeries = signalHistory
   def macdHistSeries: RingSeries = histHistory
 
+  /** 预热是否就绪 (已收盘 bar ≥ slow+signal, EMA 基线可信)。未就绪时方向/柱/DEA 不应被用于决策。 */
+  def macdReady: Boolean = closedCount >= macdSlow + macdSignalPeriod
+
   /** 方向：+1 看多 (柱>0)、-1 看空 (柱<0)、0 预热不足或持平 */
   def macdDirection: Int =
     if closedCount < macdSlow + macdSignalPeriod then 0

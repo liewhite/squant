@@ -90,6 +90,18 @@ final class BybitOptionsClient(
       }
     page(None, Vector.empty)
 
+  /** 历史隐含波动率指数 (年化小数, 小时级)，单窗口 ≤30 天 (Bybit 限制, 分页由 [[strategy.utils.backtest.BybitIvHistory]] 负责)。
+    *
+    * `category=option` -> 期权市场反推的 IV (非标的 RV); ETH 期权 USDT 结算 -> `quoteCoin=USDT` 才有数据。
+    * `period` = 恒定期限分桶 (7/14/21/30/60/90/180/270 日)。返回 (ts_ms, iv) 升序去重。 */
+  def historicalIv(baseCoin: String, quoteCoin: String, period: Int, startMs: Long, endMs: Long): Either[String, Vector[(Long, Double)]] =
+    val q = s"category=option&baseCoin=$baseCoin&quoteCoin=$quoteCoin&period=$period&startTime=$startMs&endTime=$endMs"
+    publicGet[Envelope[List[IvPoint]]](s"/v5/market/historical-volatility?$q").flatMap { env =>
+      env.asEither.map { pts =>
+        pts.flatMap(p => p.time.toLongOption.zip(p.value.toDoubleOption)).distinctBy(_._1).sortBy(_._1).toVector
+      }
+    }
+
   override def optionQuote(symbol: String): Either[String, Option[Quote]] =
     publicGet[Envelope[TickersResult]](s"/v5/market/tickers?category=option&symbol=$symbol").map { env =>
       env.result.flatMap(_.list.headOption).flatMap { t =>
@@ -170,8 +182,11 @@ object BybitOptionsClient:
   final case class OrderResult(orderId: String, orderLinkId: String)
   final case class PositionItem(symbol: String, delta: String, gamma: String)
   final case class PositionListResult(list: List[PositionItem])
+  /** historical-volatility 行: period 为数字, value/time 为字符串 (年化小数 / ms epoch)。result 直接是数组。 */
+  final case class IvPoint(period: Int, value: String, time: String)
 
   given klineCodec: JsonValueCodec[Envelope[KlineResult]] = JsonCodecMaker.make
+  given ivCodec: JsonValueCodec[Envelope[List[IvPoint]]] = JsonCodecMaker.make
   given instrumentsCodec: JsonValueCodec[Envelope[InstrumentsResult]] = JsonCodecMaker.make
   given tickersCodec: JsonValueCodec[Envelope[TickersResult]] = JsonCodecMaker.make
   given orderCodec: JsonValueCodec[Envelope[OrderResult]] = JsonCodecMaker.make

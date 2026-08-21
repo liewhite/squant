@@ -13,8 +13,8 @@ import java.nio.file.{Files, Path}
   * @param greeksPollMs 期权净 greeks 轮询间隔 (ms); 陈旧阈值 = 4× 此值
   * @param offset      maker 挂单价相对 BBO 的偏移比例
   * @param requoteMs   maker 重挂间隔 (ms)
-  * @param tightAtr    均线上方对冲带宽度 (ATR 倍数)
-  * @param looseAtr    均线下方对冲带宽度 (ATR 倍数)
+  * @param tightAtr    顺势方向对冲带宽度 (ATR 倍数; AsymHedgeBand.trendSideMult, 卖方取紧)
+  * @param looseAtr    逆势方向对冲带宽度 (ATR 倍数; AsymHedgeBand.counterTrendMult, 卖方取松)
   * @param maxHedgeQty 单笔对冲张数硬上限 (sanity, 超出不下单+告警)
   */
 final case class HedgeTuning(
@@ -22,7 +22,7 @@ final case class HedgeTuning(
     ccy: String,
     klineBar: String,
     greeksPollMs: Long = 3000,
-    offset: Double = 0.0002,
+    offset: Double = 0.0001,
     requoteMs: Long = 5000,
     tightAtr: Double = 1.0,
     looseAtr: Double = 2.0,

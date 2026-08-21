@@ -7,12 +7,13 @@ import hft.indicator.{Atr, KlineSeries, Macd, RealizedVol, Sma}
 import hft.messaging.{EventData, IncomeEvent, StateManager}
 import hft.strategy.{OutcomeEvent, Strategy}
 
-/** **Maker (被动挂单) 对冲** —— 与 [[BandHedgeStrategy]] 同样用 [[HedgeBand]] 决定**何时**对冲, 但执行改为
-  * 在现价外 [[offsetPct]] (默认 0.02%) 挂 PostOnly 限价单 (省 taker 费 + 赚价差改善), [[requoteMs]] (默认 5s)
+/** **Maker (被动挂单) 对冲** —— 用 [[HedgeBand]] 决定**何时**对冲 (市价 take 的被动版), 执行改为
+  * 在 **BBO 外** [[offsetPct]] (默认 0.01%) 挂 PostOnly 限价单 (省 taker 费 + 赚价差改善), [[requoteMs]] (默认 5s)
   * 未成交则撤单, 下一 tick 按新价重挂。
   *
   * 机制 (同一时刻最多一张挂单)：
-  *   - 越带且净 delta≥minQty 且无挂单 -> 挂被动单 (卖挂高 +offset, 买挂低 −offset; 净多→卖, 净空→买)。
+  *   - 越带且净 delta≥minQty 且无挂单 -> 挂被动单 (卖挂 bestAsk·(1+offset)、买挂 bestBid·(1−offset),
+  *     即对手盘外 offset, 保证 PostOnly 不吃单; 净多→卖, 净空→买)。
   *   - 已有挂单且年龄 > requoteMs -> 撤单 (下 tick 重挂); 成交 -> 中心移到成交价、清挂单。
   *   - 自管 orderId (来自撮合回流 OrderUpdated): Pending→记 id; Filled→recenter+清; Cancelled/Rejected→清。
   *   - awaitingAck 防"下单到确认之间"重复下单。
@@ -24,8 +25,8 @@ final class MakerHedgeStrategy(
     symbol: Symbol,
     ccy: String,
     band: HedgeBand,
-    /** 被动挂单相对现价的改善幅度 (0.0002=0.02%): 卖挂 px·(1+offset)、买挂 px·(1−offset) */
-    offsetPct: Double = 0.0002,
+    /** 被动挂单相对 BBO 的改善幅度 (0.0001=0.01%): 卖挂 bestAsk·(1+offset)、买挂 bestBid·(1−offset) */
+    offsetPct: Double = 0.0001,
     /** 未成交重挂间隔 (ms) */
     requoteMs: Long = 5000,
     atrPeriodBars: Int = 14,
@@ -124,7 +125,13 @@ final class MakerHedgeStrategy(
                 if atr > 0.0 && !center.isNaN
               yield
                 val maBias = klines.sma.fold(0)(m => math.signum(px - m).toInt)
-                val ctx = HedgeCtx(px, center, atr, klines.volRatio.getOrElse(1.0), klines.histBias(macdTrendBars), maBias)
+                // 1h MACD 柱斜率: 较前一根升=+1、降=-1、持平/预热不足=0 (驱动 AsymHedgeBand.byMacdBar)
+                val macdHistDir =
+                  if !klines.macdReady then 0
+                  else if klines.macdHistSeries.rising(1) then 1
+                  else if klines.macdHistSeries.falling(1) then -1
+                  else 0
+                val ctx = HedgeCtx(px, center, atr, klines.volRatio.getOrElse(1.0), klines.histBias(macdTrendBars), maBias, macdHistDir)
                 val (up, down) = band.bands(ctx)
                 val crossed = (px - center > up) || (center - px > down)
                 if !crossed then Vector.empty
@@ -139,7 +146,13 @@ final class MakerHedgeStrategy(
                     Vector.empty
                   else
                     val side = if netDelta > 0 then Side.Short else Side.Long // 净多→卖, 净空→买
-                    val limitPx = if side == Side.Short then px * (1.0 + offsetPct) else px * (1.0 - offsetPct)
+                    // BBO 外 offset 挂被动单: 卖挂 bestAsk·(1+off)、买挂 bestBid·(1−off); 盘口缺失则回退中间价 (降级, 告警)
+                    val bbo = ss.bbo(exchange)
+                    if bbo.isEmpty then warnThrottled(f"盘口 BBO 缺失 -> maker 挂价回退中间价 $px%.2f (检查 BBO 订阅是否在推)")
+                    val refPx = side match
+                      case Side.Short => bbo.fold(px)(_.askPrice)
+                      case Side.Long  => bbo.fold(px)(_.bidPrice)
+                    val limitPx = if side == Side.Short then refPx * (1.0 + offsetPct) else refPx * (1.0 - offsetPct)
                     awaitingAck = true
                     Vector(
                       OutcomeEvent.PlaceOrders(

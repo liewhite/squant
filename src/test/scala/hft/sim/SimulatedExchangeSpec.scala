@@ -3,8 +3,8 @@ package hft.sim
 import hft.domain.*
 import hft.engine.{Engine, ExchangeGateway}
 import hft.exchange.{ExchangeClient, MarketDataStream, SubscriptionKind}
-import hft.messaging.{EventBus, EventData, IncomeEvent}
-import strategy.strategies.bbomaker.logic.BboMakerStrategy
+import hft.messaging.{EventBus, EventData, IncomeEvent, StateManager}
+import hft.strategy.{OutcomeEvent, Strategy}
 import ox.{Ox, fork, supervised}
 
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -15,6 +15,23 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   private val sym = "BTCUSDT"
 
   private val meta = SymbolMeta(Exchange.Binance, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
+
+  /** 测试用极简策略: 收到首个 BBO 即在买一下方 offset 处挂一张 PostOnly 限价买单 (之后不再下单)。
+    * 用于端到端验证"策略无感知地下单/成交", 不依赖任何业务策略实现。 */
+  private class OneShotMakerStrategy(ex: Exchange, symbol: Symbol, offsetRatio: Double, orderSize: Quantity) extends Strategy:
+    private var placed = false
+    override def orderTimeoutMs: Long = 60_000
+    override def publicStreams: Map[Exchange, Set[SubscriptionKind]] = Map(ex -> Set(SubscriptionKind.BBO(symbol)))
+    override def onEvent(event: IncomeEvent, state: StateManager): Vector[OutcomeEvent] =
+      event.data match
+        case EventData.BboUpdate(b) if !placed && b.exchange == ex && b.symbol == symbol =>
+          placed = true
+          val buyPx = b.bidPrice * (1.0 - offsetRatio) // 买一下方, PostOnly 静止挂单
+          Vector(OutcomeEvent.PlaceOrders(
+            Vector(Order("", ex, symbol, Side.Long, OrderType.Limit(buyPx, TimeInForce.PostOnly), orderSize, reduceOnly = false, clientOrderId = "")),
+            "oneshot maker buy",
+          ))
+        case _ => Vector.empty
 
   /** 可手动喂行情的假上游公共流 */
   private class FakeMarketStream extends MarketDataStream:
@@ -157,7 +174,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
       assertEquals(fills(q).map(_.side), Vector(Side.Long), "延迟后成交回报应到达")
       sim.shutdown()
 
-  test("端到端: 模拟盘提供与实盘一致的接口, 策略无感知地下单成交 (Engine + BboMakerStrategy)"):
+  test("端到端: 模拟盘提供与实盘一致的接口, 策略无感知地下单成交 (Engine + 极简 maker 策略)"):
     supervised:
       val market = FakeMarketStream()
       val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(exchangeToStrategyDelayMs = 10, orderToExchangeDelayMs = 10, initialBalanceUsdt = 10_000))
@@ -168,9 +185,9 @@ class SimulatedExchangeSpec extends munit.FunSuite:
         clockIntervalMs = 100_000,
         accountRefreshMs = 100_000,
       )
-      engine.addStrategy(BboMakerStrategy(Exchange.Binance, sym, offsetRatio = 0.0001, orderSize = 0.002, maxLeverage = 2.0))
+      engine.addStrategy(OneShotMakerStrategy(Exchange.Binance, sym, offsetRatio = 0.0001, orderSize = 0.002))
 
-      // 初始行情 -> 策略双边 PostOnly 挂单 (买 ~49995, 卖 ~50006), 均 resting
+      // 初始行情 -> 策略在买一下方挂 PostOnly 买单 (~49995), resting
       market.emitBbo(50000, 50001, 1)
       Thread.sleep(250)
       assert(sim.fetchPendingOrders(sym).toOption.get.nonEmpty, "策略应已挂出订单到柜台")

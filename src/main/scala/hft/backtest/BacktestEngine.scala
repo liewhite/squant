@@ -8,6 +8,7 @@ import hft.strategy.OutcomeEvent
 import org.slf4j.LoggerFactory
 
 import scala.collection.mutable
+import scala.util.control.NonFatal
 
 /** 回测结果汇总。realizedPnl 为已实现盈亏 (= 账本现金增量)，finalEquity 含未实现。 */
 final case class BacktestResult(
@@ -153,7 +154,11 @@ final class BacktestEngine(
     ev.data match
       case EventData.FillUpdate(_) => fillCount += 1
       case _                       => ()
-    observers.foreach(_(ev))
+    // 旁路观察者隔离: 观察者 (出图/记录等) 自身异常绝不拖垮回测核心, 只 warn 后继续
+    observers.foreach { obs =>
+      try obs(ev)
+      catch case NonFatal(e) => logger.warn(s"backtest observer failed on event (ignored): ${e.getMessage}", e)
+    }
     runners.foreach { r =>
       if r.accepts(ev) then
         r.onEvent(ev, now).foreach {

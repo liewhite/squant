@@ -8,6 +8,12 @@ class WeeklyIvGridSpec extends munit.FunSuite:
   private val step = WeeklyIvGrid.StepGrid(1.5, 0.75)
   private def near(a: Double, b: Double): Unit = assert(math.abs(a - b) < 1e-9, s"expected $b got $a")
 
+  test("windowRvRms: tenor=1 退化为该周 RV; tenor>1 为各周 RV 的均方根"):
+    val rv = Map(0 -> 0.4, 1 -> 0.6, 2 -> 0.8).apply
+    near(WeeklyIvGrid.windowRvRms(1, 1, rv), 0.6)                     // tenor=1 = rv(1)
+    near(WeeklyIvGrid.windowRvRms(0, 2, rv), math.sqrt((0.16 + 0.36) / 2)) // RMS(0.4,0.6)
+    near(WeeklyIvGrid.windowRvRms(0, 3, rv), math.sqrt((0.16 + 0.36 + 0.64) / 3))
+
   test("首周: IV=种子, StepGrid 倍数=1.0 (不读任何 RV)"):
     val p = WeeklyIvGrid.planWeek(0, seed, _ => fail("不应读取 RV"), step)
     near(p.iv, seed); near(p.ivPrev, seed); near(p.mult, 1.0)
@@ -30,6 +36,21 @@ class WeeklyIvGridSpec extends munit.FunSuite:
       assert(j <= idx - 1, s"前视! 第 $idx 周读取了 rv($j)")
       0.5 + j * 0.01
     (0 to 8).foreach(i => WeeklyIvGrid.planWeek(i, seed, guarded(i), step))
+
+  test("planObservedIv: 市场IV不滞后, 首周ivPrev=iv→1×, 买方网格(降→2×/升/平→1×)"):
+    val buyer = WeeklyIvGrid.StepGrid(up = 2.0, down = 1.0) // iv降买2份, 否则1份
+    val iv = Map(0 -> 0.60, 1 -> 0.50, 2 -> 0.55) // idx1: 0.50<0.60降→2×; idx2: 0.55>0.50升→1×
+    val p0 = WeeklyIvGrid.planObservedIv(0, iv, buyer)
+    near(p0.iv, 0.60); near(p0.ivPrev, 0.60); near(p0.mult, 1.0) // 首周
+    val p1 = WeeklyIvGrid.planObservedIv(1, iv, buyer)
+    near(p1.iv, 0.50); near(p1.ivPrev, 0.60); near(p1.mult, 2.0) // IV下降→买2份
+    near(WeeklyIvGrid.planObservedIv(2, iv, buyer).mult, 1.0)    // IV上升→1份
+
+  test("planObservedIv: 无前视——idx 只读 ivAt(idx) 与 ivAt(idx-1)"):
+    def guarded(idx: Int): Int => Double = j =>
+      assert(j == idx || j == idx - 1, s"第 $idx 周读取了 ivAt($j)")
+      0.5 + j * 0.01
+    (0 to 8).foreach(i => WeeklyIvGrid.planObservedIv(i, guarded(i), WeeklyIvGrid.StepGrid(2.0, 1.0)))
 
   test("DropOnly: 只在波动下降买, 越跌越买 (按相对跌幅), 上升/首周→0, 受 cap 钳制"):
     val d = WeeklyIvGrid.DropOnly(scale = 5.0, cap = 3.0)
