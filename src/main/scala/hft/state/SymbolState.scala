@@ -1,6 +1,7 @@
-package hft.messaging
+package hft.state
 
 import hft.domain.*
+import hft.event.{AnyEvent, Topics}
 import org.slf4j.LoggerFactory
 
 import scala.collection.mutable
@@ -107,25 +108,20 @@ final class SymbolState(val symbol: Symbol):
 
   // ==================== 事件处理 ====================
 
-  /** 更新状态。事件已由 Executor 按 (exchange, symbol) 过滤，
-    * symbol 不一致只能是路由 bug，立即终止
+  /** 按 topic 更新状态。
+    *
+    * 事件已由总线按标的精确投递、再由 [[StateManager]] 按 symbol 定位到本实例，
+    * 故这里不再重复校验归属 —— 路由键就是从载荷派生的，不存在错配的可能。
     */
-  def apply(event: IncomeEvent): Unit =
-    event.symbol match
-      case Some(s) if s != symbol =>
-        sys.error(s"Event symbol mismatch (routing bug): expected=$symbol actual=$s")
-      case None => () // 账户级事件在 per-symbol 状态中不处理
-      case _ =>
-        event.data match
-          case EventData.FundingRateUpdate(rate) => fundingRates(rate.exchange) = rate
-          case EventData.BboUpdate(bbo)          => bbos(bbo.exchange) = bbo
-          case EventData.MarketTradeUpdate(t)    => lastTrades(t.exchange) = t
-          case EventData.MarkPriceUpdate(mp)     => markPrices(mp.exchange) = mp
-          case EventData.IndexPriceUpdate(ip)    => indexPrices(ip.exchange) = ip
-          case EventData.PositionUpdate(pos)     => applyPosition(pos)
-          case EventData.OrderUpdated(update)    => applyOrderUpdate(update)
-          case EventData.FillUpdate(fill)        => applyFill(fill)
-          case _                                 => ()
+  def apply(event: AnyEvent): Unit =
+    event.as(Topics.FundingRate).foreach(r => fundingRates(r.exchange) = r)
+    event.as(Topics.Bbo).foreach(b => bbos(b.exchange) = b)
+    event.as(Topics.Trade).foreach(t => lastTrades(t.exchange) = t)
+    event.as(Topics.MarkPrice).foreach(m => markPrices(m.exchange) = m)
+    event.as(Topics.IndexPrice).foreach(i => indexPrices(i.exchange) = i)
+    event.as(Topics.Position).foreach(applyPosition)
+    event.as(Topics.OrderUpdate).foreach(applyOrderUpdate)
+    event.as(Topics.Fill).foreach(applyFill)
 
   /** 仅用于初始加载: 本地无仓位时写入，之后完全由 Fill 事件维护 */
   private def applyPosition(position: Position): Unit =

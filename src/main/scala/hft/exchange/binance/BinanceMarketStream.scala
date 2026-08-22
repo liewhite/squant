@@ -3,7 +3,7 @@ package hft.exchange.binance
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
 import hft.exchange.{MarketDataStream, SubscriptionKind, WsLoop}
-import hft.messaging.{EventBus, EventData, IncomeEvent}
+import hft.event.{Event, EventBus, Topics}
 import org.slf4j.LoggerFactory
 import ox.Ox
 import ox.channels.Channel
@@ -40,10 +40,10 @@ final class BinanceMarketStream(
   private val outgoing: Map[Route, Channel[WebSocketFrame]] =
     Route.values.map(_ -> Channel.unlimited[WebSocketFrame]).toMap
   private val requestId = AtomicInteger(0)
-  private var bus: EventBus[IncomeEvent] = scala.compiletime.uninitialized
+  private var bus: EventBus = scala.compiletime.uninitialized
 
-  override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit =
-    bus = incomeBus
+  override def start(eventBus: EventBus)(using Ox): Unit =
+    bus = eventBus
     Route.values.foreach { route =>
       WsLoop.run(s"binance${route.path.stripSuffix("/ws")}", backend, () => s"$wsBaseUrl${route.path}", outgoing(route), onPublicText)
     }
@@ -84,7 +84,7 @@ final class BinanceMarketStream(
 
   private def publishTrade(msg: AggTradeMsg): Unit =
     val trade = MarketTrade(Exchange.Binance, msg.s, msg.p.asDouble, msg.q.asDouble, msg.m, msg.T)
-    bus.publish(IncomeEvent.at(msg.T, EventData.MarketTradeUpdate(trade)))
+    bus.publish(Event.at(Topics.Trade, trade, msg.T))
 
   private def publishBookTicker(msg: BookTickerMsg): Unit =
     val bbo = BBO(
@@ -96,21 +96,16 @@ final class BinanceMarketStream(
       askQty = msg.A.asDouble,
       timestamp = msg.E,
     )
-    bus.publish(IncomeEvent.at(msg.E, EventData.BboUpdate(bbo)))
+    bus.publish(Event.at(Topics.Bbo, bbo, msg.E))
 
   /** markPrice 流一次携带标记价格/指数价格/资金费率，拆为三个事件发布 */
   private def publishMarkPrice(msg: MarkPriceMsg): Unit =
     bus.publish(
-      IncomeEvent.at(msg.E, EventData.MarkPriceUpdate(MarkPrice(Exchange.Binance, msg.s, msg.p.asDouble, msg.E)))
+      Event.at(Topics.MarkPrice, MarkPrice(Exchange.Binance, msg.s, msg.p.asDouble, msg.E), msg.E)
     )
     bus.publish(
-      IncomeEvent.at(msg.E, EventData.IndexPriceUpdate(IndexPrice(Exchange.Binance, msg.s, msg.i.asDouble, msg.E)))
+      Event.at(Topics.IndexPrice, IndexPrice(Exchange.Binance, msg.s, msg.i.asDouble, msg.E), msg.E)
     )
     bus.publish(
-      IncomeEvent.at(
-        msg.E,
-        EventData.FundingRateUpdate(
-          FundingRate(Exchange.Binance, msg.s, msg.r.asDouble, nextSettleTime = msg.T, timestamp = msg.E)
-        ),
-      )
+      Event.at(Topics.FundingRate, FundingRate(Exchange.Binance, msg.s, msg.r.asDouble, nextSettleTime = msg.T, timestamp = msg.E), msg.E)
     )

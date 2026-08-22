@@ -1,7 +1,7 @@
 package hft.backtest
 
 import hft.domain.{Exchange, MarketTrade, Symbol}
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, Event, Topics}
 
 import java.io.PrintWriter
 import scala.io.Source
@@ -28,15 +28,14 @@ object MinuteBars:
         w.println(s"${bucket * 60000L},$o,$h,$l,$c,$v"); count += 1
     try
       source.events().foreach { ev =>
-        ev.data match
-          case EventData.MarketTradeUpdate(t) =>
-            val b = t.timestamp / 60000L
-            if b != bucket then
-              flush()
-              bucket = b; o = t.price; h = t.price; l = t.price; c = t.price; v = t.qty
-            else
-              h = math.max(h, t.price); l = math.min(l, t.price); c = t.price; v += t.qty
-          case _ => ()
+        ev.as(Topics.Trade).foreach { t =>
+          val b = t.timestamp / 60000L
+          if b != bucket then
+            flush()
+            bucket = b; o = t.price; h = t.price; l = t.price; c = t.price; v = t.qty
+          else
+            h = math.max(h, t.price); l = math.min(l, t.price); c = t.price; v += t.qty
+        }
       }
       flush()
     finally w.close()
@@ -54,12 +53,12 @@ object MinuteBars:
 /** 分钟 bar 回放源：每根 bar 发 4 个合成 trade (O→近端极值→远端极值→C)，时间戳 +0/15/30/45s。
   * 价格走向先触及离开盘价更近的极值, 是单条最可能路径 (供 maker 撮合判定穿越)。 */
 final class MinuteBarReplaySource(bars: Vector[MinuteBar], exchange: Exchange, symbol: Symbol) extends MarketDataSource:
-  override def events(): Iterator[IncomeEvent] =
+  override def events(): Iterator[AnyEvent] =
     bars.iterator.flatMap { b =>
       val (first, second) = if math.abs(b.high - b.open) <= math.abs(b.open - b.low) then (b.high, b.low) else (b.low, b.high)
       val vq = b.volume / 4.0
       Seq((0L, b.open), (15000L, first), (30000L, second), (45000L, b.close)).iterator.map { (dt, px) =>
         val t = MarketTrade(exchange, symbol, px, vq, isBuyerMaker = false, b.ts + dt)
-        IncomeEvent(b.ts + dt, b.ts + dt, EventData.MarketTradeUpdate(t))
+        Event.stamped(Topics.Trade, t, b.ts + dt, b.ts + dt)
       }
     }

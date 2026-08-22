@@ -1,7 +1,7 @@
 package strategy.utils.backtest
 
 import hft.domain.{Exchange, Side, Symbol}
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, Topics}
 import strategy.utils.viz.EquityChartHtml
 
 import scala.collection.mutable.ArrayBuffer
@@ -18,7 +18,7 @@ import scala.collection.mutable.ArrayBuffer
   *   - `<label>_fills.csv`   : ts,side,price,qty (逐笔成交 = 买卖点记录)
   *   - `<label>.html`        : 策略净值 vs buy&hold 曲线 + 仓位方向带 + **价格线上的买卖点标记** + 摘要
   *
-  * 旁路观察, 不参与撮合、不改策略 (成交回报本就在 income 总线广播)。所有测量取**正式区间** (`startMs`
+  * 旁路观察, 不参与撮合、不改策略 (成交回报本就在 事件总线广播)。所有测量取**正式区间** (`startMs`
   * 之后, 预热期不计入基准/统计)。基准净值 = 正式区间首个 equity, buy&hold = 价格相对正式区间首价。
   */
 object BacktestReport:
@@ -133,27 +133,28 @@ final class BacktestRecorder(
   private var sampled = false // 是否已采过首样 (保证首样必采, 不依赖 ts 量级)
 
   /** 放进 `BacktestEngine(observers = Seq(...))` 的观察函数。 */
-  val observe: IncomeEvent => Unit = ev =>
-    ev.data match
-      case EventData.MarketTradeUpdate(t) if t.exchange == exchange && t.symbol == symbol =>
-        lastPx = t.price
-        if t.timestamp >= startMs && firstPxInPeriod == 0.0 then firstPxInPeriod = t.price
-      case EventData.FillUpdate(f) if f.exchange == exchange && f.symbol == symbol =>
-        runPos += (if f.side == Side.Long then f.size else -f.size)
-        if f.timestamp >= startMs then
-          nFills += 1
-          fillBuf += ((f.timestamp, f.side, f.price, f.size))
-      case EventData.AccountInfoUpdate(_, info) =>
-        if ev.exchangeTs >= startMs && info.equity > 0 then
-          if !baseSet then { baseEquity = info.equity; peakEquity = info.equity; baseSet = true }
-          if info.equity > peakEquity then peakEquity = info.equity
-          val dd = (peakEquity - info.equity) / peakEquity
-          if dd > maxDd then maxDd = dd
-          if !sampled || ev.exchangeTs - lastSampleTs >= sampleIntervalMs then
-            sampled = true
-            lastSampleTs = ev.exchangeTs
-            samples += ((ev.exchangeTs, info.equity, lastPx, runPos))
-      case _ => ()
+  val observe: AnyEvent => Unit = ev =>
+    ev.as(Topics.Trade).filter(t => t.exchange == exchange && t.symbol == symbol).foreach { t =>
+      lastPx = t.price
+      if t.timestamp >= startMs && firstPxInPeriod == 0.0 then firstPxInPeriod = t.price
+    }
+    ev.as(Topics.Fill).filter(f => f.exchange == exchange && f.symbol == symbol).foreach { f =>
+      runPos += (if f.side == Side.Long then f.size else -f.size)
+      if f.timestamp >= startMs then
+        nFills += 1
+        fillBuf += ((f.timestamp, f.side, f.price, f.size))
+    }
+    ev.as(Topics.AccountInfo).foreach { info =>
+      if ev.exchangeTs >= startMs && info.equity > 0 then
+        if !baseSet then { baseEquity = info.equity; peakEquity = info.equity; baseSet = true }
+        if info.equity > peakEquity then peakEquity = info.equity
+        val dd = (peakEquity - info.equity) / peakEquity
+        if dd > maxDd then maxDd = dd
+        if !sampled || ev.exchangeTs - lastSampleTs >= sampleIntervalMs then
+          sampled = true
+          lastSampleTs = ev.exchangeTs
+          samples += ((ev.exchangeTs, info.equity, lastPx, runPos))
+    }
 
   def equitySamples: Vector[(Long, Double, Double, Double)] = samples.toVector
   def fills: Vector[(Long, Side, Double, Double)] = fillBuf.toVector

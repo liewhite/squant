@@ -106,6 +106,7 @@ final class BinanceClient(
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] =
     signedRequest[AccountResp](Method.GET, "/fapi/v2/account", Map.empty).map { account =>
       AccountInfo(
+        exchange,
         equity = account.totalMarginBalance.asDouble,
         notional = account.positions.map(p => math.abs(p.notional.asDouble)).sum,
       )

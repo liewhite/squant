@@ -3,7 +3,7 @@ package hft.exchange.binance
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
 import hft.exchange.{AccountStream, WsLoop}
-import hft.messaging.{EventBus, EventData, IncomeEvent}
+import hft.event.{Event, EventBus, Topics}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
 import ox.channels.Channel
@@ -35,10 +35,10 @@ final class BinanceAccountStream(
   override def exchange: Exchange = Exchange.Binance
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
-  private var bus: EventBus[IncomeEvent] = scala.compiletime.uninitialized
+  private var bus: EventBus = scala.compiletime.uninitialized
 
-  override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit =
-    bus = incomeBus
+  override def start(eventBus: EventBus)(using Ox): Unit =
+    bus = eventBus
     WsLoop.run("binance/private", backend, privateStreamUrl, outgoing, onPrivateText)
     fork {
       while true do
@@ -95,19 +95,19 @@ final class BinanceAccountStream(
       fillSize = o.l.asDouble,
       timestamp = o.T,
     )
-    bus.publish(IncomeEvent.at(msg.E, EventData.OrderUpdated(update)))
+    bus.publish(Event.at(Topics.OrderUpdate, update, msg.E))
     // 本次有成交 -> 同步发布 Fill 事件，乐观更新仓位
     if o.l.asDouble > 0 then
       val fill = Fill(Exchange.Binance, o.s, side, price = o.L.asDouble, size = o.l.asDouble, timestamp = o.T)
-      bus.publish(IncomeEvent.at(msg.E, EventData.FillUpdate(fill)))
+      bus.publish(Event.at(Topics.Fill, fill, msg.E))
 
   private def publishAccountUpdate(msg: AccountUpdateMsg): Unit =
     msg.a.B.foreach { b =>
       bus.publish(
-        IncomeEvent.at(msg.E, EventData.BalanceUpdate(Balance(Exchange.Binance, b.a, b.wb.asDouble, msg.E)))
+        Event.at(Topics.Balance, Balance(Exchange.Binance, b.a, b.wb.asDouble, msg.E), msg.E)
       )
     }
     msg.a.P.filter(_.ps == "BOTH").foreach { p =>
       val position = Position(Exchange.Binance, p.s, p.pa.asDouble, p.ep.asDouble, p.up.asDouble)
-      bus.publish(IncomeEvent.at(msg.E, EventData.PositionUpdate(position)))
+      bus.publish(Event.at(Topics.Position, position, msg.E))
     }

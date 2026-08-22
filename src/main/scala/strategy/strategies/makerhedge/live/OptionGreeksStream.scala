@@ -3,12 +3,13 @@ import strategy.utils.option.*
 
 import hft.domain.{Balance, Exchange, Greeks}
 import hft.exchange.AccountStream
-import hft.messaging.{EventBus, EventData, IncomeEvent}
+import hft.event.{Event, EventBus, Topics}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
+import hft.state.{StateManager}
 
-/** 把**期权账户净 greeks** 作为 [[AccountStream]] 注入实盘引擎的 income 总线 (与时钟/账户流同一条 bus)：
-  * 周期性经 [[OptionsExchange]] 查期权净 (delta,gamma) -> 发 [[EventData.GreeksUpdate]]。引擎里的对冲策略经
+/** 把**期权账户净 greeks** 作为 [[AccountStream]] 注入实盘引擎的 事件总线 (与时钟/账户流同一条 bus)：
+  * 周期性经 [[OptionsExchange]] 查期权净 (delta,gamma) -> 发 [[Topics.Greeks]] 事件。引擎里的对冲策略经
   * StateManager 读到, 与回测里 BsGreeksSource 喂 greeks 完全同机制。**交易所无关** (Bybit/OKX 共用), 对冲腿
   * 不必二次订阅行情——BBO 复用引擎已有的行情流, 这里只补一个期权 greeks 源。
   *
@@ -19,9 +20,9 @@ final class OptionGreeksStream(opt: OptionsExchange, exch: Exchange, ccy: String
   private val logger = LoggerFactory.getLogger(classOf[OptionGreeksStream])
   override def exchange: Exchange = exch
 
-  override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit =
+  override def start(eventBus: EventBus)(using Ox): Unit =
     // 同步兜底: 保证 cashBalances(ccy) 存在, 否则 StateManager.greeks 恒为 None -> 不对冲。真实现货余额(若有)随后覆盖。
-    incomeBus.publish(IncomeEvent.local(EventData.BalanceUpdate(Balance(exch, ccy, 0.0, System.currentTimeMillis))))
+    eventBus.publish(Event.local(Topics.Balance, Balance(exch, ccy, 0.0, System.currentTimeMillis)))
     fork {
       var fails = 0
       while true do
@@ -29,9 +30,7 @@ final class OptionGreeksStream(opt: OptionsExchange, exch: Exchange, ccy: String
           opt.optionAccountGreeks() match
             case Right((delta, gamma)) =>
               fails = 0
-              incomeBus.publish(IncomeEvent.local(EventData.GreeksUpdate(
-                Greeks(exch, ccy, delta = delta, gamma = gamma, theta = 0.0, vega = 0.0, timestamp = System.currentTimeMillis)
-              )))
+              eventBus.publish(Event.local(Topics.Greeks, Greeks(exch, ccy, delta = delta, gamma = gamma, theta = 0.0, vega = 0.0, timestamp = System.currentTimeMillis)))
             case Left(e) =>
               fails += 1
               if fails >= 3 then logger.error(s"!!! 期权 greeks 已连续 $fails 次轮询失败, 对冲在用陈旧 delta, 期权敞口可能失真, 请人工介入: $e")
@@ -44,4 +43,4 @@ final class OptionGreeksStream(opt: OptionsExchange, exch: Exchange, ccy: String
   * 按传入顺序 start (把 greeks 流的余额兜底排在永续账户流之前)。 */
 final class CompositeAccountStream(exch: Exchange, streams: Seq[AccountStream]) extends AccountStream:
   override def exchange: Exchange = exch
-  override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit = streams.foreach(_.start(incomeBus))
+  override def start(eventBus: EventBus)(using Ox): Unit = streams.foreach(_.start(eventBus))

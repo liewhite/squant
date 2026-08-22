@@ -4,8 +4,9 @@ import strategy.utils.hedge.{HedgeBand, HedgeCtx}
 import hft.domain.*
 import hft.exchange.SubscriptionKind
 import hft.indicator.{Atr, KlineSeries, Macd, RealizedVol, Sma}
-import hft.messaging.{EventData, IncomeEvent, StateManager}
+import hft.event.{AnyEvent, Interest, Topics}
 import hft.strategy.{OutcomeEvent, Strategy}
+import hft.state.{StateManager}
 
 /** **Maker (被动挂单) 对冲** —— 用 [[HedgeBand]] 决定**何时**对冲 (市价 take 的被动版), 执行改为
   * 在 **BBO 外** [[offsetPct]] (默认 0.01%) 挂 PostOnly 限价单 (省 taker 费 + 赚价差改善), [[requoteMs]] (默认 5s)
@@ -71,15 +72,16 @@ final class MakerHedgeStrategy(
       val t = i.toLong * barIntervalMs; klines.update(t, h); klines.update(t, l); klines.update(t, c)
     }
 
-  override def publicStreams: Map[Exchange, Set[SubscriptionKind]] =
-    Map(exchange -> Set(SubscriptionKind.BBO(symbol)))
+  override def interests: Set[Interest] =
+    Set(Interest.Keyed(Topics.Bbo, Set(Instrument(exchange, symbol))))
 
   // 订单超时需 > requote, 否则框架会先把我们的正常挂单当超时清理
   override def orderTimeoutMs: Long = requoteMs * 3
 
-  override def onEvent(event: IncomeEvent, state: StateManager): Vector[OutcomeEvent] =
-    event.data match
-      case EventData.OrderUpdated(u) if u.exchange == exchange && u.symbol == symbol =>
+  override def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] =
+    event
+      .as(Topics.OrderUpdate)
+      .map { u =>
         u.status match
           case OrderStatus.Pending | OrderStatus.PartiallyFilled(_) =>
             restingId = Some(u.orderId); restingAt = u.timestamp; awaitingAck = false
@@ -89,17 +91,21 @@ final class MakerHedgeStrategy(
             restingId = None; awaitingAck = false
           case OrderStatus.Created => () // 本地态, 等确认
         Vector.empty
-      case EventData.BboUpdate(b) if b.exchange == exchange && b.symbol == symbol =>
+      }
+      .orElse(event.as(Topics.Bbo).map { b =>
         val px = b.midPrice
         klines.update(b.timestamp, px)
         if center.isNaN then center = px
         manage(px, event.exchangeTs, state)
-      case EventData.GreeksUpdate(g) if g.exchange == exchange && g.ccy == ccy =>
+      })
+      // greeks 的路由键只到交易所，币种在载荷里，故 ccy 仍需自行判断
+      .orElse(event.as(Topics.Greeks).filter(_.ccy == ccy).map { _ =>
         state.symbolState(symbol).flatMap(_.bbo(exchange)).map { b =>
           greeksRefMid = b.midPrice // 记录本次 greeks 对应的现价, 供 gamma 修正
           manage(b.midPrice, event.exchangeTs, state)
         }.getOrElse(Vector.empty)
-      case _ => Vector.empty
+      })
+      .getOrElse(Vector.empty)
 
   private def manage(px: Price, now: Timestamp, state: StateManager): Vector[OutcomeEvent] =
     if awaitingAck then Vector.empty

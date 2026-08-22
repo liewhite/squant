@@ -10,7 +10,7 @@ import ox.supervised
 import sttp.client4.DefaultSyncBackend
 
 /** 永续 delta 对冲实盘启动器 (引擎集成版)。**复用实盘引擎**: BBO 走引擎已有的 BybitMarketStream (不二次订阅),
-  * 期权净 greeks 由 [[OptionGreeksStream]] 注入同一条 income 总线; 对冲用引擎原生的 [[MakerHedgeStrategy]]
+  * 期权净 greeks 由 [[OptionGreeksStream]] 注入同一条 事件总线; 对冲用引擎原生的 [[MakerHedgeStrategy]]
   * (MaAsym 带 maker 挂单 + 5s 重挂), 订单走引擎 outcomeBus (StrategyRunner 自动按 SymbolMeta 对齐精度)。
   * gammaAdjust=true: 两次 greeks 轮询间用引擎 BBO + gamma 一阶刷新 delta -> tick 级新鲜。
   *

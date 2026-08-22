@@ -1,7 +1,7 @@
 package hft.sim
 
 import hft.domain.*
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, EventBus, Topics}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
 import ox.channels.Source
@@ -10,9 +10,9 @@ import java.io.BufferedWriter
 import java.nio.file.{Files, Path, StandardOpenOption}
 import scala.util.control.NonFatal
 
-/** 成交记录器：订阅 income 总线、把每笔成交写入 CSV 并累计**已实现**利润。
+/** 成交记录器：订阅 事件总线、把每笔成交写入 CSV 并累计**已实现**利润。
   *
-  * 这是策略**之外**的旁路观察者——成交回报本就在 income 总线上广播 (EventBus 给每个订阅者
+  * 这是策略**之外**的旁路观察者——成交回报本就在 事件总线上广播 (EventBus 给每个订阅者
   * 独立 channel)，故记录 CSV 不与策略争抢事件、也不需要策略承担任何写文件副作用，策略保持纯粹。
   *
   * 利润核算复用 [[Ledger]] (同向加仓均价、反向平仓实现盈亏)，初始现金置 0，故 `ledger.cash`
@@ -49,12 +49,10 @@ final class FillRecorder(csvPath: Path):
   /** 同步观察一个事件：仅消费 FillUpdate 写 CSV + 累计利润。
     * 供实盘 fork 循环与回测单线程循环共用——本身无并发设施，调用方决定线程模型。
     */
-  def onEvent(ev: IncomeEvent): Unit = ev.data match
-    case EventData.FillUpdate(fill) => onFill(fill)
-    case _                          => ()
+  def onEvent(ev: AnyEvent): Unit = ev.as(Topics.Fill).foreach(onFill)
 
   /** 启动消费循环：在调用方作用域 fork 一条常驻虚拟线程，对每个事件调用 [[onEvent]]。 */
-  def run(events: Source[IncomeEvent])(using Ox): Unit =
+  def run(events: Source[AnyEvent])(using Ox): Unit =
     open()
     fork {
       try while true do onEvent(events.receive())

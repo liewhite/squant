@@ -6,30 +6,76 @@
 | 概念 | hft-engine-rs (Rust) | 本框架 (Scala) |
 |---|---|---|
 | 并发原语 | tokio task + kameo Actor | ox 虚拟线程 fork + Channel |
-| 消息投递 | kameo PubSub (unbounded mailbox) | `EventBus` (每订阅者一条 `Channel.unlimited`) |
+| 消息投递 | kameo PubSub (unbounded mailbox) | `EventBus` (按 (topic, key) 建索引，每订阅者一条 `Channel.unlimited`) |
+| 事件扩展 | 封闭 enum + `CustomEvent` (类型擦除, 复用行情的 scope) | 开放的 `Topic[K, P]` (自带路由键类型与载荷类型) |
 | 状态串行化 | actor mailbox | 每策略独占一个虚拟线程串行消费 |
 | 监督 | spawn_link 级联退出 | ox `supervised` 作用域级联取消 |
 | HTTP/WS | reqwest + tokio-tungstenite | sttp client4 `DefaultSyncBackend` (同步阻塞，虚拟线程友好) |
 
 ## 事件流
 
+只有**一条**总线。行情、账户回报、时钟、策略下单意图都是它上面的事件，区别只在 topic：
+
 ```
-Connector (WS) ──┐
-Clock ───────────┼─> incomeBus ─> Executor (Strategy + StateManager) ─> outcomeBus ─> OutcomeProcessor ─> REST
-                 │                                                                          │
-                 └────────────── OrderUpdate (撤单确认 / 下单失败回流) <─────────────────────┘
+Connector (WS) ──┐                    ┌─> Executor (Strategy + StateManager) ─┐
+Clock ───────────┼─> bus (topic 路由) ┤                                       │ OrderIntent
+执行回流 <────────┘                    └─> OutcomeProcessor ─> REST ────────────┘
 ```
 
-- **IncomeEvent**: 行情 (BBO/MarkPrice/IndexPrice/FundingRate)、账户 (Position/OrderUpdate/Fill/Balance/AccountInfo)、Clock。
-  symbol 级事件按 `(exchange, symbol)` 定向路由，账户级事件与 Clock 广播。
-- **OutcomeEvent**: 策略产出的 `PlaceOrders` / `CancelOrder` 信号。
+下单意图不会回流给策略 —— 策略压根不订阅 `OrderIntent`，隔离由订阅关系保证，不靠总线拓扑。
+
+### Topic: 事件的开放扩展点
+
+一个 `Topic[K, P]` 同时钉死两件事：这一族事件按什么**路由** (`K`)、载荷是什么**类型** (`P`)。
+新增事件类型只需声明一个 object，**框架一行不改**：
+
+```scala
+object AlphaSignal extends Topic[Symbol, Score]("alphaSignal"):
+  def keyOf(p: Score): Symbol = p.symbol
+```
+
+约定与保证：
+
+- **必须声明为 object**：框架按引用判别 topic 身份，这使"topic 相等 ⟹ 类型参数相同"成为结构保证，
+  `Event.as` 的类型还原才有依据。
+- **路由键由载荷派生** (`keyOf`)，`Event` 主构造器私有 —— 不存在"key 说 BTCUSDT、载荷里是 ETHUSDT"
+  的静默错投。
+- **消费侧用 `event.as(topic)`** 按 topic 还原静态类型，业务代码里不出现 `asInstanceOf`。
+
+内置 topic 的三档路由维度（见 `hft.event.Topics`）：
+
+| 维度 | topic | 说明 |
+|---|---|---|
+| `Instrument` | Bbo / Trade / MarkPrice / IndexPrice / FundingRate | 公共行情，需向交易所订阅 |
+| `Instrument` | Position / OrderUpdate / Fill | 私有回报，账户流推送 |
+| `Exchange` | Balance / AccountInfo / Greeks | 账户级读数 |
+| 无 | Clock | 全局节拍，用 `Interest.All` 订阅 |
+
+账户级读数**按交易所路由而非广播**，是一条越界防线：否则策略能读到自己没订阅的交易所的净值，
+而杠杆闸门正是拿净值算的。
+
+### 订阅是数据，不是谓词
+
+`Interest` / `Subscription` 是可枚举、可哈希的数据结构，因为同一份声明有三个下游：
+
+1. `EventBus` 据此建投递索引（两次哈希查表，不遍历订阅者）；
+2. 回测在单线程循环里用 `Subscription.accepts` 过滤（没有总线，但判据必须与实盘同一份）；
+3. `SubscriptionKind.from` 据此派生要向交易所订阅的行情流。
+
+写成 `Event => Boolean` 会同时丢掉可索引与可自省，后者意味着策略得把订阅范围再声明一遍 ——
+同一事实两处写，迟早错开。
+
+策略只声明公共行情，框架自动补齐**不该由策略选择**的三类订阅（见 `StrategyRunner.subscriptionFor`）：
+所声明标的的私有回报、所涉交易所的账户级读数、时钟。漏订一条 Fill 会让本地仓位与交易所静默发散，
+这种事不能留给策略作者记得。
 
 ## 模块结构 (`src/main/scala/hft/`)
 
 | 模块 | 职责 |
 |---|---|
 | `domain` | 纯数据模型: Order/Position/BBO/FundingRate/SymbolMeta 等，零行为依赖 |
-| `messaging` | `IncomeEvent`、`EventBus`、`SymbolState`/`StateManager` (策略视角的聚合状态) |
+| `event` | `Topic`/`Event`/`Interest`/`Subscription`/`EventBus` — 事件与投递的全部基础设施 |
+| `state` | `SymbolState`/`StateManager` (策略视角的聚合状态) |
 | `exchange` | 核心抽象: `ExchangeClient` (REST trait)、`ExchangeConnector` (WS trait)、`SubscriptionKind`、`WsLoop` (通用重连泵) |
 | `engine` | `Engine` (装配/生命周期)、`Executor` (策略运行器)、`OutcomeProcessor` (信号执行) |
 | `strategy` | `Strategy` trait + `OutcomeEvent`；`BboMakerStrategy` (BBO 外被动做市 + 杠杆率风控) |
@@ -67,7 +113,7 @@ ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内
 接入一个新交易所 = 实现 `ExchangeClient` + `ExchangeConnector`，框架其余部分零修改：
 
 - `ExchangeClient`: 同步 REST (下单/撤单/查持仓/查挂单/元数据)，错误以 `Either[ExchangeError, A]` 显式返回。
-- `ExchangeConnector`: 维护 WS 长连接，把原始推送解析为统一 `IncomeEvent` 发布到总线；
+- `ExchangeConnector`: 维护 WS 长连接，把原始推送解析为统一 `Event` 发布到总线；
   配置凭证时自动接入私有流；遵循 fail-fast 契约 (断线/解析失败即抛错终止)。
 
 编写一个新策略 = 实现 `Strategy` (声明订阅 + 纯函数式 `onEvent`)。
@@ -93,14 +139,14 @@ ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内
 
 ### 启动顺序保证 (addStrategies)
 
-1. Executor 订阅总线 (之后的事件不丢)
+1. Executor 按自己的 `Subscription` 订阅总线 (之后的事件不丢)
 2. REST 查初始持仓并发布 (未返回的 symbol 显式推 size=0)
 3. REST 查账户信息 (净值/名义价值) 并发布 (杠杆率等风控决策依赖)
 4. REST 查现有挂单并发布 (接管遗留订单)
 5. 向交易所订阅行情 (数据从此开始流动)
 
 账户净值随行情持续变动且无对应 WS 推送，Engine 以周期 REST 刷新
-(`accountRefreshMs`，默认 10s) 持续发布 `AccountInfoUpdate` 保证风控数据新鲜。
+(`accountRefreshMs`，默认 10s) 持续发布 `Topics.AccountInfo` 事件保证风控数据新鲜。
 注意净值最多滞后一个刷新周期，临界风控阈值 (如杠杆率上限) 应自留余量。
 
 dry-run 模式下信号以 Error 事件即时清理 pending，做市类策略会随行情 tick 高频空转，

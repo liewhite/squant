@@ -2,8 +2,8 @@ package hft.engine
 
 import hft.domain.*
 import hft.exchange.ExchangeClient
-import hft.messaging.{EventBus, EventData, IncomeEvent}
-import hft.strategy.OutcomeEvent
+import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
+import hft.strategy.{OrderIntent, OutcomeEvent}
 import ox.supervised
 
 /** OutcomeProcessor 的 fail-fast 语义:
@@ -34,59 +34,54 @@ class OutcomeProcessorSpec extends munit.FunSuite:
     clientOrderId = "c1",
   )
 
-  private def receivedError(incomeBus: EventBus[IncomeEvent], incomes: ox.channels.Source[IncomeEvent]): OrderUpdate =
-    incomes.receive() match
-      case IncomeEvent(_, _, EventData.OrderUpdated(u)) => u
-      case other                                        => fail(s"unexpected event: $other")
+  private def receivedError(incomes: ox.channels.Source[AnyEvent]): OrderUpdate =
+    val ev = incomes.receive()
+    ev.as(Topics.OrderUpdate).getOrElse(fail(s"unexpected event: $ev"))
 
   test("dry-run: 信号以 OrderUpdate(Error) 回流清理 pending"):
     supervised:
-      val incomeBus = EventBus[IncomeEvent]()
-      val outcomeBus = EventBus[OutcomeEvent]()
-      val incomes = incomeBus.subscribe()
+      val bus = EventBus()
+      val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
 
-      OutcomeProcessor(Map.empty, incomeBus, dryRun = true).run(outcomeBus.subscribe())
-      outcomeBus.publish(OutcomeEvent.PlaceOrders(Vector(order), "test"))
+      OutcomeProcessor(Map.empty, bus, dryRun = true).run()
+      bus.publish(Event.local(OrderIntent, OutcomeEvent.PlaceOrders(Vector(order), "test")))
 
-      val update = receivedError(incomeBus, incomes)
+      val update = receivedError(incomes)
       assertEquals(update.clientOrderId, Some("c1"))
       assert(update.status.isInstanceOf[OrderStatus.Error])
 
   test("交易所明确拒单 (4xx): OrderUpdate(Error) 事件回流策略"):
     supervised:
-      val incomeBus = EventBus[IncomeEvent]()
-      val outcomeBus = EventBus[OutcomeEvent]()
-      val incomes = incomeBus.subscribe()
+      val bus = EventBus()
+      val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
       val clients = Map[Exchange, ExchangeClient](Exchange.Binance -> StubClient(Left(ExchangeError.Http(400, """{"code":-2019,"msg":"Margin is insufficient."}"""))))
 
-      OutcomeProcessor(clients, incomeBus, dryRun = false).run(outcomeBus.subscribe())
-      outcomeBus.publish(OutcomeEvent.PlaceOrders(Vector(order), "test"))
+      OutcomeProcessor(clients, bus, dryRun = false).run()
+      bus.publish(Event.local(OrderIntent, OutcomeEvent.PlaceOrders(Vector(order), "test")))
 
-      val update = receivedError(incomeBus, incomes)
+      val update = receivedError(incomes)
       assertEquals(update.clientOrderId, Some("c1"))
       assert(update.status.isInstanceOf[OrderStatus.Error])
 
   test("网络错误下单结果不确定 -> 抛错终止作用域"):
     intercept[IllegalStateException] {
       supervised:
-        val incomeBus = EventBus[IncomeEvent]()
-        val outcomeBus = EventBus[OutcomeEvent]()
-        val incomes = incomeBus.subscribe()
+        val bus = EventBus()
+        val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
         val clients = Map[Exchange, ExchangeClient](Exchange.Binance -> StubClient(Left(ExchangeError.Network("connection reset"))))
 
-        OutcomeProcessor(clients, incomeBus, dryRun = false).run(outcomeBus.subscribe())
-        outcomeBus.publish(OutcomeEvent.PlaceOrders(Vector(order), "test"))
+        OutcomeProcessor(clients, bus, dryRun = false).run()
+        bus.publish(Event.local(OrderIntent, OutcomeEvent.PlaceOrders(Vector(order), "test")))
         incomes.receive() // 阻塞至下单 fork 失败取消作用域
     }
 
   test("策略引用未配置的交易所 -> 装配错误，作用域终止"):
     intercept[IllegalStateException] {
       supervised:
-        val incomeBus = EventBus[IncomeEvent]()
-        val outcomeBus = EventBus[OutcomeEvent]()
-        val incomes = incomeBus.subscribe()
+        val bus = EventBus()
+        val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
 
-        OutcomeProcessor(Map.empty, incomeBus, dryRun = false).run(outcomeBus.subscribe())
-        outcomeBus.publish(OutcomeEvent.PlaceOrders(Vector(order), "test"))
+        OutcomeProcessor(Map.empty, bus, dryRun = false).run()
+        bus.publish(Event.local(OrderIntent, OutcomeEvent.PlaceOrders(Vector(order), "test")))
         incomes.receive()
     }

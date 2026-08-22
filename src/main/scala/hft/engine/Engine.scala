@@ -1,9 +1,10 @@
 package hft.engine
 
 import hft.domain.*
+import hft.state.{StateManager, SymbolState}
 import hft.exchange.{AccountStream, ExchangeClient, MarketDataStream, SubscriptionKind}
-import hft.messaging.{EventBus, EventData, IncomeEvent}
-import hft.strategy.{OutcomeEvent, Strategy}
+import hft.event.{AnyEvent, Event, EventBus, Interest, Subscription, Topics}
+import hft.strategy.Strategy
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
 import ox.channels.Source
@@ -24,11 +25,14 @@ final case class ExchangeGateway(
   *
   * 事件流：
   * {{{
-  * Connector (WS) ──┐
-  * Clock ───────────┼─> incomeBus ─> Executor (Strategy + StateManager) ─> outcomeBus ─> OutcomeProcessor ─> REST
-  * 执行回流 <────────┘                                                                          │
-  *    └──────────────────────────────── OrderUpdate (撤单确认/下单失败) <───────────────────────┘
+  * Connector (WS) ──┐                    ┌─> Executor (Strategy + StateManager) ─┐
+  * Clock ───────────┼─> bus (topic 路由) ┤                                        │ OrderIntent
+  * 执行回流 <────────┘                    └─> OutcomeProcessor ─> REST ─────────────┘
   * }}}
+  *
+  * 只有**一条**总线：行情、账户回报、时钟、策略下单意图都是它上面的事件，只是 topic 不同。
+  * 投递按 (topic, key) 建索引，订阅者只收自己声明的那些 —— 下单意图不会回流给策略，
+  * 因为策略压根不订阅 [[hft.strategy.OrderIntent]]。
   *
   * 所有组件都是引擎所在 Ox 作用域内的虚拟线程 fork，任一组件崩溃将级联终止整个作用域，
   * 对应参考实现中 spawn_link + 级联退出的监督语义。
@@ -37,23 +41,23 @@ final class Engine private (
     clients: Map[Exchange, ExchangeClient],
     marketStreams: Map[Exchange, MarketDataStream],
     symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
-    incomeBus: EventBus[IncomeEvent],
-    outcomeBus: EventBus[OutcomeEvent],
+    bus: EventBus,
 )(using Ox):
   private val logger = LoggerFactory.getLogger(classOf[Engine])
 
-  /** 订阅 income 总线 (只读观察)，用于在策略**之外**消费事件 (如成交记录、监控)，
-    * 策略因此无需承担写文件等副作用。返回独立 Source；调用方负责在自己的作用域内 fork 消费。
-    * 须在关心的事件产生前订阅 (通常紧随 Engine.start、addStrategy 之前)。
+  /** 在策略**之外**订阅事件 (成交记录、监控、指标导出)，策略因此无需承担写文件等副作用。
+    *
+    * 返回独立 Source；调用方负责在自己的作用域内 fork 消费。须在关心的事件产生前订阅
+    * (通常紧随 [[Engine.start]]、在 [[addStrategies]] 之前)。
     */
-  def subscribeIncome(): Source[IncomeEvent] = incomeBus.subscribe()
+  def subscribe(interests: Set[Interest]): Source[AnyEvent] = bus.subscribe(interests)
 
   def addStrategy(strategy: Strategy): Unit = addStrategies(Vector(strategy))
 
   /** 批量添加策略。
     *
     * 启动顺序保证 (与参考实现一致)：
-    *   1. 创建 Executor 并订阅 income 总线 —— 之后发布的事件不会丢
+    *   1. 创建 Executor 并订阅 事件总线 —— 之后发布的事件不会丢
     *   2. REST 查询初始持仓并发布 —— 避免策略基于缺失仓位决策；
     *      交易所未返回的 symbol 显式推 size=0，保证 SymbolState 一定收到初始值
     *   3. REST 查询账户信息 (净值/名义价值) 并发布 —— 风控类决策 (杠杆率) 依赖
@@ -63,30 +67,25 @@ final class Engine private (
   def addStrategies(strategies: Seq[Strategy]): Unit =
     if strategies.isEmpty then return
 
-    // 1. 创建 Executor，订阅 income 总线
-    strategies.foreach { strategy =>
-      Executor(strategy, symbolMetas, outcomeBus).run(incomeBus.subscribe())
-    }
+    // 1. 创建 Executor，订阅总线
+    val executors = strategies.map(Executor(_, symbolMetas, bus))
+    executors.foreach(_.run())
 
-    // 收集所有策略涉及的订阅
-    val allSubscriptions: Set[(Exchange, SubscriptionKind)] =
-      strategies.toSet.flatMap { (s: Strategy) =>
-        s.publicStreams.toSet.flatMap { (exchange, kinds) => kinds.map((exchange, _)) }
-      }
-    val exchangeSymbols: Set[(Exchange, Symbol)] =
-      allSubscriptions.map((exchange, kind) => (exchange, kind.subscribedSymbol))
+    // 策略订阅范围的并集 —— 行情订阅与启动对齐都从这一处派生
+    val combined = Subscription(executors.flatMap(_.subscription.interests).toSet)
+    val instruments = combined.instruments
 
     // 2. 初始持仓
-    publishInitialPositions(exchangeSymbols)
+    publishInitialPositions(instruments)
 
     // 3. 初始账户信息
-    exchangeSymbols.map(_._1).foreach(exchange => publishAccountInfoFrom(requireClient(exchange)))
+    combined.exchanges.foreach(exchange => publishAccountInfoFrom(requireClient(exchange)))
 
     // 4. 现有挂单
-    publishExistingPendingOrders(exchangeSymbols)
+    publishExistingPendingOrders(instruments)
 
     // 5. 订阅行情
-    allSubscriptions.groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
+    SubscriptionKind.from(combined).groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
       marketStreams
         .getOrElse(exchange, throw IllegalStateException(s"No market data stream configured for exchange $exchange"))
         .subscribe(kinds)
@@ -97,13 +96,13 @@ final class Engine private (
   private def requireClient(exchange: Exchange): ExchangeClient =
     clients.getOrElse(exchange, throw IllegalStateException(s"No client configured for exchange $exchange"))
 
-  /** REST 查询账户信息并发布 AccountInfoUpdate。
+  /** REST 查询账户信息并发布 [[Topics.AccountInfo]] 事件。
     * 返回 false 表示该交易所未配置凭证 (无账户即无需刷新，确定安全)；其余失败致命
     */
   private def publishAccountInfoFrom(client: ExchangeClient): Boolean =
     client.fetchAccountInfo() match
       case Right(info) =>
-        incomeBus.publish(IncomeEvent.local(EventData.AccountInfoUpdate(client.exchange, info)))
+        bus.publish(Event.local(Topics.AccountInfo, info))
         true
       case Left(ExchangeError.Auth(_)) =>
         logger.info(s"No credentials for ${client.exchange}, skipping account info")
@@ -114,8 +113,8 @@ final class Engine private (
   /** 启动对齐必须成功 (fail-fast)，唯一的例外是未配置凭证：
     * 无账户即无仓位/挂单需要对齐，跳过是确定安全的 (公开数据演示/研究模式)
     */
-  private def publishInitialPositions(exchangeSymbols: Set[(Exchange, Symbol)]): Unit =
-    exchangeSymbols.groupMap(_._1)(_._2).foreach { (exchange, symbols) =>
+  private def publishInitialPositions(instruments: Set[Instrument]): Unit =
+    instruments.groupMap(_.exchange)(_.symbol).foreach { (exchange, symbols) =>
       requireClient(exchange).fetchPositions() match
         case Left(ExchangeError.Auth(_)) =>
           logger.info(s"No credentials for $exchange, skipping position alignment")
@@ -126,12 +125,12 @@ final class Engine private (
           symbols.foreach { symbol =>
             val pos = bySymbol.getOrElse(symbol, Position.empty(exchange, symbol))
             logger.info(s"Initial position loaded: $exchange $symbol size=${pos.size}")
-            incomeBus.publish(IncomeEvent.local(EventData.PositionUpdate(pos)))
+            bus.publish(Event.local(Topics.Position, pos))
           }
     }
 
-  private def publishExistingPendingOrders(exchangeSymbols: Set[(Exchange, Symbol)]): Unit =
-    exchangeSymbols.foreach { (exchange, symbol) =>
+  private def publishExistingPendingOrders(instruments: Set[Instrument]): Unit =
+    instruments.foreach { case Instrument(exchange, symbol) =>
       requireClient(exchange).fetchPendingOrders(symbol) match
         case Left(ExchangeError.Auth(_)) =>
           logger.info(s"No credentials for $exchange, skipping pending order alignment")
@@ -150,14 +149,14 @@ final class Engine private (
               quantity = meta.qtyToCoin(update.quantity),
               filledQuantity = meta.qtyToCoin(update.filledQuantity),
             )
-            incomeBus.publish(IncomeEvent.local(EventData.OrderUpdated(converted)))
+            bus.publish(Event.local(Topics.OrderUpdate, converted))
           }
     }
 
 object Engine:
   private val logger = LoggerFactory.getLogger(classOf[Engine])
 
-  /** 启动引擎：预加载交易对元数据 (失败即终止启动)、装配事件总线、
+  /** 启动引擎：预加载交易对元数据 (失败即终止启动)、装配事件总线 (只有一条)、
     * 启动信号处理器 / 时钟 / 账户信息刷新 / 各交易所连接器。
     *
     * @param accountRefreshMs 账户信息 (净值/名义价值) REST 刷新间隔；
@@ -184,24 +183,23 @@ object Engine:
             throw IllegalStateException(s"Failed to preload symbol metas from ${client.exchange}: ${e.message}")
       }.toMap
 
-    val incomeBus = EventBus[IncomeEvent]()
-    val outcomeBus = EventBus[OutcomeEvent]()
+    val bus = EventBus()
 
-    OutcomeProcessor(clients, incomeBus, dryRun).run(outcomeBus.subscribe())
+    OutcomeProcessor(clients, bus, dryRun).run()
 
     // 时钟: 周期性发布 Clock 事件 (驱动订单超时清理等定时任务)
     fork {
       while true do
         Thread.sleep(clockIntervalMs)
-        incomeBus.publish(IncomeEvent.local(EventData.Clock))
+        bus.publish(Event.local(Topics.Clock, ()))
     }
 
-    // 先启动账户流 (订阅 income 总线、建立私有连接)，再启动公共行情流——
+    // 先启动账户流 (订阅总线、建立私有连接)，再启动公共行情流——
     // 虚拟柜台同时扮演两者时，start 幂等，两次调用只生效一次
-    accountStreams.values.foreach(_.start(incomeBus))
-    marketStreams.values.foreach(_.start(incomeBus))
+    accountStreams.values.foreach(_.start(bus))
+    marketStreams.values.foreach(_.start(bus))
 
-    val engine = Engine(clients, marketStreams, symbolMetas, incomeBus, outcomeBus)
+    val engine = Engine(clients, marketStreams, symbolMetas, bus)
 
     // 账户信息周期刷新: 未配置凭证的交易所在首次拉取后退出轮询 (确定安全的例外)
     fork {

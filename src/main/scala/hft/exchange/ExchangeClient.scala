@@ -1,6 +1,7 @@
 package hft.exchange
 
 import hft.domain.*
+import hft.event.{Interest, Subscription, Topic, Topics}
 
 /** 订阅类型 (仅 public 行情需要订阅)。
   *
@@ -20,6 +21,47 @@ enum SubscriptionKind:
     case MarkPrice(s)   => s
     case IndexPrice(s)  => s
     case Trade(s)       => s
+
+object SubscriptionKind:
+  /** 公共行情 topic 与交易所流的对应关系 —— 唯一一张表。
+    *
+    * 私有回报与账户级读数不在其中：它们由账户流推送，不需要订阅。
+    */
+  private val streamOf: Vector[(Topic[Instrument, ?], Symbol => SubscriptionKind)] = Vector(
+    Topics.Bbo -> BBO.apply,
+    Topics.Trade -> Trade.apply,
+    Topics.MarkPrice -> MarkPrice.apply,
+    Topics.IndexPrice -> IndexPrice.apply,
+    Topics.FundingRate -> FundingRate.apply,
+  )
+
+  // 本表必须与 Topics.market 严格对应: 前者是"哪些 topic 需要向交易所订阅", 后者是
+  // "这些 topic 具体订哪条流"。分层不允许把两者合成一处 (Topics 在下层, 不能依赖本层),
+  // 故用加载期断言钉住 —— 新增一个行情 topic 却忘了给它映射, 立即失败而不是静默不订阅。
+  require(
+    streamOf.map(_._1).toSet == Topics.market,
+    s"streamOf 与 Topics.market 不一致: 表内=${streamOf.map(_._1.name).sorted}, 应为=${Topics.market.map(_.name).toVector.sorted}",
+  )
+
+  /** 从订阅范围派生出要向各交易所订阅的公共行情流。
+    *
+    * 这是"一处声明、两处派生"的第二处 (第一处是总线的投递索引)：策略只写一遍
+    * [[Interest]]，行情订阅与事件过滤都从它来，不存在两份声明错开的可能。
+    */
+  def from(subscription: Subscription): Set[(Exchange, SubscriptionKind)] =
+    subscription.interests.foreach {
+      case Interest.All(t) if streamOf.exists(_._1 eq t) =>
+        sys.error(
+          s"公共行情 topic '$t' 只能用 Interest.Keyed 声明: Interest.All 没有标的集合, " +
+            "框架无从知道该向交易所订阅哪些流"
+        )
+      case _ => ()
+    }
+    streamOf.flatMap { (topic, mkKind) =>
+      subscription.interests
+        .flatMap(_.keysOf(topic))
+        .map(instrument => (instrument.exchange, mkKind(instrument.symbol)))
+    }.toSet
 
 /** 交易所客户端统一接口，仅封装 REST 交互。
   *

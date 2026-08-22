@@ -1,7 +1,7 @@
 package hft.sim
 
 import hft.domain.*
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, Event, Topics}
 
 import scala.collection.mutable
 
@@ -63,20 +63,19 @@ final case class SimState(
     * 第一个事件即转发给策略的行情, 其后是本次行情触发的成交回报 (保证行情先于成交)。
     * `now` 为当前时刻 (回测虚拟时间 / 实盘墙钟)，成交回报的时间戳取自它。
     */
-  def onMarket(exchange: Exchange, ev: IncomeEvent, now: Timestamp): (SimState, Vector[IncomeEvent]) =
-    ev.data match
-      case EventData.BboUpdate(bbo) =>
-        val withBbo = copy(lastBbo = lastBbo.updated(bbo.symbol, bbo))
-        val (next, fills) = withBbo.matchCrossing(exchange, bbo, now)
-        (next, ev +: fills)
-      case EventData.MarkPriceUpdate(mp) =>
-        (copy(lastMark = lastMark.updated(mp.symbol, mp.price)), Vector(ev))
-      case EventData.MarketTradeUpdate(t) =>
-        // trade-print 撮合：真实成交价严格越过挂单价即成交 (无 bbo 行情时的撮合来源)
-        val withTrade = copy(lastTrade = lastTrade.updated(t.symbol, t.price))
-        val (next, fills) = withTrade.matchTrade(exchange, t, now)
-        (next, ev +: fills)
-      case _ => (this, Vector(ev))
+  def onMarket(exchange: Exchange, ev: AnyEvent, now: Timestamp): (SimState, Vector[AnyEvent]) =
+    ev.as(Topics.Bbo).map { bbo =>
+      val withBbo = copy(lastBbo = lastBbo.updated(bbo.symbol, bbo))
+      val (next, fills) = withBbo.matchCrossing(exchange, bbo, now)
+      (next, ev +: fills)
+    }.orElse(ev.as(Topics.MarkPrice).map { mp =>
+      (copy(lastMark = lastMark.updated(mp.symbol, mp.price)), Vector(ev))
+    }).orElse(ev.as(Topics.Trade).map { t =>
+      // trade-print 撮合：真实成交价严格越过挂单价即成交 (无 bbo 行情时的撮合来源)
+      val withTrade = copy(lastTrade = lastTrade.updated(t.symbol, t.price))
+      val (next, fills) = withTrade.matchTrade(exchange, t, now)
+      (next, ev +: fills)
+    }).getOrElse((this, Vector(ev)))
 
   /** 收集越价挂单, 按 (价格, 到达序) 优先级排序 (更激进者先成交, 同价 FIFO)，杜绝 HashMap 哈希序。
     * 单趟扫描 valuesIterator；无匹配 (绝大多数行情) 零分配快速返回；单张免排序。 */
@@ -93,10 +92,10 @@ final case class SimState(
     else buf.sortInPlaceBy(o => (o.pricePriority, o.seq)).toVector
 
   /** 把按优先级排好序的越价挂单依次成交 (maker 成交价取挂单价)。 */
-  private def fillCrossed(exchange: Exchange, crossed: Vector[RestingOrder], now: Timestamp): (SimState, Vector[IncomeEvent]) =
+  private def fillCrossed(exchange: Exchange, crossed: Vector[RestingOrder], now: Timestamp): (SimState, Vector[AnyEvent]) =
     if crossed.isEmpty then (this, Vector.empty)
     else
-      crossed.foldLeft((this, Vector.empty[IncomeEvent])) { case ((st, evs), o) =>
+      crossed.foldLeft((this, Vector.empty[AnyEvent])) { case ((st, evs), o) =>
         val (next, fillEvs) = st
           .copy(resting = st.resting - o.orderId)
           .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, now, Liquidity.Maker, o.reduceOnly)
@@ -104,17 +103,17 @@ final case class SimState(
       }
 
   /** BBO 越过挂单价的全部挂单成交 (maker 成交价取挂单价) */
-  private def matchCrossing(exchange: Exchange, bbo: BBO, now: Timestamp): (SimState, Vector[IncomeEvent]) =
+  private def matchCrossing(exchange: Exchange, bbo: BBO, now: Timestamp): (SimState, Vector[AnyEvent]) =
     fillCrossed(exchange, crossingOrders(o => o.symbol == bbo.symbol && Matcher.crosses(o.side, o.limitPrice, bbo)), now)
 
   /** 真实成交严格越过挂单价的全部挂单成交 (maker 成交价取挂单价) */
-  private def matchTrade(exchange: Exchange, t: MarketTrade, now: Timestamp): (SimState, Vector[IncomeEvent]) =
+  private def matchTrade(exchange: Exchange, t: MarketTrade, now: Timestamp): (SimState, Vector[AnyEvent]) =
     fillCrossed(exchange, crossingOrders(o => o.symbol == t.symbol && Matcher.tradeCrosses(o.side, o.limitPrice, t.price)), now)
 
   // ==================== 下单到达撮合 ====================
 
   /** 订单到达撮合：按类型/TIF 决定 resting / 成交 / 拒单。`now` 为到达时刻 (回报时间戳取自它) */
-  def onOrderArrived(exchange: Exchange, order: Order, orderId: OrderId, now: Timestamp): (SimState, Vector[IncomeEvent]) =
+  def onOrderArrived(exchange: Exchange, order: Order, orderId: OrderId, now: Timestamp): (SimState, Vector[AnyEvent]) =
     val bboOpt = lastBbo.get(order.symbol)
     order.orderType match
       case OrderType.Market =>
@@ -145,22 +144,21 @@ final case class SimState(
               case None    => (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Cancelled, limit, now)))
 
   /** 撤单到达撮合：仍在簿则移除并回报 Cancelled；已成交 (不在簿) 则无事发生。`now` 为到达时刻 */
-  def onCancelArrived(exchange: Exchange, orderId: OrderId, now: Timestamp): (SimState, Vector[IncomeEvent]) =
+  def onCancelArrived(exchange: Exchange, orderId: OrderId, now: Timestamp): (SimState, Vector[AnyEvent]) =
     resting.get(orderId) match
       case Some(o) =>
-        val ev = IncomeEvent(
+        val ev = Event.stamped(
+          Topics.OrderUpdate,
+          OrderUpdate(orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, 0.0, 0.0, now),
           now,
           now,
-          EventData.OrderUpdated(
-            OrderUpdate(orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, 0.0, 0.0, now)
-          ),
         )
         (copy(resting = resting - orderId), Vector(ev))
       case None => (this, Vector.empty)
 
   // ==================== 私有构造 ====================
 
-  private def rest(exchange: Exchange, order: Order, orderId: OrderId, limit: Price, now: Timestamp): (SimState, Vector[IncomeEvent]) =
+  private def rest(exchange: Exchange, order: Order, orderId: OrderId, limit: Price, now: Timestamp): (SimState, Vector[AnyEvent]) =
     val ro = RestingOrder(orderId, order.clientOrderId, order.symbol, order.side, limit, order.quantity, order.reduceOnly, restingSeq)
     (copy(resting = resting.updated(orderId, ro), restingSeq = restingSeq + 1), Vector(statusEvent(exchange, order, orderId, OrderStatus.Pending, limit, now)))
 
@@ -179,7 +177,7 @@ final case class SimState(
       now: Timestamp,
       liquidity: Liquidity,
       reduceOnly: Boolean,
-  ): (SimState, Vector[IncomeEvent]) =
+  ): (SimState, Vector[AnyEvent]) =
     val effectiveQty =
       if !reduceOnly then qty
       else
@@ -190,7 +188,7 @@ final case class SimState(
     if reduceOnly && effectiveQty <= Position.Epsilon then
       // reduceOnly 无可平仓位 -> 不成交，回 Cancelled (订单已被调用方移出簿 / 不入簿)
       val update = OrderUpdate(orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Cancelled, fillPrice, qty, 0.0, 0.0, now)
-      (this, Vector(IncomeEvent(now, now, EventData.OrderUpdated(update))))
+      (this, Vector(Event.stamped(Topics.OrderUpdate, update, now, now)))
     else
       val feeRate = liquidity match
         case Liquidity.Maker => makerFeeRate
@@ -199,15 +197,14 @@ final case class SimState(
       val next = copy(ledger = ledger.applyFill(exchange, symbol, side, fillPrice, effectiveQty, fee))
       val update = OrderUpdate(orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, effectiveQty, now)
       val f = Fill(exchange, symbol, side, fillPrice, effectiveQty, now)
-      (next, Vector(IncomeEvent(now, now, EventData.OrderUpdated(update)), IncomeEvent(now, now, EventData.FillUpdate(f))))
+      (next, Vector(Event.stamped(Topics.OrderUpdate, update, now, now), Event.stamped(Topics.Fill, f, now, now)))
 
-  private def statusEvent(exchange: Exchange, order: Order, orderId: OrderId, status: OrderStatus, price: Price, now: Timestamp): IncomeEvent =
-    IncomeEvent(
+  private def statusEvent(exchange: Exchange, order: Order, orderId: OrderId, status: OrderStatus, price: Price, now: Timestamp): AnyEvent =
+    Event.stamped(
+      Topics.OrderUpdate,
+      OrderUpdate(orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, 0.0, 0.0, now),
       now,
       now,
-      EventData.OrderUpdated(
-        OrderUpdate(orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, 0.0, 0.0, now)
-      ),
     )
 
 object SimState:

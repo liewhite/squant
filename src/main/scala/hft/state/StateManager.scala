@@ -1,6 +1,7 @@
-package hft.messaging
+package hft.state
 
 import hft.domain.*
+import hft.event.{AnyEvent, Topic, Topics}
 
 import scala.collection.mutable
 
@@ -65,23 +66,38 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long):
 
   // ==================== 事件处理 ====================
 
-  /** 处理事件，更新状态 */
-  def apply(event: IncomeEvent): Unit = event.data match
-    case EventData.BalanceUpdate(balance) =>
+  /** 按 topic 更新状态。
+    *
+    * 账户级读数 (余额/净值/希腊值) 与标的事件分两路：前者按交易所存，后者按 symbol 委托
+    * 给对应的 [[SymbolState]]。事件能到达这里就说明订阅声明里有它，故标的必然已注册 ——
+    * 找不到只可能是路由 bug，立即暴露而不是静默丢弃。
+    */
+  def apply(event: AnyEvent): Unit =
+    event.as(Topics.Balance).foreach { balance =>
       if balance.asset == USDT then balances(balance.exchange) = balance.available
       // 所有币种余额都缓存一份，供 greeks delta 的现货修正使用 (ccy 即 asset)
       cashBalances((balance.exchange, balance.asset)) = balance.available
-    case EventData.AccountInfoUpdate(exchange, info) =>
-      accountInfos(exchange) = info
-    case EventData.GreeksUpdate(g) =>
-      greeksRaw((g.exchange, g.ccy)) = g
-    case EventData.Clock =>
-      states.values.foreach(_.failOnTimedOutOrders(event.localTs, orderTimeoutMs))
-    case _ =>
-      // Symbol 事件: 委托对应 SymbolState 处理。
-      // 事件已由 Executor 按 (exchange, symbol) 过滤，symbol 必然已注册，
-      // 查找失败说明路由逻辑有 bug，应立即暴露
-      val symbol = event.symbol.getOrElse(sys.error(s"Symbol event must have symbol: $event"))
-      states
-        .getOrElse(symbol, sys.error(s"Symbol not found in StateManager (routing bug): $symbol"))
-        .apply(event)
+    }
+    event.as(Topics.AccountInfo).foreach(info => accountInfos(info.exchange) = info)
+    event.as(Topics.Greeks).foreach(g => greeksRaw((g.exchange, g.ccy)) = g)
+    event.as(Topics.Clock).foreach(_ => states.values.foreach(_.failOnTimedOutOrders(event.localTs, orderTimeoutMs)))
+    // 只有框架内置的按标的路由 topic 才进 SymbolState。用户自定义的、同样以 Instrument 为 key
+    // 的 topic (如订阅别的策略在某标的上的指标) 不代表交易该标的，其标的未必注册过 ——
+    // 不加这道判别的话，它的首条事件就会撞上下面的 fail-fast 把引擎拉崩。
+    if StateManager.instrumentTopics.contains(event.topic) then
+      event.key match
+        case instrument: Instrument =>
+          states
+            .getOrElse(
+              instrument.symbol,
+              sys.error(
+                s"Symbol not found in StateManager (routing bug): $instrument —— " +
+                  "策略若要交易该标的, 需为它声明至少一条公共行情 Interest"
+              ),
+            )
+            .apply(event)
+        case _ => ()
+
+object StateManager:
+  /** 框架内置的按标的路由 topic —— 只有它们的事件进 [[SymbolState]] */
+  private val instrumentTopics: Set[Topic[?, ?]] = (Topics.market ++ Topics.instrumentPrivate).toSet

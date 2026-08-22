@@ -2,7 +2,7 @@ package strategy.strategies.gridsellhedge.backtest
 
 import hft.backtest.{BinanceDataKind, BinanceHistory}
 import hft.domain.{Exchange, Side}
-import hft.messaging.EventData
+import hft.event.Topics
 import strategy.strategies.gridsellhedge.logic.DynamicHedgeBand
 import strategy.utils.viz.EquityChartHtml
 import sttp.client4.DefaultSyncBackend
@@ -71,11 +71,10 @@ import java.time.LocalDate
       .source(backend, Seq(symbol), start, end, kinds = Seq(BinanceDataKind.Trades), cacheDir = cacheDir)
       .events()
     while it.hasNext do
-      it.next().data match
-        case EventData.MarketTradeUpdate(t) if t.symbol == symbol =>
-          sim.onPrice(t.price, t.timestamp)
-          n += 1
-        case _ => ()
+      it.next().as(Topics.Trade).filter(_.symbol == symbol).foreach { t =>
+        sim.onPrice(t.price, t.timestamp)
+        n += 1
+      }
   finally backend.close()
 
   report(symbol, config, sim, start, end, n, (System.nanoTime() - t0) / 1e9)

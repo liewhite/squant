@@ -2,11 +2,10 @@ package hft.engine
 
 import hft.domain.*
 import hft.exchange.ExchangeClient
-import hft.messaging.{EventBus, EventData, IncomeEvent}
-import hft.strategy.OutcomeEvent
+import hft.event.{Event, EventBus, Interest, Topics}
+import hft.strategy.{OrderIntent, OutcomeEvent}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
-import ox.channels.Source
 
 /** 信号处理器：消费策略信号，调用交易所 REST API 执行下单/撤单。
   *
@@ -20,17 +19,23 @@ import ox.channels.Source
   */
 final class OutcomeProcessor(
     clients: Map[Exchange, ExchangeClient],
-    incomeBus: EventBus[IncomeEvent],
+    bus: EventBus,
     dryRun: Boolean,
 ):
   private val logger = LoggerFactory.getLogger(classOf[OutcomeProcessor])
 
-  /** 启动信号消费循环 */
-  def run(signals: Source[OutcomeEvent])(using Ox): Unit =
+  /** 订阅下单意图并启动执行循环。
+    *
+    * 全量订阅 [[OrderIntent]] —— 它是唯一通往交易所的出口，没有"只执行一部分信号"的语义。
+    */
+  def run()(using Ox): Unit =
     if dryRun then logger.warn("OutcomeProcessor started in DRY-RUN mode (orders will NOT be placed)")
     else logger.info("OutcomeProcessor started")
+    val signals = bus.subscribe(Set(Interest.All(OrderIntent)))
     fork {
-      while true do handle(signals.receive())
+      while true do
+        val event = signals.receive()
+        event.as(OrderIntent).foreach(handle)
     }
     ()
 
@@ -107,7 +112,7 @@ final class OutcomeProcessor(
       fillSize = 0.0,
       timestamp = nowMs,
     )
-    incomeBus.publish(IncomeEvent.local(EventData.OrderUpdated(update)))
+    bus.publish(Event.local(Topics.OrderUpdate, update))
 
   private def describe(order: Order): String =
     s"${order.exchange} ${order.symbol} ${order.side} ${order.orderType} qty=${order.quantity} " +

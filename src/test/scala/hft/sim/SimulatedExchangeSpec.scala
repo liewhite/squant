@@ -3,12 +3,13 @@ package hft.sim
 import hft.domain.*
 import hft.engine.{Engine, ExchangeGateway}
 import hft.exchange.{ExchangeClient, MarketDataStream, SubscriptionKind}
-import hft.messaging.{EventBus, EventData, IncomeEvent, StateManager}
+import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.strategy.{OutcomeEvent, Strategy}
 import ox.{Ox, fork, supervised}
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.jdk.CollectionConverters.*
+import hft.state.StateManager
 
 /** 虚拟柜台撮合与延迟的测试，以及"策略无感知"的端到端集成。 */
 class SimulatedExchangeSpec extends munit.FunSuite:
@@ -21,26 +22,25 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   private class OneShotMakerStrategy(ex: Exchange, symbol: Symbol, offsetRatio: Double, orderSize: Quantity) extends Strategy:
     private var placed = false
     override def orderTimeoutMs: Long = 60_000
-    override def publicStreams: Map[Exchange, Set[SubscriptionKind]] = Map(ex -> Set(SubscriptionKind.BBO(symbol)))
-    override def onEvent(event: IncomeEvent, state: StateManager): Vector[OutcomeEvent] =
-      event.data match
-        case EventData.BboUpdate(b) if !placed && b.exchange == ex && b.symbol == symbol =>
-          placed = true
-          val buyPx = b.bidPrice * (1.0 - offsetRatio) // 买一下方, PostOnly 静止挂单
-          Vector(OutcomeEvent.PlaceOrders(
-            Vector(Order("", ex, symbol, Side.Long, OrderType.Limit(buyPx, TimeInForce.PostOnly), orderSize, reduceOnly = false, clientOrderId = "")),
-            "oneshot maker buy",
-          ))
-        case _ => Vector.empty
+    override def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(Instrument(ex, symbol))))
+    override def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] =
+      event.as(Topics.Bbo).filter(_ => !placed).map { b =>
+        placed = true
+        val buyPx = b.bidPrice * (1.0 - offsetRatio) // 买一下方, PostOnly 静止挂单
+        OutcomeEvent.PlaceOrders(
+          Vector(Order("", ex, symbol, Side.Long, OrderType.Limit(buyPx, TimeInForce.PostOnly), orderSize, reduceOnly = false, clientOrderId = "")),
+          "oneshot maker buy",
+        )
+      }.toVector
 
   /** 可手动喂行情的假上游公共流 */
   private class FakeMarketStream extends MarketDataStream:
-    @volatile private var bus: EventBus[IncomeEvent] = scala.compiletime.uninitialized
+    @volatile private var bus: EventBus = scala.compiletime.uninitialized
     override def exchange: Exchange = Exchange.Binance
-    override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit = bus = incomeBus
+    override def start(eventBus: EventBus)(using Ox): Unit = bus = eventBus
     override def subscribe(kinds: Set[SubscriptionKind]): Unit = ()
     def emitBbo(bid: Price, ask: Price, ts: Timestamp): Unit =
-      bus.publish(IncomeEvent.at(ts, EventData.BboUpdate(BBO(Exchange.Binance, sym, bid, 1.0, ask, 1.0, ts))))
+      bus.publish(Event.at(Topics.Bbo, BBO(Exchange.Binance, sym, bid, 1.0, ask, 1.0, ts), ts))
 
   /** 只提供 symbol 元数据的桩 REST 客户端 (其余账户接口由柜台覆盖, 不应被调用) */
   private class StubPublicClient extends ExchangeClient:
@@ -55,17 +55,17 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     override def fetchPositions() = unused
 
   /** 订阅总线并把事件收集到队列；返回收集器 (须在产生事件前调用) */
-  private def collect(bus: EventBus[IncomeEvent])(using Ox): ConcurrentLinkedQueue[IncomeEvent] =
-    val q = ConcurrentLinkedQueue[IncomeEvent]()
-    val src = bus.subscribe()
+  private def collect(bus: EventBus)(using Ox): ConcurrentLinkedQueue[AnyEvent] =
+    val q = ConcurrentLinkedQueue[AnyEvent]()
+    val src = bus.subscribe(Topics.market.map(Interest.All) ++ Topics.instrumentPrivate.map(Interest.All))
     fork { while true do q.add(src.receive()) }
     q
 
-  private def fills(q: ConcurrentLinkedQueue[IncomeEvent]): Vector[Fill] =
-    q.asScala.collect { case IncomeEvent(_, _, EventData.FillUpdate(f)) => f }.toVector
+  private def fills(q: ConcurrentLinkedQueue[AnyEvent]): Vector[Fill] =
+    q.asScala.flatMap(_.as(Topics.Fill)).toVector
 
-  private def orderStatuses(q: ConcurrentLinkedQueue[IncomeEvent]): Vector[OrderStatus] =
-    q.asScala.collect { case IncomeEvent(_, _, EventData.OrderUpdated(u)) => u.status }.toVector
+  private def orderStatuses(q: ConcurrentLinkedQueue[AnyEvent]): Vector[OrderStatus] =
+    q.asScala.flatMap(_.as(Topics.OrderUpdate)).map(_.status).toVector
 
   private def limitOrder(side: Side, price: Price, tif: TimeInForce, cid: String): Order =
     Order("", Exchange.Binance, sym, side, OrderType.Limit(price, tif), 0.002, reduceOnly = false, clientOrderId = cid)
@@ -74,7 +74,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     supervised:
       val market = FakeMarketStream()
       val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000))
-      val bus = EventBus[IncomeEvent]()
+      val bus = EventBus()
       val q = collect(bus)
       sim.start(bus)
 
@@ -98,7 +98,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     supervised:
       val market = FakeMarketStream()
       val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000))
-      val bus = EventBus[IncomeEvent]()
+      val bus = EventBus()
       val q = collect(bus)
       sim.start(bus)
 
@@ -117,7 +117,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     supervised:
       val market = FakeMarketStream()
       val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000))
-      val bus = EventBus[IncomeEvent]()
+      val bus = EventBus()
       val q = collect(bus)
       sim.start(bus)
 
@@ -136,7 +136,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     supervised:
       val market = FakeMarketStream()
       val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000))
-      val bus = EventBus[IncomeEvent]()
+      val bus = EventBus()
       val q = collect(bus)
       sim.start(bus)
 
@@ -156,7 +156,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     supervised:
       val market = FakeMarketStream()
       val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(exchangeToStrategyDelayMs = 250, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000))
-      val bus = EventBus[IncomeEvent]()
+      val bus = EventBus()
       val q = collect(bus)
       sim.start(bus)
 

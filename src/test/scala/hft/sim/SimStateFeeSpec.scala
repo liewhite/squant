@@ -1,7 +1,7 @@
 package hft.sim
 
 import hft.domain.*
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, Event, Topics}
 
 /** 撮合手续费单测：maker/taker 成交按对应费率扣现金，非成交路径 (拒单/撤单) 不扣费。 */
 class SimStateFeeSpec extends munit.FunSuite:
@@ -12,8 +12,8 @@ class SimStateFeeSpec extends munit.FunSuite:
   private val initCash = 10_000.0
 
   private def state = SimState.empty(initCash, makerFee, takerFee)
-  private def bboEv(bid: Price, ask: Price, ts: Timestamp): IncomeEvent =
-    IncomeEvent(ts, ts, EventData.BboUpdate(BBO(ex, sym, bid, 1.0, ask, 1.0, ts)))
+  private def bboEv(bid: Price, ask: Price, ts: Timestamp): AnyEvent =
+    Event.stamped(Topics.Bbo, BBO(ex, sym, bid, 1.0, ask, 1.0, ts), ts, ts)
   private def order(side: Side, ot: OrderType, qty: Quantity): Order =
     Order("", ex, sym, side, ot, qty, reduceOnly = false, clientOrderId = "c1")
   private def near(a: Double, b: Double): Unit = assert(math.abs(a - b) < 1e-9, s"expected $b got $a")

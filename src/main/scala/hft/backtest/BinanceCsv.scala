@@ -1,7 +1,7 @@
 package hft.backtest
 
 import hft.domain.*
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, Event, Topic, Topics}
 
 import java.io.{BufferedReader, ByteArrayInputStream, InputStreamReader}
 import java.util.zip.ZipInputStream
@@ -19,21 +19,21 @@ import scala.collection.mutable.ArrayBuffer
 object BinanceCsv:
 
   /** 解析 bookTicker zip 字节为 BBO 事件 (单文件全量物化；调用方按天合并排序)。 */
-  def parseBookTicker(symbol: Symbol, zipBytes: Array[Byte]): Vector[IncomeEvent] =
+  def parseBookTicker(symbol: Symbol, zipBytes: Array[Byte]): Vector[AnyEvent] =
     mapRows(zipBytes)(bookTickerRow(symbol))
 
   /** 解析 trades zip 字节为 MarketTrade 事件 (全量物化)。 */
-  def parseTrades(symbol: Symbol, zipBytes: Array[Byte]): Vector[IncomeEvent] =
+  def parseTrades(symbol: Symbol, zipBytes: Array[Byte]): Vector[AnyEvent] =
     mapRows(zipBytes)(tradeRow(symbol))
 
   /** 流式解析 trades zip：逐行产出，消费即可 GC，常驻内存仅为 zip 字节本身 (不物化整日 Vector)。
     * 单 trades 文件按 id/时间升序，故无需排序——仅供单 symbol、按天已天然有序的场景。
     * 注意：迭代器在读尽时自动关闭底层流；若**提前弃用**则不会关闭 (回测引擎总会读尽，无虞)。
     */
-  def streamTrades(symbol: Symbol, zipBytes: Array[Byte]): Iterator[IncomeEvent] =
+  def streamTrades(symbol: Symbol, zipBytes: Array[Byte]): Iterator[AnyEvent] =
     streamRows(zipBytes)(tradeRow(symbol))
 
-  private def bookTickerRow(symbol: Symbol)(line: String): IncomeEvent =
+  private def bookTickerRow(symbol: Symbol)(line: String): AnyEvent =
     val f = line.split(",")
     val bbo = BBO(
       exchange = Exchange.Binance,
@@ -46,11 +46,11 @@ object BinanceCsv:
     )
     // 历史事件的 localTs 即其历史发生时刻 (= exchangeTs)，不取墙钟：既诚实
     // (延迟由回测引擎建模，源数据无网络延迟) 又保证回测确定性。
-    historical(bbo.timestamp, EventData.BboUpdate(bbo))
+    historical(Topics.Bbo, bbo, bbo.timestamp)
 
   /** trades 是回测热路径 (单 symbol 月级达数千万行)，故单趟切片只取所需列、不物化整行 split 数组。
     * 列: id(0),price(1),qty(2),quote_qty(3),time(4),is_buyer_maker(5)；切片子串与 split 完全一致, 解析值逐位相同。 */
-  private def tradeRow(symbol: Symbol)(line: String): IncomeEvent =
+  private def tradeRow(symbol: Symbol)(line: String): AnyEvent =
     val c0 = line.indexOf(',')
     val c1 = line.indexOf(',', c0 + 1)
     val c2 = line.indexOf(',', c1 + 1)
@@ -64,19 +64,19 @@ object BinanceCsv:
       isBuyerMaker = line.substring(c4 + 1).trim.equalsIgnoreCase("true"),
       timestamp = line.substring(c3 + 1, c4).toLong,
     )
-    historical(trade.timestamp, EventData.MarketTradeUpdate(trade))
+    historical(Topics.Trade, trade, trade.timestamp)
 
   /** 历史事件构造：localTs == exchangeTs (见上)。 */
-  private def historical(ts: Long, data: EventData): IncomeEvent = IncomeEvent(ts, ts, data)
+  private def historical[K, P](topic: Topic[K, P], payload: P, ts: Long): AnyEvent = Event.stamped(topic, payload, ts, ts)
 
   /** 解压 zip 内单一 CSV，逐行映射 (行解析器自行切字段)；自动跳过表头行 (首字段非数字)。 */
-  private def mapRows(zipBytes: Array[Byte])(f: String => IncomeEvent): Vector[IncomeEvent] =
+  private def mapRows(zipBytes: Array[Byte])(f: String => AnyEvent): Vector[AnyEvent] =
     val zis = ZipInputStream(ByteArrayInputStream(zipBytes))
     try
       if zis.getNextEntry == null then Vector.empty
       else
         val reader = BufferedReader(InputStreamReader(zis))
-        val out = ArrayBuffer.empty[IncomeEvent]
+        val out = ArrayBuffer.empty[AnyEvent]
         var line = reader.readLine()
         while line != null do
           if line.nonEmpty && isDataRow(line) then out += f(line)
@@ -85,14 +85,14 @@ object BinanceCsv:
     finally zis.close()
 
   /** 解压 zip 内单一 CSV 并**惰性**逐行映射；读尽时关闭底层流 (见 [[streamTrades]] 的提前弃用说明)。 */
-  private def streamRows(zipBytes: Array[Byte])(f: String => IncomeEvent): Iterator[IncomeEvent] =
+  private def streamRows(zipBytes: Array[Byte])(f: String => AnyEvent): Iterator[AnyEvent] =
     val zis = ZipInputStream(ByteArrayInputStream(zipBytes))
     if zis.getNextEntry == null then
       zis.close()
       Iterator.empty
     else
       val reader = BufferedReader(InputStreamReader(zis))
-      new Iterator[IncomeEvent]:
+      new Iterator[AnyEvent]:
         private var pending: String = advance()
         /** 推进到下一数据行 (跳过表头/空行)；读到末尾即关闭流并返回 null */
         private def advance(): String =
@@ -101,7 +101,7 @@ object BinanceCsv:
           if l == null then zis.close()
           l
         def hasNext: Boolean = pending != null
-        def next(): IncomeEvent =
+        def next(): AnyEvent =
           if pending == null then throw java.util.NoSuchElementException("streamRows exhausted")
           val ev = f(pending)
           pending = advance()

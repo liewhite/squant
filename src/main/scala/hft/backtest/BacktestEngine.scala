@@ -2,7 +2,7 @@ package hft.backtest
 
 import hft.domain.*
 import hft.engine.StrategyRunner
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, Event, Topics}
 import hft.sim.{SimConfig, SimState}
 import hft.strategy.OutcomeEvent
 import org.slf4j.LoggerFactory
@@ -34,7 +34,7 @@ final case class BacktestResult(
   * `orderToExchangeDelayMs` 入队到达撮合。主循环始终处理"源 peek 与队列 peek 中较早者"，
   * 同刻先排空队列 (先消化既有效果再注入新行情)。
   *
-  * 账户净值：周期性 (clockIntervalMs) 由当前账本计算 AccountInfoUpdate 投递给策略 (等价实盘
+  * 账户净值：周期性 (clockIntervalMs) 由当前账本计算账户信息事件投递给策略 (等价实盘
   * Engine 的 accountRefresh)，并在首个事件时先投递一次初始净值，否则依赖净值的策略不会动作。
   *
   * 时间一致性：撮合回报与 pending order 的 createdAt 一律取虚拟时间 `now` (不读墙钟)，故
@@ -46,14 +46,14 @@ final class BacktestEngine(
     source: MarketDataSource,
     runners: Seq[StrategyRunner],
     config: SimConfig = SimConfig(),
-    observers: Seq[IncomeEvent => Unit] = Nil,
+    observers: Seq[AnyEvent => Unit] = Nil,
     clockIntervalMs: Long = 1000,
 ):
   private val logger = LoggerFactory.getLogger(classOf[BacktestEngine])
 
   /** 队列内的延迟动作 */
   private enum Action:
-    case Deliver(ev: IncomeEvent) // 交易所侧事件到达策略/观察者
+    case Deliver(ev: AnyEvent) // 交易所侧事件到达策略/观察者
     case OrderArrive(order: Order, orderId: OrderId)
     case CancelArrive(orderId: OrderId)
     case Clock
@@ -125,13 +125,13 @@ final class BacktestEngine(
     * 三个撮合入口 (行情注入 / 下单到达 / 撤单到达) 的唯一公共形态——与实盘
     * [[hft.sim.SimulatedExchange.process]] 同构 (那里是 actor 串行, 这里是虚拟时间入队)。
     */
-  private def applyMatching(transfer: (SimState, Vector[IncomeEvent])): Unit =
+  private def applyMatching(transfer: (SimState, Vector[AnyEvent])): Unit =
     val (next, replies) = transfer
     state = next
     replies.foreach(r => schedule(now + config.exchangeToStrategyDelayMs, Action.Deliver(r)))
 
   /** 注入一条历史行情：推进时间、撮合、回流按延迟入队投递。 */
-  private def ingest(ev: IncomeEvent): Unit =
+  private def ingest(ev: AnyEvent): Unit =
     now = ev.exchangeTs
     marketEvents += 1
     applyMatching(state.onMarket(exchange, ev, now))
@@ -144,16 +144,14 @@ final class BacktestEngine(
       case Action.OrderArrive(order, id) => applyMatching(state.onOrderArrived(exchange, order, id, now))
       case Action.CancelArrive(id)       => applyMatching(state.onCancelArrived(exchange, id, now))
       case Action.Clock =>
-        deliver(IncomeEvent(now, now, EventData.Clock))
+        deliver(Topics.clockAt(now))
         deliver(accountInfoEvent(now)) // 周期刷新净值, 等价实盘 Engine 的 accountRefresh
         // 仅在仍有行情待注入时续期, 源耗尽则停摆让队列自然排空 -> 保证终止
         if moreData then schedule(now + clockIntervalMs, Action.Clock)
 
   /** 把事件投递给观察者与各策略；策略产出的信号按下单延迟入队到达撮合。 */
-  private def deliver(ev: IncomeEvent): Unit =
-    ev.data match
-      case EventData.FillUpdate(_) => fillCount += 1
-      case _                       => ()
+  private def deliver(ev: AnyEvent): Unit =
+    if ev.is(Topics.Fill) then fillCount += 1
     // 旁路观察者隔离: 观察者 (出图/记录等) 自身异常绝不拖垮回测核心, 只 warn 后继续
     observers.foreach { obs =>
       try obs(ev)
@@ -172,6 +170,6 @@ final class BacktestEngine(
         }
     }
 
-  private def accountInfoEvent(ts: Timestamp): IncomeEvent =
-    val info = AccountInfo(equity = state.ledger.equity(state.markOf), notional = state.ledger.notional(state.markOf))
-    IncomeEvent(ts, ts, EventData.AccountInfoUpdate(exchange, info))
+  private def accountInfoEvent(ts: Timestamp): AnyEvent =
+    val info = AccountInfo(exchange, equity = state.ledger.equity(state.markOf), notional = state.ledger.notional(state.markOf))
+    Event.stamped(Topics.AccountInfo, info, ts, ts)

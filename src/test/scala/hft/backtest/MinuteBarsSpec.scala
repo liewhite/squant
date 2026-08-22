@@ -1,16 +1,16 @@
 package hft.backtest
 
 import hft.domain.{Exchange, MarketTrade}
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, Event, Topics}
 
 class MinuteBarsSpec extends munit.FunSuite:
 
-  private def trade(ts: Long, px: Double, qty: Double): IncomeEvent =
-    IncomeEvent(ts, ts, EventData.MarketTradeUpdate(MarketTrade(Exchange.Binance, "ETHUSDT", px, qty, isBuyerMaker = false, ts)))
+  private def trade(ts: Long, px: Double, qty: Double): AnyEvent =
+    Event.stamped(Topics.Trade, MarketTrade(Exchange.Binance, "ETHUSDT", px, qty, isBuyerMaker = false, ts), ts, ts)
 
-  private def sourceOf(evs: IncomeEvent*): MarketDataSource =
+  private def sourceOf(evs: AnyEvent*): MarketDataSource =
     new MarketDataSource:
-      override def events(): Iterator[IncomeEvent] = evs.iterator
+      override def events(): Iterator[AnyEvent] = evs.iterator
 
   test("aggregate: 按分钟分桶取 OHLCV, 跨桶 flush"):
     val src = sourceOf(
@@ -44,9 +44,7 @@ class MinuteBarsSpec extends munit.FunSuite:
     // o=102 离 low=100 (距2) 比离 high=105 (距3) 近 → 路径 O→L→H→C
     val bars = Vector(MinuteBar(0L, 102.0, 105.0, 100.0, 104.0, 8.0))
     val px = MinuteBarReplaySource(bars, Exchange.Binance, "ETHUSDT").events().toVector.map {
-      _.data match
-        case EventData.MarketTradeUpdate(t) => t.price
-        case _                              => Double.NaN
+      _.as(Topics.Trade).map(_.price).getOrElse(Double.NaN)
     }
     assertEquals(px, Vector(102.0, 100.0, 105.0, 104.0))
 

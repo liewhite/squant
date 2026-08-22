@@ -158,7 +158,7 @@ final class BybitClient(
       ensureOk(resp.retCode, resp.retMsg).flatMap { _ =>
         resp.result.list.headOption
           .toRight(ExchangeError.Other("Bybit no wallet data"))
-          .map(w => AccountInfo(equity = w.totalEquity.asDouble, notional = 0.0))
+          .map(w => AccountInfo(exchange, equity = w.totalEquity.asDouble, notional = 0.0))
       }
     }
 

@@ -16,6 +16,14 @@ enum Exchange:
       case Okx     => hex // 32 字符纯字母数字, OKX clOrdId 上限 32
       case Bybit   => hex // 32 字符, Bybit orderLinkId 上限 36
 
+/** 标的 = (交易所, 交易对) —— 公共行情与持仓/订单/成交的路由键。
+  *
+  * 独立类型而非 `(Exchange, Symbol)` 元组：它是事件路由的键，会进哈希表、进日志、
+  * 进订阅声明，具名类型让这些地方读起来是"标的"而不是"某个二元组"。
+  */
+final case class Instrument(exchange: Exchange, symbol: Symbol):
+  override def toString: String = s"$exchange:$symbol"
+
 /** 交易方向 */
 enum Side:
   case Long, Short
@@ -191,7 +199,7 @@ final case class IndexPrice(
   * 这是该币种**所有期权持仓的净希腊字母**，而非单个合约——OKX `account/greeks` 直接返回此聚合值，
   * 回测的 BS 合成源亦将单合约希腊字母按持仓聚合为同一形态，使策略对实盘/回测无感。
   *
-  * delta 为**原始期权 delta**；总敞口需叠加现货/合约 delta，见 [[hft.messaging.StateManager.greeks]]
+  * delta 为**原始期权 delta**；总敞口需叠加现货/合约 delta，见 `hft.state.StateManager.greeks`
   * 用 cashBal 做的修正。delta>0 表示该币种看多敞口。
   *
   * **通道规范单位 (SSOT)**：所有来源 (OKX 轮询 / BS 合成) 必须统一为——
@@ -214,6 +222,7 @@ final case class Greeks(
 
 /** 账户信息 (净值 + 总持仓名义价值，原子读取) */
 final case class AccountInfo(
+    exchange: Exchange,
     /** 账户净值 (balance + unrealizedPnl) */
     equity: Double,
     /** 总持仓名义价值 (用于计算杠杆率) */

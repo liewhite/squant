@@ -1,7 +1,8 @@
 package hft.engine
 
 import hft.domain.*
-import hft.messaging.{IncomeEvent, StateManager}
+import hft.event.{AnyEvent, Interest, Subscription, Topics}
+import hft.state.StateManager
 import hft.strategy.{OutcomeEvent, Strategy}
 
 /** 策略执行的**纯逻辑核心**：把一个事件喂给策略、维护策略独享状态、产出"已按交易所精度转换"的信号。
@@ -21,22 +22,18 @@ final class StrategyRunner(
     symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     clientOrderIdGen: Exchange => String = _.newClientOrderId,
 ):
-  /** 策略订阅的 (exchange, symbol) 集合，用于事件过滤 */
-  val subscriptions: Set[(Exchange, Symbol)] =
-    strategy.publicStreams.toSet.flatMap { (exchange, kinds) =>
-      kinds.map(k => (exchange, k.subscribedSymbol))
-    }
+  /** 策略实际的订阅范围 = 策略声明 + 框架补齐 (见 [[StrategyRunner.subscriptionFor]]) */
+  val subscription: Subscription = StrategyRunner.subscriptionFor(strategy)
 
-  val state: StateManager = StateManager(subscriptions.map(_._2), strategy.orderTimeoutMs)
+  val state: StateManager = StateManager(subscription.instruments.map(_.symbol), strategy.orderTimeoutMs)
 
-  /** 全局事件 (无路由键) 广播；symbol 事件仅接收订阅范围内的 */
-  def accepts(event: IncomeEvent): Boolean =
-    event.routing.forall(subscriptions.contains)
+  /** 这条事件是否归本策略。判据来自 [[Subscription]]，与总线索引同源 */
+  def accepts(event: AnyEvent): Boolean = subscription.accepts(event)
 
   /** 更新状态并运行策略，返回**已转换为交易所格式**的信号 (下单已分配 id、登记 pending、取整)。
     * `now` 为当前处理时刻 (回测虚拟时间 / 实盘墙钟)，作为 pending order 的 createdAt (超时检测基准)。
     */
-  def onEvent(event: IncomeEvent, now: Timestamp): Vector[OutcomeEvent] =
+  def onEvent(event: AnyEvent, now: Timestamp): Vector[OutcomeEvent] =
     state.apply(event)
     strategy.onEvent(event, state).map {
       case OutcomeEvent.PlaceOrders(orders, comment) =>
@@ -66,6 +63,30 @@ final class StrategyRunner(
     order.copy(quantity = quantity, orderType = orderType)
 
 object StrategyRunner:
+  /** 策略声明 + 框架补齐 = 策略实际的订阅范围。
+    *
+    * 补齐的三类订阅**不该由策略选择**，因此不留给策略声明 —— 漏订一条 Fill 就会让本地
+    * 仓位与交易所长期发散，而这种 bug 没有任何外在症状：
+    *   1. 所声明标的的私有回报 (持仓 / 订单回报 / 成交)；
+    *   2. 所涉交易所的账户级读数 (余额 / 净值 / 希腊值)；
+    *   3. 时钟 (驱动 [[hft.state.SymbolState.failOnTimedOutOrders]])。
+    *
+    * 账户级读数按**交易所**补齐而不是全收：策略读不到自己没订阅的交易所的净值，
+    * 而杠杆闸门正是拿净值算的。
+    */
+  def subscriptionFor(strategy: Strategy): Subscription =
+    val declared = strategy.interests
+    val base = Subscription(declared)
+    val instrumentKeys = base.instruments
+    val exchangeKeys = base.exchanges
+    val privateInterests: Set[Interest] =
+      if instrumentKeys.isEmpty then Set.empty
+      else Topics.instrumentPrivate.map(t => Interest.Keyed(t, instrumentKeys))
+    val accountInterests: Set[Interest] =
+      if exchangeKeys.isEmpty then Set.empty
+      else Topics.account.map(t => Interest.Keyed(t, exchangeKeys))
+    Subscription(declared ++ privateInterests ++ accountInterests + Interest.All(Topics.Clock))
+
   /** 回测用确定性 client_order_id 生成器：自增计数 bt0/bt1/...，使逐笔回报/CSV 跨运行可复现。
     * 有状态闭包 (单回测为单线程，无并发问题)；每个 runner 独享一份，自 0 起算。 */
   def deterministicIdGen(): Exchange => String =

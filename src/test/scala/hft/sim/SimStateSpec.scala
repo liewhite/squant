@@ -1,7 +1,7 @@
 package hft.sim
 
 import hft.domain.*
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, Event, Topics}
 
 /** 撮合状态转移的纯单测：无线程、无延迟、无 sleep，直接断言 (新状态, 回流事件)。 */
 class SimStateSpec extends munit.FunSuite:
@@ -10,16 +10,16 @@ class SimStateSpec extends munit.FunSuite:
   private def empty = SimState.empty(10_000.0)
 
   private def bbo(bid: Price, ask: Price, ts: Timestamp = 1): BBO = BBO(ex, sym, bid, 1.0, ask, 1.0, ts)
-  private def marketEv(b: BBO): IncomeEvent = IncomeEvent.at(b.timestamp, EventData.BboUpdate(b))
+  private def marketEv(b: BBO): AnyEvent = Event.at(Topics.Bbo, b, b.timestamp)
   private def limit(side: Side, price: Price, tif: TimeInForce, cid: String): Order =
     Order("", ex, sym, side, OrderType.Limit(price, tif), 0.002, reduceOnly = false, clientOrderId = cid)
   private def limitRO(side: Side, price: Price, tif: TimeInForce, cid: String, qty: Quantity): Order =
     Order("", ex, sym, side, OrderType.Limit(price, tif), qty, reduceOnly = true, clientOrderId = cid)
 
-  private def statuses(evs: Vector[IncomeEvent]): Vector[OrderStatus] =
-    evs.collect { case IncomeEvent(_, _, EventData.OrderUpdated(u)) => u.status }
-  private def fills(evs: Vector[IncomeEvent]): Vector[Fill] =
-    evs.collect { case IncomeEvent(_, _, EventData.FillUpdate(f)) => f }
+  private def statuses(evs: Vector[AnyEvent]): Vector[OrderStatus] =
+    evs.flatMap(_.as(Topics.OrderUpdate)).map(_.status)
+  private def fills(evs: Vector[AnyEvent]): Vector[Fill] =
+    evs.flatMap(_.as(Topics.Fill))
 
   test("非 marketable 的 PostOnly 买单 -> resting (Pending), 不成交"):
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
@@ -48,8 +48,8 @@ class SimStateSpec extends munit.FunSuite:
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
     val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1", 1)
     val (_, evs) = s2.onMarket(ex, marketEv(bbo(49990, 49994, ts = 2)), 2)
-    assert(evs.head.data.isInstanceOf[EventData.BboUpdate], "首事件应为行情转发")
-    assert(evs.tail.exists(_.data.isInstanceOf[EventData.FillUpdate]), "成交回报排在行情之后")
+    assert(evs.head.is(Topics.Bbo), "首事件应为行情转发")
+    assert(evs.tail.exists(_.is(Topics.Fill)), "成交回报排在行情之后")
 
   test("GTC 到达即可成交 -> taker 成交于对手价"):
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
@@ -100,7 +100,7 @@ class SimStateSpec extends munit.FunSuite:
     val (s3, _) = s2.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "early", 0.002), "2", 1) // 先到 seq0
     val (s4, _) = s3.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "late", 0.002), "3", 1)  // 后到 seq1
     val (_, evs) = s4.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2)), 2) // bid 50011 >= 50010 -> 两张同刻越价
-    val filledOf = evs.collect {
-      case IncomeEvent(_, _, EventData.OrderUpdated(u)) if u.status == OrderStatus.Filled => (u.clientOrderId, u.fillSize)
+    val filledOf = evs.flatMap(_.as(Topics.OrderUpdate)).collect {
+      case u if u.status == OrderStatus.Filled => (u.clientOrderId, u.fillSize)
     }
     assertEquals(filledOf, Vector((Some("early"), 0.002), (Some("late"), 0.001)))

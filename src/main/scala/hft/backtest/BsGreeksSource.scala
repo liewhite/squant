@@ -1,7 +1,7 @@
 package hft.backtest
 
 import hft.domain.*
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, Event, Topics}
 import hft.option.{BlackScholes, Straddle}
 
 /** 单只 ATM 跨式的 BS 合成希腊字母配置 (不滚动，持有到 [[expiry]])。
@@ -33,9 +33,9 @@ final case class BsGreeksConfig(
 
 /** 回测用 BS 合成希腊字母数据源装饰器 (单只 ATM 跨式，持有到期，不滚动)。
   *
-  * 监听上游标的 [[EventData.MarketTradeUpdate]] (真实逐笔成交价 S)，首笔成交开一份 ATM 长跨式，
+  * 监听上游标的 [[Topics.Trade]] (真实逐笔成交价 S)，首笔成交开一份 ATM 长跨式，
   * 按虚拟时间间隔聚合为与 OKX `account/greeks` 同形态的 per-ccy 账户级 [[Greeks]]，紧随该 trade 以
-  * **相同 exchangeTs** 注入 [[EventData.GreeksUpdate]]；并一次性注入现货 cashBal 使 delta 修正生效。
+  * **相同 exchangeTs** 注入 [[Topics.Greeks]]；并一次性注入现货 cashBal 使 delta 修正生效。
   *
   * **期权腿 P&L** = 当前跨式价值 − 进场权利金 (单只持仓，[[optionPnl]] 供 demo 取完整期权腿损益)。
   * 单位约定同 Greeks 通道 (theta 每日、vega 对 1%)。
@@ -49,13 +49,13 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
   private var entryPremium = 0.0
   private var inited = false
 
-  override def events(): Iterator[IncomeEvent] =
+  override def events(): Iterator[AnyEvent] =
     var lastEmit: Timestamp = Long.MinValue
     var balanceEmitted = false
 
     underlying.events().flatMap { ev =>
-      ev.data match
-        case EventData.MarketTradeUpdate(t) if t.symbol == config.underlyingSymbol =>
+      ev.as(Topics.Trade).filter(_.symbol == config.underlyingSymbol) match
+        case Some(t) =>
           val now = ev.exchangeTs
           val s = t.price
           if !inited then
@@ -67,16 +67,19 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
 
           if shouldEmit(now, lastEmit) then
             lastEmit = now
-            val greeksEv = ev.copy(data = EventData.GreeksUpdate(greeksAt(s, now)))
+            val greeksEv = Event.stamped(Topics.Greeks, greeksAt(s, now), ev.exchangeTs, ev.localTs)
             if balanceEmitted then Iterator(ev, greeksEv)
             else
               balanceEmitted = true
-              val balanceEv = ev.copy(
-                data = EventData.BalanceUpdate(Balance(config.exchange, config.ccy, config.spotHolding, now))
+              val balanceEv = Event.stamped(
+                Topics.Balance,
+                Balance(config.exchange, config.ccy, config.spotHolding, now),
+                ev.exchangeTs,
+                ev.localTs,
               )
               Iterator(ev, balanceEv, greeksEv)
           else Iterator.single(ev)
-        case _ => Iterator.single(ev)
+        case None => Iterator.single(ev)
     }
 
   private def shouldEmit(now: Timestamp, lastEmit: Timestamp): Boolean =

@@ -5,8 +5,9 @@ import strategy.utils.hedge.{HedgeBand, HedgeCtx}
 import hft.domain.*
 import hft.exchange.SubscriptionKind
 import hft.indicator.{Atr, KlineSeries, Macd, RealizedVol, Sma}
-import hft.messaging.{EventData, IncomeEvent, StateManager}
+import hft.event.{AnyEvent, Interest, Topics}
 import hft.strategy.{OutcomeEvent, Strategy}
+import hft.state.{StateManager}
 
 /** **价格主导、delta 定量、带宽可插拔** 的期权买方 (long-gamma) 对冲核心。
   *
@@ -51,21 +52,25 @@ final class BandHedgeStrategy(
   /** 对冲中心价 (NaN = 尚未初始化，首个行情设为现价) */
   private var center: Double = Double.NaN
 
-  override def publicStreams: Map[Exchange, Set[SubscriptionKind]] =
-    Map(exchange -> Set(SubscriptionKind.BBO(symbol)))
+  override def interests: Set[Interest] =
+    Set(Interest.Keyed(Topics.Bbo, Set(Instrument(exchange, symbol))))
 
   override def orderTimeoutMs: Long = 5000
 
-  override def onEvent(event: IncomeEvent, state: StateManager): Vector[OutcomeEvent] =
-    event.data match
-      case EventData.BboUpdate(b) if b.exchange == exchange && b.symbol == symbol =>
+  override def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] =
+    event
+      .as(Topics.Bbo)
+      .map { b =>
         val px = b.midPrice
         klines.update(b.timestamp, px)
         if center.isNaN then center = px
         hedge(px, state)
-      case EventData.GreeksUpdate(g) if g.exchange == exchange && g.ccy == ccy =>
+      }
+      // greeks 的路由键只到交易所，币种在载荷里，故 ccy 仍需自行判断
+      .orElse(event.as(Topics.Greeks).filter(_.ccy == ccy).map { _ =>
         state.symbolState(symbol).flatMap(_.bbo(exchange)).map(b => hedge(b.midPrice, state)).getOrElse(Vector.empty)
-      case _ => Vector.empty
+      })
+      .getOrElse(Vector.empty)
 
   private def hedge(px: Price, state: StateManager): Vector[OutcomeEvent] =
     (for

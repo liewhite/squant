@@ -2,7 +2,7 @@ package hft.sim
 
 import hft.domain.*
 import hft.exchange.{AccountStream, ExchangeClient, MarketDataStream, SubscriptionKind}
-import hft.messaging.{EventBus, EventData, IncomeEvent}
+import hft.event.{AnyEvent, EventBus, Interest, Topics}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
 import ox.channels.Channel
@@ -59,7 +59,7 @@ final class SimulatedExchange(
 
   /** 柜台内部命令：全部串行进入 mailbox */
   private enum Command:
-    case Market(ev: IncomeEvent)          // 上游行情到达 (实时)
+    case Market(ev: AnyEvent)          // 上游行情到达 (实时)
     case OrderArrived(order: Order, orderId: OrderId)
     case CancelArrived(orderId: OrderId)
 
@@ -67,11 +67,11 @@ final class SimulatedExchange(
   private val mailbox = Channel.unlimited[Command]
   /** 唯一写者 = actor 线程；读者 = REST 查询线程。不可变快照 + @volatile 保证可见性 */
   @volatile private var state: SimState = SimState.empty(config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
-  @volatile private var strategyBus: EventBus[IncomeEvent] = scala.compiletime.uninitialized
+  @volatile private var strategyBus: EventBus = scala.compiletime.uninitialized
 
   private val orderIdSeq = AtomicLong(1)
   private val started = AtomicBoolean(false)
-  private val rawBus = EventBus[IncomeEvent]()
+  private val rawBus = EventBus()
 
   /** 延迟调度器：仅负责把命令/发布推迟到点 (不触碰状态)。
     * **单线程是顺序保证的承重墙**——等延迟事件按提交序 FIFO 投递, 把 actor 的输出序原样透过延迟传出;
@@ -92,13 +92,14 @@ final class SimulatedExchange(
   // ==================== 生命周期 (同时实现 MarketDataStream / AccountStream.start) ====================
 
   /** 启动柜台。幂等：Engine 经 accountStream 与 marketData 两个角色各调用一次，只生效一次 */
-  override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit =
-    require((strategyBus eq null) || (strategyBus eq incomeBus), "SimulatedExchange started with two different buses")
-    strategyBus = incomeBus
+  override def start(eventBus: EventBus)(using Ox): Unit =
+    require((strategyBus eq null) || (strategyBus eq eventBus), "SimulatedExchange started with two different buses")
+    strategyBus = eventBus
     if started.compareAndSet(false, true) then
       // 上游真实行情发布到内部 rawBus；转发线程把行情即时投入 mailbox (撮合用实时行情)
       market.start(rawBus)
-      val upstream = rawBus.subscribe()
+      // 只订公共行情：柜台撮合的输入就是行情，别的 topic 与它无关
+      val upstream = rawBus.subscribe(Topics.market.map(Interest.All))
       fork { while true do mailbox.send(Command.Market(upstream.receive())) }
       // actor 线程：串行消费命令, 是状态唯一写者与事件唯一发布者
       fork { while true do process(mailbox.receive()) }
@@ -117,14 +118,12 @@ final class SimulatedExchange(
       case Command.CancelArrived(id)       => state.onCancelArrived(exchange, id, nowMs)
     state = next
     events.foreach { ev =>
-      ev.data match
-        case EventData.FillUpdate(f) => logger.info(s"[SIM] fill ${f.side} ${f.symbol} qty=${f.size} @ ${f.price}")
-        case _                       => ()
+      ev.as(Topics.Fill).foreach(f => logger.info(s"[SIM] fill ${f.side} ${f.symbol} qty=${f.size} @ ${f.price}"))
       deliver(ev)
     }
 
   /** 把交易所侧事件按 ex->strat 延迟投递给策略 */
-  private def deliver(ev: IncomeEvent): Unit =
+  private def deliver(ev: AnyEvent): Unit =
     after(config.exchangeToStrategyDelayMs) { strategyBus.publish(ev) }
 
   // ==================== ExchangeClient: 公共 REST (委托真实客户端) ====================
@@ -158,7 +157,7 @@ final class SimulatedExchange(
 
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] =
     val s = state
-    Right(AccountInfo(equity = s.ledger.equity(s.markOf), notional = s.ledger.notional(s.markOf)))
+    Right(AccountInfo(exchange, equity = s.ledger.equity(s.markOf), notional = s.ledger.notional(s.markOf)))
 
   override def fetchPositions(): Either[ExchangeError, Vector[Position]] =
     val s = state

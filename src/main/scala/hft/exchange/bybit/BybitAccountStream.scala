@@ -3,7 +3,7 @@ package hft.exchange.bybit
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
 import hft.exchange.{AccountStream, WsLoop}
-import hft.messaging.{EventBus, EventData, IncomeEvent}
+import hft.event.{Event, EventBus, Topics}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
 import ox.channels.Channel
@@ -45,10 +45,10 @@ final class BybitAccountStream(
   override def exchange: Exchange = Exchange.Bybit
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
-  private var bus: EventBus[IncomeEvent] = scala.compiletime.uninitialized
+  private var bus: EventBus = scala.compiletime.uninitialized
 
-  override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit =
-    bus = incomeBus
+  override def start(eventBus: EventBus)(using Ox): Unit =
+    bus = eventBus
     WsLoop.run("bybit/private", backend, () => wsUrl, outgoing, onPrivateText)
     // auth 帧入队，连接建立后立即发送 (expires 在此刻生成，留 10s 窗口)
     outgoing.send(WebSocketFrame.text(authFrame()))
@@ -96,7 +96,7 @@ final class BybitAccountStream(
       size = d.execQty.asDouble,
       timestamp = d.execTime.toLongOption.getOrElse(nowMs),
     )
-    bus.publish(IncomeEvent.local(EventData.FillUpdate(fill)))
+    bus.publish(Event.local(Topics.Fill, fill))
 
   /** 订单状态 -> OrderUpdate，仅追踪挂单生命周期；fillSize=0，仓位由 execution 维护 */
   private def publishOrder(d: OrderData): Unit =
@@ -115,16 +115,16 @@ final class BybitAccountStream(
       fillSize = 0.0,
       timestamp = nowMs,
     )
-    bus.publish(IncomeEvent.local(EventData.OrderUpdated(update)))
+    bus.publish(Event.local(Topics.OrderUpdate, update))
 
   /** 钱包快照 -> 账户净值 + 各币种现金余额 */
   private def publishWallet(d: WalletData): Unit =
     val ts = nowMs
     bus.publish(
-      IncomeEvent.at(ts, EventData.AccountInfoUpdate(Exchange.Bybit, AccountInfo(d.totalEquity.asDouble, notional = 0.0)))
+      Event.at(Topics.AccountInfo, AccountInfo(Exchange.Bybit, d.totalEquity.asDouble, notional = 0.0), ts)
     )
     d.coin.foreach { c =>
-      bus.publish(IncomeEvent.at(ts, EventData.BalanceUpdate(Balance(Exchange.Bybit, c.coin, c.walletBalance.asDoubleOrZero, ts))))
+      bus.publish(Event.at(Topics.Balance, Balance(Exchange.Bybit, c.coin, c.walletBalance.asDoubleOrZero, ts), ts))
     }
 
   /** 心跳发送线程：定期入队 ping 帧，维持私有连接 (无成交时也不致空闲被断) */

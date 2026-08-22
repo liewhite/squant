@@ -2,8 +2,9 @@ package hft.exchange.okx
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
+import hft.state.{StateManager}
 import hft.exchange.{AccountStream, WsLoop}
-import hft.messaging.{EventBus, EventData, IncomeEvent}
+import hft.event.{Event, EventBus, Topics}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
 import ox.channels.Channel
@@ -32,7 +33,7 @@ object OkxAccountStream:
   *   - account   -> AccountInfo(净值/名义价值) + 各币种 Balance(cashBal，供 greeks delta 修正)
   *   - orders    -> Fill (fillSz>0 时, 先于 OrderUpdate) + OrderUpdate (张->币)
   *
-  * 另起一个 fork 以 REST 轮询账户级希腊字母，去重后发布 [[EventData.GreeksUpdate]]。
+  * 另起一个 fork 以 REST 轮询账户级希腊字母，去重后发布 [[Topics.Greeks]] 事件。
   *
   * Fail-fast：连接断开、解析失败、登录失败、错误事件一律抛异常终止引擎作用域。
   * Greeks 轮询失败是唯一例外 (记 warn 后下次重试)，不影响私有流主链路。
@@ -49,14 +50,14 @@ final class OkxAccountStream(
   override def exchange: Exchange = Exchange.Okx
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
-  private var bus: EventBus[IncomeEvent] = scala.compiletime.uninitialized
+  private var bus: EventBus = scala.compiletime.uninitialized
   /** symbol -> meta，用于张<->币换算 (start 时一次性拉取) */
   private var metas: Map[Symbol, SymbolMeta] = Map.empty
   /** greeks 去重：ccy -> 上次 timestamp */
   private val lastGreeksTs: mutable.Map[String, Timestamp] = mutable.Map.empty
 
-  override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit =
-    bus = incomeBus
+  override def start(eventBus: EventBus)(using Ox): Unit =
+    bus = eventBus
     metas = client.fetchAllSymbolMetas() match
       case Right(ms) => ms.map(m => m.symbol -> m).toMap
       case Left(e)   => throw IllegalStateException(s"OKX fetch symbol metas failed: ${e.message}")
@@ -89,7 +90,7 @@ final class OkxAccountStream(
           if lastGreeksTs.getOrElse(g.ccy, -1L) != g.timestamp then
             lastGreeksTs(g.ccy) = g.timestamp
             logger.debug(s"OKX greeks ${g.ccy}: delta=${g.delta} gamma=${g.gamma} theta=${g.theta} vega=${g.vega} ts=${g.timestamp}")
-            bus.publish(IncomeEvent.at(g.timestamp, EventData.GreeksUpdate(g)))
+            bus.publish(Event.at(Topics.Greeks, g, g.timestamp))
         }
       case Left(e) =>
         logger.warn(s"OKX fetch greeks failed (will retry): ${e.message}")
@@ -133,16 +134,16 @@ final class OkxAccountStream(
         entryPrice = d.avgPx.asDoubleOrZero,
         unrealizedPnl = d.upl.asDoubleOrZero,
       )
-      bus.publish(IncomeEvent.local(EventData.PositionUpdate(position)))
+      bus.publish(Event.local(Topics.Position, position))
 
   private def publishAccount(d: AccountData): Unit =
     val ts = d.uTime.toLongOption.getOrElse(nowMs)
     bus.publish(
-      IncomeEvent.at(ts, EventData.AccountInfoUpdate(Exchange.Okx, AccountInfo(d.totalEq.asDouble, d.notionalUsd.asDouble)))
+      Event.at(Topics.AccountInfo, AccountInfo(Exchange.Okx, d.totalEq.asDouble, d.notionalUsd.asDouble), ts)
     )
     // 各币种现金余额：供 StateManager 修正 greeks delta 的现货敞口
     d.details.foreach { detail =>
-      bus.publish(IncomeEvent.at(ts, EventData.BalanceUpdate(Balance(Exchange.Okx, detail.ccy, detail.cashBal.asDouble, ts))))
+      bus.publish(Event.at(Topics.Balance, Balance(Exchange.Okx, detail.ccy, detail.cashBal.asDouble, ts), ts))
     }
 
   private def publishOrder(d: OrderPushData): Unit =
@@ -157,7 +158,7 @@ final class OkxAccountStream(
     // Fill 先于 OrderUpdate (确保乐观更新 position 后再处理订单终态)
     if fillSz > 0 then
       val fill = Fill(Exchange.Okx, sym, side, price = d.fillPx.asDouble, size = fillSz, timestamp = nowMs)
-      bus.publish(IncomeEvent.local(EventData.FillUpdate(fill)))
+      bus.publish(Event.local(Topics.Fill, fill))
     val update = OrderUpdate(
       orderId = d.ordId,
       clientOrderId = if d.clOrdId.nonEmpty then Some(d.clOrdId) else None,
@@ -171,4 +172,4 @@ final class OkxAccountStream(
       fillSize = fillSz,
       timestamp = nowMs,
     )
-    bus.publish(IncomeEvent.local(EventData.OrderUpdated(update)))
+    bus.publish(Event.local(Topics.OrderUpdate, update))

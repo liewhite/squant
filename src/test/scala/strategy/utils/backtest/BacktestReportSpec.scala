@@ -1,7 +1,7 @@
 package strategy.utils.backtest
 
 import hft.domain.*
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, Event, Topics}
 
 /** BacktestRecorder 旁路观察 + BacktestReport 出图 的纯行为单测：
   * 预热过滤、基准/收益/回撤/buy&hold 计算、成交点采集与买卖向、以及 markers 渲染。 */
@@ -10,12 +10,12 @@ class BacktestReportSpec extends munit.FunSuite:
   private val sym: Symbol = "ETHUSDT"
   private val H = 3_600_000L
 
-  private def trade(ts: Long, px: Double): IncomeEvent =
-    IncomeEvent(ts, ts, EventData.MarketTradeUpdate(MarketTrade(ex, sym, px, 1.0, isBuyerMaker = false, ts)))
-  private def fill(ts: Long, side: Side, px: Double, qty: Double): IncomeEvent =
-    IncomeEvent(ts, ts, EventData.FillUpdate(Fill(ex, sym, side, px, qty, ts)))
-  private def acct(ts: Long, equity: Double): IncomeEvent =
-    IncomeEvent(ts, ts, EventData.AccountInfoUpdate(ex, AccountInfo(equity = equity, notional = 0.0)))
+  private def trade(ts: Long, px: Double): AnyEvent =
+    Event.stamped(Topics.Trade, MarketTrade(ex, sym, px, 1.0, isBuyerMaker = false, ts), ts, ts)
+  private def fill(ts: Long, side: Side, px: Double, qty: Double): AnyEvent =
+    Event.stamped(Topics.Fill, Fill(ex, sym, side, px, qty, ts), ts, ts)
+  private def acct(ts: Long, equity: Double): AnyEvent =
+    Event.stamped(Topics.AccountInfo, AccountInfo(ex, equity = equity, notional = 0.0), ts, ts)
 
   test("预热区间 (startMs 之前) 的成交/采样全部忽略"):
     val rec = BacktestRecorder(ex, sym, startMs = 1000L, initialBalance = 100.0)

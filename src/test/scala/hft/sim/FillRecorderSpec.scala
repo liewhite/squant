@@ -1,7 +1,7 @@
 package hft.sim
 
 import hft.domain.*
-import hft.messaging.{EventBus, EventData, IncomeEvent}
+import hft.event.{Event, EventBus, Interest, Topics}
 import ox.supervised
 
 import java.nio.file.Files
@@ -36,17 +36,17 @@ class FillRecorderSpec extends munit.FunSuite:
 
   // ==================== 集成: 订阅总线写文件 ====================
 
-  test("订阅 income 总线, 把成交写入 CSV (表头 + 每笔一行 + 累计利润)"):
+  test("订阅 事件总线, 把成交写入 CSV (表头 + 每笔一行 + 累计利润)"):
     val tmp = Files.createTempFile("sim-fills", ".csv")
     Files.delete(tmp) // 让 recorder 视作新文件并写表头
     val rec = FillRecorder(tmp)
     supervised:
-      val bus = EventBus[IncomeEvent]()
-      rec.run(bus.subscribe())
-      bus.publish(IncomeEvent.at(1, EventData.FillUpdate(fill(Side.Long, 100.0, 2.0, 1))))
-      bus.publish(IncomeEvent.at(2, EventData.FillUpdate(fill(Side.Short, 120.0, 2.0, 2))))
+      val bus = EventBus()
+      rec.run(bus.subscribe(Set(Interest.All(Topics.Fill))))
+      bus.publish(Event.at(Topics.Fill, fill(Side.Long, 100.0, 2.0, 1), 1))
+      bus.publish(Event.at(Topics.Fill, fill(Side.Short, 120.0, 2.0, 2), 2))
       // 非成交事件应被忽略
-      bus.publish(IncomeEvent.at(3, EventData.BboUpdate(BBO(ex, sym, 100, 1, 101, 1, 3))))
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100, 1, 101, 1, 3), 3))
       Thread.sleep(150)
 
     val lines = Files.readAllLines(tmp).asScala.toVector
@@ -61,10 +61,10 @@ class FillRecorderSpec extends munit.FunSuite:
     // 父目录不存在 -> openWriter 抛错, 应被吞掉、记录降级, run/消费均不抛
     val rec = FillRecorder(java.nio.file.Path.of("/nonexistent-dir-xyz/sim-fills.csv"))
     supervised:
-      val bus = EventBus[IncomeEvent]()
-      rec.run(bus.subscribe()) // 不应抛
-      bus.publish(IncomeEvent.at(1, EventData.FillUpdate(fill(Side.Long, 100.0, 2.0, 1))))
-      bus.publish(IncomeEvent.at(2, EventData.FillUpdate(fill(Side.Short, 120.0, 2.0, 2))))
+      val bus = EventBus()
+      rec.run(bus.subscribe(Set(Interest.All(Topics.Fill)))) // 不应抛
+      bus.publish(Event.at(Topics.Fill, fill(Side.Long, 100.0, 2.0, 1), 1))
+      bus.publish(Event.at(Topics.Fill, fill(Side.Short, 120.0, 2.0, 2), 2))
       Thread.sleep(150)
     // 写盘禁用, 但内存累计照常推进
     assertEquals(rec.cumulativeRealizedPnl, 40.0)

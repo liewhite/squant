@@ -1,7 +1,7 @@
 package hft.backtest
 
 import hft.domain.Symbol
-import hft.messaging.IncomeEvent
+import hft.event.AnyEvent
 import org.slf4j.LoggerFactory
 
 import java.time.LocalDate
@@ -13,7 +13,7 @@ enum BinanceDataKind(val key: String):
   case BookTicker extends BinanceDataKind("bookTicker")
   case Trades extends BinanceDataKind("trades")
 
-  def parse(symbol: Symbol, zipBytes: Array[Byte]): Vector[IncomeEvent] = this match
+  def parse(symbol: Symbol, zipBytes: Array[Byte]): Vector[AnyEvent] = this match
     case BookTicker => BinanceCsv.parseBookTicker(symbol, zipBytes)
     case Trades     => BinanceCsv.parseTrades(symbol, zipBytes)
 
@@ -35,7 +35,7 @@ final class BinanceHistorySource(
 ) extends MarketDataSource:
   private val logger = LoggerFactory.getLogger(classOf[BinanceHistorySource])
 
-  override def events(): Iterator[IncomeEvent] =
+  override def events(): Iterator[AnyEvent] =
     dateRange.iterator.flatMap(loadDay)
 
   /** 单 symbol + 仅 trades：单文件已按时间升序，可流式 (常驻内存 O(1) 而非整日 Vector)，
@@ -47,7 +47,7 @@ final class BinanceHistorySource(
     Iterator.iterate(startDate)(_.plusDays(1)).takeWhile(!_.isAfter(endDate)).toSeq
 
   /** 加载单日事件：可流式则惰性逐行产出，否则全 symbol×kinds 合并后按时间戳稳定升序。 */
-  private def loadDay(date: LocalDate): Iterator[IncomeEvent] =
+  private def loadDay(date: LocalDate): Iterator[AnyEvent] =
     val dateStr = date.toString // ISO YYYY-MM-DD
     if canStream then
       logger.info(s"streaming $dateStr trades (${symbols.head})")

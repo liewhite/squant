@@ -3,7 +3,7 @@ package hft.exchange.bybit
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
 import hft.exchange.{MarketDataStream, SubscriptionKind, WsLoop}
-import hft.messaging.{EventBus, EventData, IncomeEvent}
+import hft.event.{Event, EventBus, Topics}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
 import ox.channels.Channel
@@ -38,10 +38,10 @@ final class BybitMarketStream(
   override def exchange: Exchange = Exchange.Bybit
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
-  private var bus: EventBus[IncomeEvent] = scala.compiletime.uninitialized
+  private var bus: EventBus = scala.compiletime.uninitialized
 
-  override def start(incomeBus: EventBus[IncomeEvent])(using Ox): Unit =
-    bus = incomeBus
+  override def start(eventBus: EventBus)(using Ox): Unit =
+    bus = eventBus
     WsLoop.run("bybit/public", backend, () => wsUrl, outgoing, onPublicText)
     startHeartbeat(outgoing)
 
@@ -102,14 +102,14 @@ final class BybitMarketStream(
       askQty = ask(1).asDouble,
       timestamp = ts,
     )
-    bus.publish(IncomeEvent.at(ts, EventData.BboUpdate(bbo)))
+    bus.publish(Event.at(Topics.Bbo, bbo, ts))
 
   /** tickers 一帧 (snapshot 或 delta) 携带 mark/index/funding，仅发布本帧实际出现 (非空) 的字段 */
   private def publishTicker(sym: Symbol, d: TickerData, ts: Long): Unit =
     if d.markPrice.nonEmpty then
-      bus.publish(IncomeEvent.at(ts, EventData.MarkPriceUpdate(MarkPrice(Exchange.Bybit, sym, d.markPrice.asDouble, ts))))
+      bus.publish(Event.at(Topics.MarkPrice, MarkPrice(Exchange.Bybit, sym, d.markPrice.asDouble, ts), ts))
     if d.indexPrice.nonEmpty then
-      bus.publish(IncomeEvent.at(ts, EventData.IndexPriceUpdate(IndexPrice(Exchange.Bybit, sym, d.indexPrice.asDouble, ts))))
+      bus.publish(Event.at(Topics.IndexPrice, IndexPrice(Exchange.Bybit, sym, d.indexPrice.asDouble, ts), ts))
     if d.fundingRate.nonEmpty then
       val fr = FundingRate(
         exchange = Exchange.Bybit,
@@ -118,12 +118,12 @@ final class BybitMarketStream(
         nextSettleTime = d.nextFundingTime.toLongOption.getOrElse(0L),
         timestamp = ts,
       )
-      bus.publish(IncomeEvent.at(ts, EventData.FundingRateUpdate(fr)))
+      bus.publish(Event.at(Topics.FundingRate, fr, ts))
 
   private def publishTrade(sym: Symbol, d: PublicTradeData): Unit =
     // Bybit S = taker 方向: S=Sell -> 买方是挂单方 (isBuyerMaker=true)
     val trade = MarketTrade(Exchange.Bybit, sym, d.p.asDouble, d.v.asDouble, isBuyerMaker = d.S == "Sell", d.T)
-    bus.publish(IncomeEvent.at(d.T, EventData.MarketTradeUpdate(trade)))
+    bus.publish(Event.at(Topics.Trade, trade, d.T))
 
   /** 心跳发送线程：定期入队 ping 帧，维持连接 (服务端回 pong 同时刷新 WsLoop 空闲计时) */
   private def startHeartbeat(out: Channel[WebSocketFrame])(using Ox): Unit =

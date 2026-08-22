@@ -6,7 +6,7 @@ import hft.domain.*
 import hft.engine.StrategyRunner
 import hft.indicator.RealizedVol
 import hft.option.BlackScholes
-import hft.messaging.{EventData, IncomeEvent}
+import hft.event.{AnyEvent, Topics}
 import hft.sim.SimConfig
 import strategy.strategies.makerhedge.logic.{AsymHedgeBand, MakerHedgeStrategy}
 import strategy.strategies.bandhedge.logic.BandHedgeStrategy
@@ -95,9 +95,9 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       val samples = ArrayBuffer.empty[Double]; var lastTs = 0L
       val it = tradeSource(backend, s, e).events()
       while it.hasNext do
-        it.next().data match
-          case EventData.MarketTradeUpdate(t) => if t.timestamp - lastTs >= 3_600_000L then { lastTs = t.timestamp; samples += t.price }
-          case _                              => ()
+        it.next().as(Topics.Trade).foreach { t =>
+          if t.timestamp - lastTs >= 3_600_000L then { lastTs = t.timestamp; samples += t.price }
+        }
       RealizedVol.annualizedFromPrices(samples.toVector, BlackScholes.HoursPerYear)
     finally backend.close()
 
@@ -120,15 +120,14 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       var lastMid = 0.0; var lastTs = 0L; var curveLastTs = 0L
       val curve = ArrayBuffer.empty[(Long, Double, Double)]
       val fillRecs = ArrayBuffer.empty[(Long, Side, Double, Double)]
-      val obs: IncomeEvent => Unit = ev =>
-        ev.data match
-          case EventData.BboUpdate(b)  => lastMid = b.midPrice; lastTs = b.timestamp
-          case EventData.FillUpdate(f) => fillRecs += ((f.timestamp, f.side, f.price, f.size))
-          case EventData.AccountInfoUpdate(_, info) =>
-            if lastTs > 0 && ev.exchangeTs - curveLastTs >= 3_600_000L then
-              curveLastTs = ev.exchangeTs
-              curve += ((ev.exchangeTs, withGreeks.optionPnl(lastMid, lastTs), info.equity - initialBalance))
-          case _ => ()
+      val obs: AnyEvent => Unit = ev =>
+        ev.as(Topics.Bbo).foreach { b => lastMid = b.midPrice; lastTs = b.timestamp }
+        ev.as(Topics.Fill).foreach(f => fillRecs += ((f.timestamp, f.side, f.price, f.size)))
+        ev.as(Topics.AccountInfo).foreach { info =>
+          if lastTs > 0 && ev.exchangeTs - curveLastTs >= 3_600_000L then
+            curveLastTs = ev.exchangeTs
+            curve += ((ev.exchangeTs, withGreeks.optionPnl(lastMid, lastTs), info.equity - initialBalance))
+        }
       val engine = BacktestEngine(
         exchange = Exchange.Binance, source = source, runners = Seq(runner),
         config = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = delayMs,

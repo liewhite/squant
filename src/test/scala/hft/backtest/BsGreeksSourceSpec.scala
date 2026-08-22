@@ -1,8 +1,9 @@
 package hft.backtest
 
 import hft.domain.*
-import hft.messaging.{EventData, IncomeEvent, StateManager}
+import hft.event.{AnyEvent, Event, Topics}
 import hft.option.{BlackScholes, OptionRight}
+import hft.state.{StateManager}
 
 /** BS 合成 Greeks 源 (单只 ATM 跨式，持有到期，不滚动) 单测：聚合、发射间隔门控、cashBal 一次、
   * StateManager delta 修正、期权腿 P&L、临近到期 gamma 钳制。 */
@@ -12,11 +13,11 @@ class BsGreeksSourceSpec extends munit.FunSuite:
   private val ccy = "BTC"
   private val day = 86_400_000L
 
-  private class FixedSource(evs: Vector[IncomeEvent]) extends MarketDataSource:
-    def events(): Iterator[IncomeEvent] = evs.iterator
+  private class FixedSource(evs: Vector[AnyEvent]) extends MarketDataSource:
+    def events(): Iterator[AnyEvent] = evs.iterator
 
-  private def trade(price: Price, ts: Timestamp): IncomeEvent =
-    IncomeEvent(ts, ts, EventData.MarketTradeUpdate(MarketTrade(ex, sym, price, 1.0, isBuyerMaker = false, ts)))
+  private def trade(price: Price, ts: Timestamp): AnyEvent =
+    Event.stamped(Topics.Trade, MarketTrade(ex, sym, price, 1.0, isBuyerMaker = false, ts), ts, ts)
 
   // 到期设在 30 天后 (单只持有, 不滚动)
   private def config(straddles: Double, spot: Double, intervalMs: Long = 1000) =
@@ -27,7 +28,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
 
   test("聚合: 账户级 delta/gamma = 份数 × (call+put) 单份 BS, ATM=首笔成交价"):
     val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), config(straddles = 10.0, spot = 0.0))
-    val g = src.events().collect { case IncomeEvent(_, _, EventData.GreeksUpdate(gg)) => gg }.toVector
+    val g = src.events().flatMap(_.as(Topics.Greeks)).toVector
     assertEquals(g.size, 1)
     val tY = 30.0 / 365.0
     val call = BlackScholes.greeks(OptionRight.Call, 100.0, 100.0, tY, 0.2, 0.0)
@@ -42,7 +43,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
       FixedSource(Vector(trade(100.0, 0), trade(100.0, 500), trade(100.0, 1000))),
       config(straddles = 1.0, spot = 0.0),
     )
-    val ts = src.events().collect { case IncomeEvent(t, _, _: EventData.GreeksUpdate) => t }.toVector
+    val ts = src.events().filter(_.is(Topics.Greeks)).map(_.exchangeTs).toVector
     assertEquals(ts, Vector(0L, 1000L))
 
   test("cashBal (Balance) 仅首次发布一次"):
@@ -50,7 +51,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
       FixedSource(Vector(trade(100.0, 0), trade(100.0, 1000), trade(100.0, 2000))),
       config(straddles = 1.0, spot = 3.0),
     )
-    val bals = src.events().collect { case IncomeEvent(_, _, EventData.BalanceUpdate(b)) => b }.toVector
+    val bals = src.events().flatMap(_.as(Topics.Balance)).toVector
     assertEquals(bals.size, 1)
     assertEquals(bals.head.asset, ccy)
     assertEquals(bals.head.available, 3.0)
@@ -83,7 +84,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
   test("临近到期 gamma 钳制到 minTenorDays 下限 (不发散)"):
     // expiry=30d, minTenorDays 默认 1 天；首笔在 expiry 前 1 分钟 -> 剩余 << 1 天, 应被钳制到 1 天
     val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 30 * day - 60_000L))), config(straddles = 1.0, spot = 0.0))
-    val g = src.events().collect { case IncomeEvent(_, _, EventData.GreeksUpdate(gg)) => gg }.toVector.head
+    val g = src.events().flatMap(_.as(Topics.Greeks)).toVector.head
     val tFloor = 1.0 / 365.0 // 钳制下限 = 1 天
     val expected = BlackScholes.greeks(OptionRight.Call, 100.0, 100.0, tFloor, 0.2, 0.0).gamma +
       BlackScholes.greeks(OptionRight.Put, 100.0, 100.0, tFloor, 0.2, 0.0).gamma
