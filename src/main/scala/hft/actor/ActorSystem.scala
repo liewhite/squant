@@ -5,7 +5,7 @@ import hft.event.{AnyEvent, EventBus}
 import org.slf4j.LoggerFactory
 import ox.{Ox, forkDiscard, uninterruptible}
 
-import java.util.concurrent.{CopyOnWriteArrayList, CountDownLatch, TimeUnit}
+import java.util.concurrent.{CopyOnWriteArrayList, CountDownLatch, Executors, ScheduledExecutorService, TimeUnit}
 import scala.jdk.CollectionConverters.*
 
 /** 一个已启动 actor 的句柄：停它 (连同它的整棵子树) 的唯一入口。
@@ -49,6 +49,17 @@ final class ActorContext private[actor] (
     */
   def fork(body: => Unit): Unit = forkDiscard(body)
 
+  /** 延迟 `ms` 毫秒后把一条事件发到总线。
+    *
+    * 用于建模"过一段时间才发生"的事 —— 虚拟柜台的下单在途、回报回传都靠它。
+    * 定时器**只负责把发布推迟到点，不触碰任何状态**：事件到点后经总线进入 actor 的邮箱，
+    * 仍由 actor 线程串行处理。因此柜台的状态依旧只有一个写者。
+    *
+    * actor 停止后已排期的事件不再发布 —— 停掉的柜台不该再吐回报。
+    */
+  def scheduleEvent(ms: Long, event: AnyEvent): Unit =
+    system.schedule(ms) { if handle.finished.getCount > 0 then system.bus.publish(event) }
+
   /** 睡 `ms` 毫秒，除非期间收到了停止信号。返回 true 表示该收工了。
     *
     * 自驱动循环用它代替裸 `Thread.sleep`，就能被协作式地叫停：
@@ -84,6 +95,24 @@ final class ActorContext private[actor] (
 final class ActorSystem(private[actor] val bus: EventBus)(using Ox):
   private val logger = LoggerFactory.getLogger(classOf[ActorSystem])
   private val roots = CopyOnWriteArrayList[ActorHandle]()
+
+  /** 延迟发布用的定时器。
+    *
+    * **单线程是顺序保证的承重墙**：等延迟的事件按提交序 FIFO 投递，把产生它们的那个
+    * actor 的输出序原样透过延迟传出去。改成多线程会打乱等延迟事件的相对顺序 ——
+    * 对撮合回报来说那意味着"成交先于挂单确认"这类不可能的序列。
+    * daemon 线程，进程退出即回收。
+    */
+  private val scheduler: ScheduledExecutorService =
+    Executors.newSingleThreadScheduledExecutor { r =>
+      val t = Thread(r, "actor-scheduler")
+      t.setDaemon(true)
+      t
+    }
+
+  private[actor] def schedule(ms: Long)(body: => Unit): Unit =
+    if ms <= 0 then body
+    else scheduler.schedule((() => body): Runnable, ms, TimeUnit.MILLISECONDS): Unit
 
   /** 起一个顶层 actor */
   def spawn(actor: Actor): ActorHandle = spawnUnder(None, actor)

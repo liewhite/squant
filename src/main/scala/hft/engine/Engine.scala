@@ -87,14 +87,6 @@ final class Engine private (
   def addStrategies(strategies: Seq[Strategy], account: AccountId): Seq[ActorHandle] =
     synchronized {
     if strategies.isEmpty then return Vector.empty
-    // 启动对齐 (下面 2/3/4 步) 一律从**真实交易所** REST 拉取并以 Live 归属发布，
-    // Paper 账户的策略订阅的是 (Paper(n), 标的)，一条都收不到 —— 会盲启。
-    // 虚拟柜台落地前诚实拒绝，好过静默坏掉。
-    require(
-      account == AccountId.Live,
-      s"$account 的启动对齐路径尚未实现 (初始持仓/挂单只能从真实交易所拉取)，" +
-        "影子账户须待虚拟柜台落地后再启用",
-    )
 
     // 1. 创建 Executor，先查唯一性再 spawn (查完再落地，避免半启动状态)
     val executors = strategies.map(Executor(_, symbolMetas, account))
@@ -108,16 +100,16 @@ final class Engine private (
     val combined = Subscription(executors.flatMap(_.subscription.interests).toSet)
     val instruments = combined.instruments
 
-    // 2. 初始持仓
-    publishInitialPositions(instruments)
-
-    // 3. 初始账户信息
-    combined.exchanges.foreach(exchange =>
-      AccountRefresher.publishAccountInfo(requireClient(exchange), bus.publish, logger)
-    )
-
-    // 4. 现有挂单
-    publishExistingPendingOrders(instruments)
+    // 2~4. 启动对齐：只有实盘需要。
+    // 影子账户从零开始 —— 没有历史仓位与挂单要恢复，唯一的初值 (净值) 由它自己的
+    // 虚拟柜台周期发布 (见 hft.sim.PaperCounter)。拿真实交易所的持仓去对齐一个模拟
+    // 账户是错的：那是别人的仓位。
+    if account == AccountId.Live then
+      publishInitialPositions(instruments)
+      combined.exchanges.foreach(exchange =>
+        AccountRefresher.publishAccountInfo(requireClient(exchange), bus.publish, logger)
+      )
+      publishExistingPendingOrders(instruments)
 
     // 5. 订阅行情
     SubscriptionKind.from(combined).groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
@@ -126,7 +118,7 @@ final class Engine private (
         .subscribe(kinds)
     }
 
-    logger.info(s"${strategies.size} strategies added")
+    logger.info(s"${strategies.size} strategies added on $account")
     ids
   }
 
