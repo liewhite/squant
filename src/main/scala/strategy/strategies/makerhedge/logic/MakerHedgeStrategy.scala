@@ -114,7 +114,7 @@ final class MakerHedgeStrategy(
         case Some(id) =>
           if now - restingAt > requoteMs then
             restingId = None // 撤后下一 tick 重挂 (按新价)
-            Vector(OutcomeEvent.CancelOrder(exchange, symbol, id))
+            Vector(OutcomeEvent.CancelOrder(exchange, symbol, OrderRef.ByExchangeId(id)))
           else Vector.empty
         case None =>
           state.greeks(exchange, ccy) match

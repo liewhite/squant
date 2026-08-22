@@ -66,12 +66,12 @@ class SimStateSpec extends munit.FunSuite:
   test("撤单到达: 在簿则出簿并回报 Cancelled"):
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
     val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1", 1)
-    val (s3, evs) = s2.onCancelArrived(ex, "1", 1)
+    val (s3, evs) = s2.onCancelArrived(ex, OrderRef.ByExchangeId("1"), 1)
     assertEquals(statuses(evs), Vector(OrderStatus.Cancelled))
     assert(s3.resting.isEmpty)
 
   test("撤单到达但订单已不在簿 (已成交) -> 无事发生"):
-    val (s2, evs) = empty.onCancelArrived(ex, "404", 1)
+    val (s2, evs) = empty.onCancelArrived(ex, OrderRef.ByExchangeId("404"), 1)
     assert(evs.isEmpty)
     assertEquals(s2, empty)
 

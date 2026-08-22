@@ -21,10 +21,10 @@ class EventBusSpec extends munit.FunSuite:
 
       bus.publish(Event.at(Topics.Bbo, bboOf(btc), t0))
 
-      assertEquals(onBtc.receive().as(Topics.Bbo).map(_.symbol), Some("BTCUSDT"))
+      assertEquals(onBtc.events.receive().as(Topics.Bbo).map(_.symbol), Some("BTCUSDT"))
       // onEth 不该收到：用一条它确实订阅的事件作栅栏，若它先收到 BTC 这里就会失败
       bus.publish(Event.at(Topics.Bbo, bboOf(eth), t0))
-      assertEquals(onEth.receive().as(Topics.Bbo).map(_.symbol), Some("ETHUSDT"))
+      assertEquals(onEth.events.receive().as(Topics.Bbo).map(_.symbol), Some("ETHUSDT"))
 
   test("按 topic 隔离: 同一个 key 上不同 topic 互不投递"):
     supervised:
@@ -32,7 +32,7 @@ class EventBusSpec extends munit.FunSuite:
       val onBbo = bus.subscribe(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
       bus.publish(Event.at(Topics.Trade, tradeOf(btc), t0))
       bus.publish(Event.at(Topics.Bbo, bboOf(btc), t0))
-      assert(onBbo.receive().is(Topics.Bbo), "Trade 不该进 Bbo 订阅者的邮箱")
+      assert(onBbo.events.receive().is(Topics.Bbo), "Trade 不该进 Bbo 订阅者的邮箱")
 
   test("Interest.All 收该 topic 的全部 key"):
     supervised:
@@ -40,8 +40,8 @@ class EventBusSpec extends munit.FunSuite:
       val all = bus.subscribe(Set(Interest.All(Topics.Bbo)))
       bus.publish(Event.at(Topics.Bbo, bboOf(btc), t0))
       bus.publish(Event.at(Topics.Bbo, bboOf(eth), t0))
-      assertEquals(all.receive().as(Topics.Bbo).map(_.symbol), Some("BTCUSDT"))
-      assertEquals(all.receive().as(Topics.Bbo).map(_.symbol), Some("ETHUSDT"))
+      assertEquals(all.events.receive().as(Topics.Bbo).map(_.symbol), Some("BTCUSDT"))
+      assertEquals(all.events.receive().as(Topics.Bbo).map(_.symbol), Some("ETHUSDT"))
 
   test("同 topic 上 All + Keyed 只投递一次"):
     supervised:
@@ -50,8 +50,8 @@ class EventBusSpec extends munit.FunSuite:
       bus.publish(Event.at(Topics.Bbo, bboOf(btc), t0))
       // 第二条作栅栏: 若第一条被投了两次，这里读到的会是重复的 BTC 而不是 ETH
       bus.publish(Event.at(Topics.Bbo, bboOf(eth), t0))
-      assertEquals(both.receive().as(Topics.Bbo).map(_.symbol), Some("BTCUSDT"))
-      assertEquals(both.receive().as(Topics.Bbo).map(_.symbol), Some("ETHUSDT"))
+      assertEquals(both.events.receive().as(Topics.Bbo).map(_.symbol), Some("BTCUSDT"))
+      assertEquals(both.events.receive().as(Topics.Bbo).map(_.symbol), Some("ETHUSDT"))
 
   test("同 topic 上多条 Keyed 声明的 key 相交时, 交集只投一次"):
     // 极易发生: 策略自己声明了某标的的私有回报, 框架又补一条覆盖全部标的的 ——
@@ -66,20 +66,42 @@ class EventBusSpec extends munit.FunSuite:
       bus.publish(Event.local(Topics.Fill, btcFill))
       // 栅栏: 若上一条被投了两次, 这里读到的会是重复的 BTC 而不是 ETH
       bus.publish(Event.local(Topics.Fill, Fill(ex, "ETHUSDT", Side.Long, 100.0, 1.0, t0)))
-      assertEquals(sub.receive().as(Topics.Fill).map(_.symbol), Some("BTCUSDT"))
-      assertEquals(sub.receive().as(Topics.Fill).map(_.symbol), Some("ETHUSDT"))
+      assertEquals(sub.events.receive().as(Topics.Fill).map(_.symbol), Some("BTCUSDT"))
+      assertEquals(sub.events.receive().as(Topics.Fill).map(_.symbol), Some("ETHUSDT"))
 
   test("用户自定义 topic: 框架零改动即可路由"):
     supervised:
       val bus = EventBus()
       val onBtc = bus.subscribe(Set(Interest.Keyed(EventBusSpec.AlphaSignal, Set(btc))))
       bus.publish(Event.local(EventBusSpec.AlphaSignal, EventBusSpec.Score(btc, 0.7)))
-      assertEquals(onBtc.receive().as(EventBusSpec.AlphaSignal).map(_.value), Some(0.7))
+      assertEquals(onBtc.events.receive().as(EventBusSpec.AlphaSignal).map(_.value), Some(0.7))
 
   test("无人订阅的 topic: publish 不抛错"):
     supervised:
       val bus = EventBus()
       bus.publish(Event.at(Topics.Bbo, bboOf(btc), t0))
+
+  test("退订后不再收到事件"):
+    supervised:
+      val bus = EventBus()
+      val sub = bus.subscribe(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
+      bus.publish(Event.at(Topics.Bbo, bboOf(btc), t0))
+      assertEquals(sub.events.receive().as(Topics.Bbo).map(_.symbol), Some("BTCUSDT"))
+      sub.close()
+      bus.publish(Event.at(Topics.Bbo, bboOf(btc), t0))
+      // 若仍在索引里, 这条会进它的无界邮箱 —— 动态起停场景下就是一条稳定的内存泄漏
+      assertEquals(bus.subscriberCount(Topics.Bbo, btc), 0, "退订后索引里不该再有它")
+
+  test("退订幂等, 且不影响别的订阅者"):
+    supervised:
+      val bus = EventBus()
+      val a = bus.subscribe(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
+      val b = bus.subscribe(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
+      a.close()
+      a.close() // 幂等: 停机路径上重复调用是常态
+      assertEquals(bus.subscriberCount(Topics.Bbo, btc), 1, "b 仍应在索引里")
+      bus.publish(Event.at(Topics.Bbo, bboOf(btc), t0))
+      assertEquals(b.events.receive().as(Topics.Bbo).map(_.symbol), Some("BTCUSDT"))
 
   test("投递索引与 Subscription.accepts 同源"):
     // 索引是判据的扇出优化，不是第二份判据。两者若错开，失效方式是某订阅者静默收不到事件，
@@ -104,7 +126,7 @@ class EventBusSpec extends munit.FunSuite:
       val src = bus.subscribe(interests)
       events.foreach(bus.publish)
       val expected = events.filter(sub.accepts)
-      val delivered = (1 to expected.size).map(_ => src.receive()).toVector
+      val delivered = (1 to expected.size).map(_ => src.events.receive()).toVector
       assertEquals(delivered, expected)
 
 object EventBusSpec:

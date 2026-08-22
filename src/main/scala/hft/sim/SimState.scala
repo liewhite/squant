@@ -144,9 +144,9 @@ final case class SimState(
               case None    => (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Cancelled, limit, now)))
 
   /** 撤单到达撮合：仍在簿则移除并回报 Cancelled；已成交 (不在簿) 则无事发生。`now` 为到达时刻 */
-  def onCancelArrived(exchange: Exchange, orderId: OrderId, now: Timestamp): (SimState, Vector[AnyEvent]) =
-    resting.get(orderId) match
-      case Some(o) =>
+  def onCancelArrived(exchange: Exchange, ref: OrderRef, now: Timestamp): (SimState, Vector[AnyEvent]) =
+    findResting(ref) match
+      case Some((orderId, o)) =>
         val ev = Event.stamped(
           Topics.OrderUpdate,
           OrderUpdate(orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, 0.0, 0.0, now),
@@ -155,6 +155,11 @@ final case class SimState(
         )
         (copy(resting = resting - orderId), Vector(ev))
       case None => (this, Vector.empty)
+
+  /** 按交易所 id 或 clientOrderId 找挂单 —— 与真实交易所的两种撤单指名方式一致 */
+  def findResting(ref: OrderRef): Option[(OrderId, RestingOrder)] = ref match
+    case OrderRef.ByExchangeId(id) => resting.get(id).map(id -> _)
+    case OrderRef.ByClientId(cid)  => resting.find((_, o) => o.clientOrderId == cid)
 
   // ==================== 私有构造 ====================
 

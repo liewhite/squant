@@ -24,6 +24,23 @@ enum Exchange:
 final case class Instrument(exchange: Exchange, symbol: Symbol):
   override def toString: String = s"$exchange:$symbol"
 
+/** 撤单时如何指名一张订单。
+  *
+  * 两种指名方式不是等价的备选，而对应订单生命周期的两个阶段：交易所确认之前，本地只有
+  * 自己生成的 clientOrderId；确认之后才有交易所 id。撤下一个策略时它可能正好有单在途，
+  * 只认交易所 id 就撤不掉那张单 —— 而策略已经停了，没有"下一次收尾"来兜底，
+  * 那张 GTC 单会留在交易所无人跟踪。
+  */
+enum OrderRef:
+  /** 交易所分配的 id */
+  case ByExchangeId(id: OrderId)
+  /** 我们下单时自己生成的 id (Binance origClientOrderId / OKX clOrdId / Bybit orderLinkId) */
+  case ByClientId(id: String)
+
+  def raw: String = this match
+    case ByExchangeId(id) => id
+    case ByClientId(id)   => id
+
 /** 交易方向 */
 enum Side:
   case Long, Short

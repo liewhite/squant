@@ -32,6 +32,16 @@ final class EventBus:
 
   private val topics: ConcurrentHashMap[Topic[?, ?], TopicIndex] = ConcurrentHashMap()
 
+  /** 订阅/退订的互斥锁。
+    *
+    * 只锁冷路径 —— [[publish]] 不参与，热路径仍然无锁。
+    *
+    * 没有它会丢注册：B 的 subscribe 取到某个 key 槽的列表、尚未 add，A 的退订恰好把这个
+    * 已空的槽从索引里摘掉，B 随后 add 进一个孤儿列表 —— B 永远收不到该 key 的事件，
+    * 且没有任何症状。"停旧策略、起新策略于同一标的"正是这个序列。
+    */
+  private val registrationLock = new Object
+
   private def indexOf(topic: Topic[?, ?]): TopicIndex =
     topics.computeIfAbsent(topic, _ => TopicIndex())
 
@@ -46,7 +56,7 @@ final class EventBus:
     * 补了一条覆盖全部标的的 —— 两个 Interest 不相等 (Set 去重不了) 但 key 相交。
     * 更隐蔽的是它会让实盘与回测分叉：回测走 [[Subscription.accepts]]，那是布尔判定、天然幂等。
     */
-  def subscribe(interests: Set[Interest]): Source[AnyEvent] =
+  def subscribe(interests: Set[Interest]): EventBus.Mailbox = registrationLock.synchronized {
     val ch = Channel.unlimited[AnyEvent]
     val allTopics: Set[Topic[?, ?]] = interests.collect { case Interest.All(t) => t }
     val keyedByTopic: Map[Topic[?, ?], Set[Any]] =
@@ -60,12 +70,78 @@ final class EventBus:
       val idx = indexOf(t)
       keys.foreach(k => idx.byKey.computeIfAbsent(k, _ => CopyOnWriteArrayList()).add(ch))
     }
-    ch
+    EventBus.Mailbox(ch, () => registrationLock.synchronized(remove(ch, allTopics, keyedByTopic)))
+  }
 
-  /** 发布一条事件给关心它的订阅者。无人订阅该 topic 时是一次哈希查找后返回。 */
+  /** 某个 (topic, key) 槽上的订阅者数 —— 供观测与测试确认退订确实摘干净了 */
+  def subscriberCount(topic: Topic[?, ?], key: Any): Int =
+    Option(topics.get(topic)).fold(0) { idx =>
+      Option(idx.byKey.get(key)).fold(0)(_.size) + idx.all.size
+    }
+
+  /** 把一条 channel 从它登记过的每个槽里摘除。
+    *
+    * 只摘自己登记过的位置 (而不是遍历全索引)，因此代价与本订阅者的声明规模成正比，
+    * 与总订阅者数无关。空掉的 key 槽一并删除，否则长期起停会攒下一堆空列表。
+    */
+  private def remove(
+      ch: Channel[AnyEvent],
+      allTopics: Set[Topic[?, ?]],
+      keyedByTopic: Map[Topic[?, ?], Set[Any]],
+  ): Unit =
+    allTopics.foreach(t => Option(topics.get(t)).foreach(_.all.remove(ch)))
+    keyedByTopic.foreach { (t, keys) =>
+      Option(topics.get(t)).foreach { idx =>
+        keys.foreach { k =>
+          Option(idx.byKey.get(k)).foreach { subscribers =>
+            subscribers.remove(ch)
+            if subscribers.isEmpty then idx.byKey.remove(k, subscribers)
+          }
+        }
+      }
+    }
+
+  /** 发布一条事件给关心它的订阅者。无人订阅该 topic 时是一次哈希查找后返回。
+    *
+    * 用 `sendOrClosed` 而非 `send`：订阅者正在停机时，退订与本次投递可能重叠 (投递已拿到
+    * 订阅者快照、对方随即关闭邮箱)。向一个正在退出的订阅者投递失败是正常的停机竞态，
+    * 不该把发布方 (另一个 actor 的事件循环) 炸掉、进而级联终止整个引擎。
+    */
   def publish(event: AnyEvent): Unit =
     val idx = topics.get(event.topic)
     if idx != null then
-      idx.all.forEach(_.send(event))
+      idx.all.forEach(ch => ch.sendOrClosed(event): Unit)
       val keyed = idx.byKey.get(event.key)
-      if keyed != null then keyed.forEach(_.send(event))
+      if keyed != null then keyed.forEach(ch => ch.sendOrClosed(event): Unit)
+
+object EventBus:
+  /** 一个订阅者的邮箱：事件流 + 退订句柄。
+    *
+    * 退订不是可选的收尾动作 —— 订阅者停掉后若不从索引摘除，它那条无界 channel 会继续
+    * 累积事件直到进程退出。动态起停策略的场景下这就是一条稳定的内存泄漏。
+    */
+  final class Mailbox private[event] (channel: Channel[AnyEvent], remove: () => Unit) extends AutoCloseable:
+    private var removed = false
+
+    /** 本邮箱的事件流。消费到 [[done]] 之后排空为止 (`Source.foreach` 正是这个语义) */
+    def events: Source[AnyEvent] = channel
+
+    /** 从总线摘除，不再有新事件进来。幂等 —— 停机路径上重复调用是常态。
+      *
+      * 与 [[done]] 是两件事：这一步只断开投递源，邮箱里已经排队的事件仍在。
+      */
+    override def close(): Unit = synchronized {
+      if !removed then
+        removed = true
+        remove()
+    }
+
+    /** 关闭邮箱：已缓冲的事件仍会被投递完，消费者随后收到流结束。
+      *
+      * 停机时先 [[close]] 再 `done`，消费者就能把积压事件处理完再退出 —— 丢一条成交回报
+      * 就是本地仓位与交易所发散。
+      *
+      * 幂等 (`doneOrClosed` 对已关闭的邮箱返回而不抛)：与 [[close]] 一样，
+      * 停机路径上重复调用是常态。
+      */
+    def done(): Unit = channel.doneOrClosed(): Unit

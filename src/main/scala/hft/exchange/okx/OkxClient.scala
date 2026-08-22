@@ -122,14 +122,17 @@ final class OkxClient(
         case None    => ensureOk(resp.code, resp.msg).flatMap(_ => Left(ExchangeError.Other("OKX no order data in response")))
     }
 
-  override def cancelOrder(symbol: Symbol, orderId: OrderId): Either[ExchangeError, Unit] =
-    val body = s"""{"instId":"${toOkx(symbol, quote)}","ordId":"$orderId"}"""
+  override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
+    val idField = ref match
+      case OrderRef.ByExchangeId(id) => s""""ordId":"$id""""
+      case OrderRef.ByClientId(id)   => s""""clOrdId":"$id""""
+    val body = s"""{"instId":"${toOkx(symbol, quote)}",$idField}"""
     signedRequest[CancelResp](Method.POST, "/api/v5/trade/cancel-order", body).flatMap { resp =>
       resp.data.headOption match
         case Some(d) if d.sCode != "0" =>
           // OKX 51400/51401/51402: 订单不存在/已撤/已完成——归一为类型化错误，不外泄魔法码
           if OkxClient.OrderNotFoundCodes.contains(d.sCode) then
-            Left(ExchangeError.OrderNotFound(s"OKX ${d.sCode}: $orderId"))
+            Left(ExchangeError.OrderNotFound(s"OKX ${d.sCode}: ${ref.raw}"))
           else Left(ExchangeError.Other(s"OKX cancel failed: code=${d.sCode} msg=${d.sMsg}"))
         case Some(_) => Right(())
         case None    => ensureOk(resp.code, resp.msg)

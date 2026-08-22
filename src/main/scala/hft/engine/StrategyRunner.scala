@@ -48,6 +48,22 @@ final class StrategyRunner(
       case cancel: OutcomeEvent.CancelOrder => cancel
     }
 
+  /** 撤掉本策略全部挂单的信号 —— 停机收尾用。
+    *
+    * **在途单 (还没拿到交易所 id) 按 clientOrderId 撤**，不能跳过：策略一旦撤下就没有
+    * "下一次收尾"了 (它已退订)，超时检测也随它一起停了，跳过等于把一张 GTC 单留在交易所
+    * 无人跟踪。三家交易所都支持按自有 id 撤 (见 [[OrderRef]])。
+    *
+    * 撤一张已经成交或本就不存在的单会得到 `OrderNotFound`，那是既有的容忍路径 (非致命)。
+    */
+  def pendingCancels: Vector[OutcomeEvent] =
+    state.allPendingOrders.view
+      .map { p =>
+        val ref = if p.order.id.nonEmpty then OrderRef.ByExchangeId(p.order.id) else OrderRef.ByClientId(p.order.clientOrderId)
+        OutcomeEvent.CancelOrder(p.order.exchange, p.order.symbol, ref)
+      }
+      .toVector
+
   /** 币本位数量 -> 合约张数，价格/数量按交易所精度取整。
     * 缺少 SymbolMeta 说明策略交易了未预加载的 symbol，是配置错误，立即终止
     */

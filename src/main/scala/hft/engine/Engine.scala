@@ -3,7 +3,8 @@ package hft.engine
 import hft.domain.*
 import hft.state.{StateManager, SymbolState}
 import hft.exchange.{AccountStream, ExchangeClient, MarketDataStream, SubscriptionKind}
-import hft.event.{AnyEvent, Event, EventBus, Interest, Subscription, Topics}
+import hft.actor.{ActorHandle, ActorSystem}
+import hft.event.{Event, EventBus, Interest, Subscription, Topics}
 import hft.strategy.Strategy
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
@@ -42,17 +43,27 @@ final class Engine private (
     marketStreams: Map[Exchange, MarketDataStream],
     symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     bus: EventBus,
+    system: ActorSystem,
 )(using Ox):
   private val logger = LoggerFactory.getLogger(classOf[Engine])
 
   /** 在策略**之外**订阅事件 (成交记录、监控、指标导出)，策略因此无需承担写文件等副作用。
     *
-    * 返回独立 Source；调用方负责在自己的作用域内 fork 消费。须在关心的事件产生前订阅
-    * (通常紧随 [[Engine.start]]、在 [[addStrategies]] 之前)。
+    * 返回一个邮箱：调用方负责在自己的作用域内 fork 消费，**并在不再需要时 `close()` 退订**
+    * (邮箱无界，不退订就会一直攒事件)。需要随引擎一起管理生命周期的观察者，更好的做法是
+    * 实现 [[hft.actor.Actor]] 交给 [[hft.actor.ActorSystem]]，退订由它负责。
+    *
+    * 须在关心的事件产生前订阅 (通常紧随 [[Engine.start]]、在 [[addStrategies]] 之前)。
     */
-  def subscribe(interests: Set[Interest]): Source[AnyEvent] = bus.subscribe(interests)
+  def subscribe(interests: Set[Interest]): EventBus.Mailbox = bus.subscribe(interests)
 
-  def addStrategy(strategy: Strategy): Unit = addStrategies(Vector(strategy))
+  def addStrategy(strategy: Strategy): ActorHandle = addStrategies(Vector(strategy)).head
+
+  /** 撤下一个策略实例：先撤掉它挂在交易所的单 (见 [[Executor.onStop]])，再退订、摘除。
+    *
+    * 返回时收尾已经跑完。**不平仓** —— 仓位归谁管是策略之外的决定。
+    */
+  def removeStrategy(handle: ActorHandle): Unit = system.stop(handle)
 
   /** 批量添加策略。
     *
@@ -64,12 +75,12 @@ final class Engine private (
     *   4. REST 查询现有挂单并发布 —— 策略接管启动前的遗留订单
     *   5. 向交易所订阅行情 —— 市场数据从此处开始流动
     */
-  def addStrategies(strategies: Seq[Strategy]): Unit =
-    if strategies.isEmpty then return
+  def addStrategies(strategies: Seq[Strategy]): Seq[ActorHandle] =
+    if strategies.isEmpty then return Vector.empty
 
-    // 1. 创建 Executor，订阅总线
-    val executors = strategies.map(Executor(_, symbolMetas, bus))
-    executors.foreach(_.run())
+    // 1. 创建 Executor 并 spawn (spawn 内部先订阅总线, 之后的事件不丢)
+    val executors = strategies.map(Executor(_, symbolMetas))
+    val ids = executors.map(system.spawn)
 
     // 策略订阅范围的并集 —— 行情订阅与启动对齐都从这一处派生
     val combined = Subscription(executors.flatMap(_.subscription.interests).toSet)
@@ -79,7 +90,9 @@ final class Engine private (
     publishInitialPositions(instruments)
 
     // 3. 初始账户信息
-    combined.exchanges.foreach(exchange => publishAccountInfoFrom(requireClient(exchange)))
+    combined.exchanges.foreach(exchange =>
+      AccountRefresher.publishAccountInfo(requireClient(exchange), bus.publish, logger)
+    )
 
     // 4. 现有挂单
     publishExistingPendingOrders(instruments)
@@ -92,23 +105,10 @@ final class Engine private (
     }
 
     logger.info(s"${strategies.size} strategies added")
+    ids
 
   private def requireClient(exchange: Exchange): ExchangeClient =
     clients.getOrElse(exchange, throw IllegalStateException(s"No client configured for exchange $exchange"))
-
-  /** REST 查询账户信息并发布 [[Topics.AccountInfo]] 事件。
-    * 返回 false 表示该交易所未配置凭证 (无账户即无需刷新，确定安全)；其余失败致命
-    */
-  private def publishAccountInfoFrom(client: ExchangeClient): Boolean =
-    client.fetchAccountInfo() match
-      case Right(info) =>
-        bus.publish(Event.local(Topics.AccountInfo, info))
-        true
-      case Left(ExchangeError.Auth(_)) =>
-        logger.info(s"No credentials for ${client.exchange}, skipping account info")
-        false
-      case Left(e) =>
-        throw IllegalStateException(s"Failed to fetch account info from ${client.exchange}: ${e.message}")
 
   /** 启动对齐必须成功 (fail-fast)，唯一的例外是未配置凭证：
     * 无账户即无仓位/挂单需要对齐，跳过是确定安全的 (公开数据演示/研究模式)
@@ -184,30 +184,18 @@ object Engine:
       }.toMap
 
     val bus = EventBus()
+    val system = ActorSystem(bus)
 
-    OutcomeProcessor(clients, bus, dryRun).run()
-
-    // 时钟: 周期性发布 Clock 事件 (驱动订单超时清理等定时任务)
-    fork {
-      while true do
-        Thread.sleep(clockIntervalMs)
-        bus.publish(Event.local(Topics.Clock, ()))
-    }
+    // 消费者先起、生产者后起: 事件开始流动时下游必须已经在总线上, 否则最早的那批事件没人接。
+    // 这也是停机顺序的反面 —— 生产者先停, 它们收尾时补发的最后一批事件仍有人消费。
+    system.spawn(OutcomeProcessor(clients, dryRun))
+    system.spawn(Clock(clockIntervalMs))
+    system.spawn(AccountRefresher(clients.values, accountRefreshMs))
 
     // 先启动账户流 (订阅总线、建立私有连接)，再启动公共行情流——
     // 虚拟柜台同时扮演两者时，start 幂等，两次调用只生效一次
     accountStreams.values.foreach(_.start(bus))
     marketStreams.values.foreach(_.start(bus))
 
-    val engine = Engine(clients, marketStreams, symbolMetas, bus)
-
-    // 账户信息周期刷新: 未配置凭证的交易所在首次拉取后退出轮询 (确定安全的例外)
-    fork {
-      var polled = clients.values.toVector
-      while polled.nonEmpty do
-        Thread.sleep(accountRefreshMs)
-        polled = polled.filter(engine.publishAccountInfoFrom)
-    }
-
     logger.info("Engine started")
-    engine
+    Engine(clients, marketStreams, symbolMetas, bus, system)

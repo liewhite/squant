@@ -42,7 +42,7 @@ class FillRecorderSpec extends munit.FunSuite:
     val rec = FillRecorder(tmp)
     supervised:
       val bus = EventBus()
-      rec.run(bus.subscribe(Set(Interest.All(Topics.Fill))))
+      rec.run(bus.subscribe(Set(Interest.All(Topics.Fill))).events)
       bus.publish(Event.at(Topics.Fill, fill(Side.Long, 100.0, 2.0, 1), 1))
       bus.publish(Event.at(Topics.Fill, fill(Side.Short, 120.0, 2.0, 2), 2))
       // 非成交事件应被忽略
@@ -62,7 +62,7 @@ class FillRecorderSpec extends munit.FunSuite:
     val rec = FillRecorder(java.nio.file.Path.of("/nonexistent-dir-xyz/sim-fills.csv"))
     supervised:
       val bus = EventBus()
-      rec.run(bus.subscribe(Set(Interest.All(Topics.Fill)))) // 不应抛
+      rec.run(bus.subscribe(Set(Interest.All(Topics.Fill))).events) // 不应抛
       bus.publish(Event.at(Topics.Fill, fill(Side.Long, 100.0, 2.0, 1), 1))
       bus.publish(Event.at(Topics.Fill, fill(Side.Short, 120.0, 2.0, 2), 2))
       Thread.sleep(150)

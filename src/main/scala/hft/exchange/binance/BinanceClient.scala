@@ -70,12 +70,15 @@ final class BinanceClient(
         base + ("type" -> "LIMIT") + ("price" -> fmt(price)) + ("timeInForce" -> tifParam(tif))
     signedRequest[NewOrderResp](Method.POST, "/fapi/v1/order", params).map(_.orderId.toString)
 
-  override def cancelOrder(symbol: Symbol, orderId: OrderId): Either[ExchangeError, Unit] =
-    signedRaw(Method.DELETE, "/fapi/v1/order", Map("symbol" -> symbol, "orderId" -> orderId)) match
+  override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
+    val idParam = ref match
+      case OrderRef.ByExchangeId(id) => "orderId" -> id
+      case OrderRef.ByClientId(id)   => "origClientOrderId" -> id
+    signedRaw(Method.DELETE, "/fapi/v1/order", Map("symbol" -> symbol, idParam)) match
       case Right(_) => Right(())
       // Binance -2011 Unknown order: 已成交/已撤——在交易所边界归一为类型化错误，不外泄魔法码
       case Left(ExchangeError.Http(_, body)) if body.contains("-2011") =>
-        Left(ExchangeError.OrderNotFound(s"Binance -2011 unknown order: $orderId"))
+        Left(ExchangeError.OrderNotFound(s"Binance -2011 unknown order: ${ref.raw}"))
       case Left(e) => Left(e)
 
   override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] =

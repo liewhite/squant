@@ -61,6 +61,9 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long):
       cashBal <- cashBalances.get((exchange, ccy))
     yield g.copy(delta = g.delta + cashBal)
 
+  /** 本策略在所有标的上的挂单 (供停机收尾逐一撤掉) */
+  def allPendingOrders: Iterable[PendingOrder] = states.values.flatMap(_.pendingOrders)
+
   def hasPendingOrders(symbol: Symbol): Boolean =
     states.get(symbol).exists(_.hasPendingOrders)
 

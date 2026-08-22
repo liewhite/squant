@@ -10,8 +10,11 @@ enum OutcomeEvent:
     * @param comment 信号意图描述，如 "spread_open | spread=0.30% | qty=10"
     */
   case PlaceOrders(orders: Vector[Order], comment: String)
-  /** 撤单信号。撤单的终态确认 (Cancelled) 以私有流推送为准，框架不合成确认事件 */
-  case CancelOrder(exchange: Exchange, symbol: Symbol, orderId: OrderId)
+  /** 撤单信号。撤单的终态确认 (Cancelled) 以私有流推送为准，框架不合成确认事件。
+    *
+    * 用 [[OrderRef]] 而非裸 id 指名订单：在途单还没有交易所 id，只能按 clientOrderId 撤。
+    */
+  case CancelOrder(exchange: Exchange, symbol: Symbol, ref: OrderRef)
 
 /** 策略信号的事件族。
   *

@@ -76,8 +76,8 @@ trait ExchangeClient:
   /** 下单，返回交易所订单 ID */
   def placeOrder(order: Order): Either[ExchangeError, OrderId]
 
-  /** 撤单 */
-  def cancelOrder(symbol: Symbol, orderId: OrderId): Either[ExchangeError, Unit]
+  /** 撤单。[[OrderRef]] 决定按交易所 id 还是按 clientOrderId 指名 —— 在途单只有后者 */
+  def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit]
 
   /** 查询当前挂单 (live + partially_filled) */
   def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]]

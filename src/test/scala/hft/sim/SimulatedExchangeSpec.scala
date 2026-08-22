@@ -48,7 +48,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] = Right(Vector(meta))
     private def unused = Left(ExchangeError.Other("stub: not used"))
     override def placeOrder(order: Order) = unused
-    override def cancelOrder(symbol: Symbol, orderId: OrderId) = unused
+    override def cancelOrder(symbol: Symbol, ref: OrderRef) = unused
     override def fetchPendingOrders(symbol: Symbol) = unused
     override def setLeverage(symbol: Symbol, leverage: Int) = unused
     override def fetchAccountInfo() = unused
@@ -57,8 +57,8 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   /** 订阅总线并把事件收集到队列；返回收集器 (须在产生事件前调用) */
   private def collect(bus: EventBus)(using Ox): ConcurrentLinkedQueue[AnyEvent] =
     val q = ConcurrentLinkedQueue[AnyEvent]()
-    val src = bus.subscribe(Topics.market.map(Interest.All) ++ Topics.instrumentPrivate.map(Interest.All))
-    fork { while true do q.add(src.receive()) }
+    val src = bus.subscribe(Topics.market.map(Interest.All.apply) ++ Topics.instrumentPrivate.map(Interest.All.apply))
+    fork { while true do q.add(src.events.receive()) }
     q
 
   private def fills(q: ConcurrentLinkedQueue[AnyEvent]): Vector[Fill] =
@@ -143,13 +143,13 @@ class SimulatedExchangeSpec extends munit.FunSuite:
       market.emitBbo(50000, 50001, 1)
       val oid = sim.placeOrder(limitOrder(Side.Long, 49995.0, TimeInForce.PostOnly, "buy-1")).toOption.get
       Thread.sleep(60)
-      assertEquals(sim.cancelOrder(sym, oid), Right(()))
+      assertEquals(sim.cancelOrder(sym, OrderRef.ByExchangeId(oid)), Right(()))
       Thread.sleep(60)
 
       assert(orderStatuses(q).contains(OrderStatus.Cancelled))
       assert(sim.fetchPendingOrders(sym).toOption.get.isEmpty)
       // 已撤订单再次撤单 -> OrderNotFound
-      assert(sim.cancelOrder(sym, oid) match { case Left(_: ExchangeError.OrderNotFound) => true; case _ => false })
+      assert(sim.cancelOrder(sym, OrderRef.ByExchangeId(oid)) match { case Left(_: ExchangeError.OrderNotFound) => true; case _ => false })
       sim.shutdown()
 
   test("交易所->策略延迟: 成交回报延迟到达策略侧"):

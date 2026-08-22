@@ -48,7 +48,7 @@ class SimStateFeeSpec extends munit.FunSuite:
     val (s1, _) = state.onMarket(ex, bboEv(100.0, 100.0, 1), 1)
     val (s2, _) = s1.onOrderArrived(ex, order(Side.Long, OrderType.Limit(99.0, TimeInForce.GTC), 2.0), "o1", 1)
     val restingId = s2.resting.keys.head
-    val (s3, _) = s2.onCancelArrived(ex, restingId, 1)
+    val (s3, _) = s2.onCancelArrived(ex, OrderRef.ByExchangeId(restingId), 1)
     assert(s3.resting.isEmpty)
     near(s3.ledger.cash, initCash)
 

@@ -75,6 +75,7 @@ object AlphaSignal extends Topic[Symbol, Score]("alphaSignal"):
 |---|---|
 | `domain` | 纯数据模型: Order/Position/BBO/FundingRate/SymbolMeta 等，零行为依赖 |
 | `event` | `Topic`/`Event`/`Interest`/`Subscription`/`EventBus` — 事件与投递的全部基础设施 |
+| `actor` | `Actor`/`ActorContext`/`ActorSystem` — 组件的装配与生命周期树 |
 | `state` | `SymbolState`/`StateManager` (策略视角的聚合状态) |
 | `exchange` | 核心抽象: `ExchangeClient` (REST trait)、`ExchangeConnector` (WS trait)、`SubscriptionKind`、`WsLoop` (通用重连泵) |
 | `engine` | `Engine` (装配/生命周期)、`Executor` (策略运行器)、`OutcomeProcessor` (信号执行) |
@@ -118,9 +119,43 @@ ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内
 
 编写一个新策略 = 实现 `Strategy` (声明订阅 + 纯函数式 `onEvent`)。
 
+### Actor: 组件的统一形态
+
+引擎里所有有生命周期的东西都是 `Actor` —— 策略执行器、下单出口、时钟、账户轮询、
+监控与指标导出。此前它们各写各的 `fork { while true ... }`，新增一个就要回到装配处插代码；
+现在只需实现 trait 并 `ActorSystem.spawn`。
+
+两种形态共用一个 trait：
+
+- **事件驱动**（策略、下单出口、指标 sink）：声明 `interests`，在 `onEvent` 里消费并产出
+  事件。纯函数形态 —— 可单测、可回测、**可被动态起停**。
+- **自驱动**（WS 连接、定时器、REST 轮询）：在 `onStart` 里 fork 自己的常驻线程。
+
+**生命周期树**：`ActorContext.spawn` 起的是子 actor。停一个 actor 时先递归停完它的子孙、
+等到它们的 `onStop` 真正跑完，再停它自己 —— 没有任何地方需要知道整棵树的形状，
+每层只管自己那层，递归自然成立。
+
+**停机是协作式的**，不用中断：中断会把 actor 打断在任意一行上，而它可能正处在
+"已发出下单请求、尚未登记 pending"这类不能被腰斩的位置。自驱动循环用
+`ctx.sleepUnlessStopped(ms)` 代替裸 `Thread.sleep` 就能被叫停。
+
+**收尾在退订之前**：`onStop` 可以产出最后一批事件（`Executor` 在这里撤掉本策略的挂单），
+那时总线与下游都还活着。顺序反了就是漏发指令。
+
+#### 已知限制
+
+- **共享标的的多策略不要动态撤下**。订单回报按标的路由，两个交易同一标的的策略会互相收到
+  对方的订单确认，而 `SymbolState.applyOrderUpdate` 无法区分"启动时的遗留挂单"与"另一个
+  运行中策略的单"，会照单收养 —— 于是撤下 B 有可能撤掉 A 的活单。根因是订单缺所有者判据，
+  属上层架构问题，待引入模拟盘/实盘并行时一并解决（那时正好要给订单加账户归属）。
+- `onStart` 里 fork 的线程不受 `stop` 控制，生命周期绑在根作用域上。
+  一个阻塞在 socket 读上的线程没法被协作式叫停，假装能停会让停机链在那里静默等下去。
+  要能动态起停的 actor 必须走事件驱动形态。
+
 ### 并发模型
 
 - 所有组件都是 `supervised` 作用域内的虚拟线程 fork，任一组件崩溃级联终止整个作用域 (对应 kameo spawn_link)。
+  **不做局部重启** —— 一个崩掉的策略留下的挂单与仓位归谁管没有好答案，而重启后的启动对齐有答案。
 - 每个策略一个 `Executor`，独占虚拟线程串行消费事件，策略与状态无锁。
 - `WsLoop` 每条连接两个虚拟线程: 发送线程是连接唯一写入者 (Pong 回应也经出站 channel)，
   接收线程重组分片文本帧后回调；任一侧出错即异常上抛终止 (不重连)。

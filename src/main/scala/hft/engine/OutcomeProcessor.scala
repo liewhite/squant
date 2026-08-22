@@ -1,11 +1,11 @@
 package hft.engine
 
+import hft.actor.{Actor, ActorContext}
 import hft.domain.*
 import hft.exchange.ExchangeClient
-import hft.event.{Event, EventBus, Interest, Topics}
+import hft.event.{AnyEvent, Event, Interest, Topics}
 import hft.strategy.{OrderIntent, OutcomeEvent}
 import org.slf4j.LoggerFactory
-import ox.{Ox, fork}
 
 /** 信号处理器：消费策略信号，调用交易所 REST API 执行下单/撤单。
   *
@@ -19,34 +19,36 @@ import ox.{Ox, fork}
   */
 final class OutcomeProcessor(
     clients: Map[Exchange, ExchangeClient],
-    bus: EventBus,
     dryRun: Boolean,
-):
+) extends Actor:
   private val logger = LoggerFactory.getLogger(classOf[OutcomeProcessor])
 
-  /** 订阅下单意图并启动执行循环。
-    *
-    * 全量订阅 [[OrderIntent]] —— 它是唯一通往交易所的出口，没有"只执行一部分信号"的语义。
-    */
-  def run()(using Ox): Unit =
+  /** REST 调用要各自 fork、失败要回流事件，两者都得经 context。
+    * 由 [[hft.actor.ActorSystem]] 在 onStart 时注入，之后只读。 */
+  @volatile private var ctx: ActorContext = scala.compiletime.uninitialized
+
+  override def name: String = "outcome-processor"
+
+  /** 全量订阅 [[OrderIntent]] —— 它是唯一通往交易所的出口，没有"只执行一部分信号"的语义 */
+  override def interests: Set[Interest] = Set(Interest.All(OrderIntent))
+
+  override def onStart(context: ActorContext): Unit =
+    ctx = context
     if dryRun then logger.warn("OutcomeProcessor started in DRY-RUN mode (orders will NOT be placed)")
     else logger.info("OutcomeProcessor started")
-    val signals = bus.subscribe(Set(Interest.All(OrderIntent)))
-    fork {
-      while true do
-        val event = signals.receive()
-        event.as(OrderIntent).foreach(handle)
-    }
-    ()
 
-  private def handle(signal: OutcomeEvent)(using Ox): Unit = signal match
+  override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+    event.as(OrderIntent).foreach(handle)
+    Vector.empty
+
+  private def handle(signal: OutcomeEvent): Unit = signal match
     case OutcomeEvent.PlaceOrders(orders, comment) =>
       // 关联订单独立并行下单：IOC 订单本身接受部分成交，敞口由策略层 rebalance 兜底
       orders.foreach(placeOrder(_, comment))
-    case OutcomeEvent.CancelOrder(exchange, symbol, orderId) =>
-      cancelOrder(exchange, symbol, orderId)
+    case OutcomeEvent.CancelOrder(exchange, symbol, ref) =>
+      cancelOrder(exchange, symbol, ref)
 
-  private def placeOrder(order: Order, comment: String)(using Ox): Unit =
+  private def placeOrder(order: Order, comment: String): Unit =
     if dryRun then
       logger.warn(s"[DRY-RUN] order NOT placed: ${describe(order)} signal=$comment")
       // dry-run 等价于确定性的"未下单"，以 Error 事件回流清理 pending
@@ -54,7 +56,7 @@ final class OutcomeProcessor(
     else
       val client = requireClient(order.exchange)
       logger.info(s"Placing order: ${describe(order)} signal=$comment")
-      fork {
+      ctx.fork {
         client.placeOrder(order) match
           case Right(orderId) =>
             // 订单确认 (Pending/Filled) 以私有流推送为准，这里只记录
@@ -75,21 +77,21 @@ final class OutcomeProcessor(
       }
       ()
 
-  private def cancelOrder(exchange: Exchange, symbol: Symbol, orderId: OrderId)(using Ox): Unit =
-    if dryRun then logger.warn(s"[DRY-RUN] CancelOrder NOT sent: $exchange $symbol $orderId")
+  private def cancelOrder(exchange: Exchange, symbol: Symbol, ref: OrderRef): Unit =
+    if dryRun then logger.warn(s"[DRY-RUN] CancelOrder NOT sent: $exchange $symbol ${ref.raw}")
     else
       val client = requireClient(exchange)
-      logger.info(s"Cancelling order: $exchange $symbol $orderId")
-      fork {
-        client.cancelOrder(symbol, orderId) match
+      logger.info(s"Cancelling order: $exchange $symbol ${ref.raw}")
+      ctx.fork {
+        client.cancelOrder(symbol, ref) match
           case Right(()) =>
             // 终态 (Cancelled) 以私有流推送为准
-            logger.info(s"Cancel accepted: $exchange $symbol $orderId")
+            logger.info(s"Cancel accepted: $exchange $symbol ${ref.raw}")
           case Left(ExchangeError.OrderNotFound(reason)) =>
             // 订单已成交/已撤销，终态同样由私有流推送，撤单失败非致命
-            logger.info(s"Order already gone: $exchange $symbol $orderId ($reason)")
+            logger.info(s"Order already gone: $exchange $symbol ${ref.raw} ($reason)")
           case Left(e) =>
-            throw IllegalStateException(s"Cancel outcome UNKNOWN, aborting: $exchange $symbol $orderId error=${e.message}")
+            throw IllegalStateException(s"Cancel outcome UNKNOWN, aborting: $exchange $symbol ${ref.raw} error=${e.message}")
       }
       ()
 
@@ -112,7 +114,7 @@ final class OutcomeProcessor(
       fillSize = 0.0,
       timestamp = nowMs,
     )
-    bus.publish(Event.local(Topics.OrderUpdate, update))
+    ctx.publish(Event.local(Topics.OrderUpdate, update))
 
   private def describe(order: Order): String =
     s"${order.exchange} ${order.symbol} ${order.side} ${order.orderType} qty=${order.quantity} " +

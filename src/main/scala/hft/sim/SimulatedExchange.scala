@@ -61,7 +61,7 @@ final class SimulatedExchange(
   private enum Command:
     case Market(ev: AnyEvent)          // 上游行情到达 (实时)
     case OrderArrived(order: Order, orderId: OrderId)
-    case CancelArrived(orderId: OrderId)
+    case CancelArrived(ref: OrderRef)
 
   // ---- actor 基础设施 ----
   private val mailbox = Channel.unlimited[Command]
@@ -99,8 +99,8 @@ final class SimulatedExchange(
       // 上游真实行情发布到内部 rawBus；转发线程把行情即时投入 mailbox (撮合用实时行情)
       market.start(rawBus)
       // 只订公共行情：柜台撮合的输入就是行情，别的 topic 与它无关
-      val upstream = rawBus.subscribe(Topics.market.map(Interest.All))
-      fork { while true do mailbox.send(Command.Market(upstream.receive())) }
+      val upstream = rawBus.subscribe(Topics.market.map(Interest.All.apply))
+      fork { while true do mailbox.send(Command.Market(upstream.events.receive())) }
       // actor 线程：串行消费命令, 是状态唯一写者与事件唯一发布者
       fork { while true do process(mailbox.receive()) }
       logger.info(
@@ -115,7 +115,7 @@ final class SimulatedExchange(
     val (next, events) = cmd match
       case Command.Market(ev)             => state.onMarket(exchange, ev, nowMs)
       case Command.OrderArrived(order, id) => state.onOrderArrived(exchange, order, id, nowMs)
-      case Command.CancelArrived(id)       => state.onCancelArrived(exchange, id, nowMs)
+      case Command.CancelArrived(ref)      => state.onCancelArrived(exchange, ref, nowMs)
     state = next
     events.foreach { ev =>
       ev.as(Topics.Fill).foreach(f => logger.info(s"[SIM] fill ${f.side} ${f.symbol} qty=${f.size} @ ${f.price}"))
@@ -139,12 +139,12 @@ final class SimulatedExchange(
     after(config.orderToExchangeDelayMs) { mailbox.send(Command.OrderArrived(order, orderId)) }
     Right(orderId)
 
-  override def cancelOrder(symbol: Symbol, orderId: OrderId): Either[ExchangeError, Unit] =
+  override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
     // 撤单请求时订单已不在挂单簿 -> OrderNotFound (已成交/已撤)，由 OutcomeProcessor 容忍。
     // 读快照判定；在途期间真撤由 CancelArrived 在 actor 线程内裁决 (届时成交则 remove 落空, 不再发 Cancelled)
-    if !state.resting.contains(orderId) then Left(ExchangeError.OrderNotFound(s"order $orderId not in book"))
+    if state.findResting(ref).isEmpty then Left(ExchangeError.OrderNotFound(s"order ${ref.raw} not in book"))
     else
-      after(config.orderToExchangeDelayMs) { mailbox.send(Command.CancelArrived(orderId)) }
+      after(config.orderToExchangeDelayMs) { mailbox.send(Command.CancelArrived(ref)) }
       Right(())
 
   override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] =

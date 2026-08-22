@@ -55,7 +55,7 @@ final class BacktestEngine(
   private enum Action:
     case Deliver(ev: AnyEvent) // 交易所侧事件到达策略/观察者
     case OrderArrive(order: Order, orderId: OrderId)
-    case CancelArrive(orderId: OrderId)
+    case CancelArrive(ref: OrderRef)
     case Clock
 
   private final case class Scheduled(time: Timestamp, seq: Long, action: Action)
@@ -142,7 +142,7 @@ final class BacktestEngine(
     s.action match
       case Action.Deliver(ev)            => deliver(ev)
       case Action.OrderArrive(order, id) => applyMatching(state.onOrderArrived(exchange, order, id, now))
-      case Action.CancelArrive(id)       => applyMatching(state.onCancelArrived(exchange, id, now))
+      case Action.CancelArrive(ref)      => applyMatching(state.onCancelArrived(exchange, ref, now))
       case Action.Clock =>
         deliver(Topics.clockAt(now))
         deliver(accountInfoEvent(now)) // 周期刷新净值, 等价实盘 Engine 的 accountRefresh
@@ -165,8 +165,8 @@ final class BacktestEngine(
               orderIdGen += 1
               schedule(now + config.orderToExchangeDelayMs, Action.OrderArrive(o, orderIdGen.toString))
             }
-          case OutcomeEvent.CancelOrder(_, _, orderId) =>
-            schedule(now + config.orderToExchangeDelayMs, Action.CancelArrive(orderId))
+          case OutcomeEvent.CancelOrder(_, _, ref) =>
+            schedule(now + config.orderToExchangeDelayMs, Action.CancelArrive(ref))
         }
     }
 

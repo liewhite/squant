@@ -108,13 +108,16 @@ final class BybitClient(
       }
     }
 
-  override def cancelOrder(symbol: Symbol, orderId: OrderId): Either[ExchangeError, Unit] =
-    val body = s"""{"category":"linear","symbol":"$symbol","orderId":"$orderId"}"""
+  override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
+    val idField = ref match
+      case OrderRef.ByExchangeId(id) => s""""orderId":"$id""""
+      case OrderRef.ByClientId(id)   => s""""orderLinkId":"$id""""
+    val body = s"""{"category":"linear","symbol":"$symbol",$idField}"""
     signedPost[CancelResp]("/v5/order/cancel", body).flatMap { resp =>
       if resp.retCode == 0 then Right(())
       // 110001/170213: 订单不存在/已撤/已完成——归一为类型化错误，不外泄魔法码
       else if BybitClient.OrderNotFoundCodes.contains(resp.retCode) then
-        Left(ExchangeError.OrderNotFound(s"Bybit ${resp.retCode}: $orderId"))
+        Left(ExchangeError.OrderNotFound(s"Bybit ${resp.retCode}: ${ref.raw}"))
       else Left(ExchangeError.Other(s"Bybit cancel failed: retCode=${resp.retCode} retMsg=${resp.retMsg}"))
     }
 
