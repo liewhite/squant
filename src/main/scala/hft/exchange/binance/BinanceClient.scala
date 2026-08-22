@@ -87,6 +87,7 @@ final class BinanceClient(
         orders.iterator.map { o =>
           val filled = o.executedQty.asDouble
           OrderUpdate(
+            account = AccountId.Live,
             orderId = o.orderId.toString,
             clientOrderId = Some(o.clientOrderId),
             exchange = Exchange.Binance,
@@ -109,6 +110,7 @@ final class BinanceClient(
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] =
     signedRequest[AccountResp](Method.GET, "/fapi/v2/account", Map.empty).map { account =>
       AccountInfo(
+        account = AccountId.Live,
         exchange,
         equity = account.totalMarginBalance.asDouble,
         notional = account.positions.map(p => math.abs(p.notional.asDouble)).sum,
@@ -122,6 +124,7 @@ final class BinanceClient(
         .filter(_.positionAmt.asDouble != 0.0)
         .map { p =>
           Position(
+            account = AccountId.Live,
             exchange = Exchange.Binance,
             symbol = p.symbol,
             size = p.positionAmt.asDouble,

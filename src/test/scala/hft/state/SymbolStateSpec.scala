@@ -21,6 +21,7 @@ class SymbolStateSpec extends munit.FunSuite:
 
   private def orderUpdate(clientOrderId: String, status: OrderStatus, fillSize: Quantity = 0.0): AnyEvent =
     Event.at(Topics.OrderUpdate, OrderUpdate(
+          account = AccountId.Live,
           orderId = "ex-1",
           clientOrderId = Some(clientOrderId),
           exchange = Exchange.Binance,
@@ -75,7 +76,7 @@ class SymbolStateSpec extends munit.FunSuite:
 
   test("Fill 事件按方向乐观更新仓位，无仓位时创建"):
     val state = SymbolState(symbol)
-    val fill = Fill(Exchange.Binance, symbol, Side.Long, price = 50000.0, size = 0.01, timestamp = t0)
+    val fill = Fill(AccountId.Live, Exchange.Binance, symbol, Side.Long, price = 50000.0, size = 0.01, timestamp = t0)
     state.apply(Event.at(Topics.Fill, fill, t0))
     assertEqualsDouble(state.positionSize(Exchange.Binance), 0.01, 1e-12)
 
@@ -84,7 +85,7 @@ class SymbolStateSpec extends munit.FunSuite:
 
   test("PositionUpdate 仅初始化一次，之后由 Fill 维护"):
     val state = SymbolState(symbol)
-    val initial = Position(Exchange.Binance, symbol, size = 1.0, entryPrice = 50000.0, unrealizedPnl = 0.0)
+    val initial = Position(AccountId.Live, Exchange.Binance, symbol, size = 1.0, entryPrice = 50000.0, unrealizedPnl = 0.0)
     state.apply(Event.at(Topics.Position, initial, t0))
     assertEqualsDouble(state.positionSize(Exchange.Binance), 1.0, 1e-12)
 

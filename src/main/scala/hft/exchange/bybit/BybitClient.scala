@@ -128,6 +128,7 @@ final class BybitClient(
           fromBybit(d.symbol).map { sym =>
             val filled = d.cumExecQty.asDouble
             OrderUpdate(
+              account = AccountId.Live,
               orderId = d.orderId,
               clientOrderId = Some(if d.orderLinkId.nonEmpty then d.orderLinkId else d.orderId),
               exchange = Exchange.Bybit,
@@ -161,7 +162,7 @@ final class BybitClient(
       ensureOk(resp.retCode, resp.retMsg).flatMap { _ =>
         resp.result.list.headOption
           .toRight(ExchangeError.Other("Bybit no wallet data"))
-          .map(w => AccountInfo(exchange, equity = w.totalEquity.asDouble, notional = 0.0))
+          .map(w => AccountInfo(AccountId.Live, exchange, equity = w.totalEquity.asDouble, notional = 0.0))
       }
     }
 
@@ -178,6 +179,7 @@ final class BybitClient(
                 case "Sell" => -d.size.asDouble
                 case _      => 0.0 // 空仓 side=""
               Position(
+                account = AccountId.Live,
                 exchange = Exchange.Bybit,
                 symbol = sym,
                 size = signedSize,

@@ -73,7 +73,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   test("挂单成交判定: BBO 越过买单价 -> 成交于挂单价, 仓位增加"):
     supervised:
       val market = FakeMarketStream()
-      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000))
+      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000), AccountId.Live)
       val bus = EventBus()
       val q = collect(bus)
       sim.start(bus)
@@ -97,7 +97,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   test("挂单成交判定: BBO 越过卖单价 -> 成交, 仓位转空"):
     supervised:
       val market = FakeMarketStream()
-      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000))
+      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000), AccountId.Live)
       val bus = EventBus()
       val q = collect(bus)
       sim.start(bus)
@@ -116,7 +116,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   test("PostOnly 到达时已可成交 -> 拒单 (不吃单, 不成交)"):
     supervised:
       val market = FakeMarketStream()
-      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000))
+      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000), AccountId.Live)
       val bus = EventBus()
       val q = collect(bus)
       sim.start(bus)
@@ -135,7 +135,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   test("撤单: resting 订单撤销后回报 Cancelled 并移出挂单簿"):
     supervised:
       val market = FakeMarketStream()
-      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000))
+      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(0, 0, 10_000), AccountId.Live)
       val bus = EventBus()
       val q = collect(bus)
       sim.start(bus)
@@ -155,7 +155,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   test("交易所->策略延迟: 成交回报延迟到达策略侧"):
     supervised:
       val market = FakeMarketStream()
-      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(exchangeToStrategyDelayMs = 250, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000))
+      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(exchangeToStrategyDelayMs = 250, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000), AccountId.Live)
       val bus = EventBus()
       val q = collect(bus)
       sim.start(bus)
@@ -177,7 +177,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   test("端到端: 模拟盘提供与实盘一致的接口, 策略无感知地下单成交 (Engine + 极简 maker 策略)"):
     supervised:
       val market = FakeMarketStream()
-      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(exchangeToStrategyDelayMs = 10, orderToExchangeDelayMs = 10, initialBalanceUsdt = 10_000))
+      val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(exchangeToStrategyDelayMs = 10, orderToExchangeDelayMs = 10, initialBalanceUsdt = 10_000), AccountId.Live)
       // clock/account 刷新间隔调大, 避免测试期周期任务干扰
       val engine = Engine.start(
         gateways = Vector(ExchangeGateway(client = sim, marketData = sim, accountStream = Some(sim))),
@@ -185,7 +185,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
         clockIntervalMs = 100_000,
         accountRefreshMs = 100_000,
       )
-      engine.addStrategy(OneShotMakerStrategy(Exchange.Binance, sym, offsetRatio = 0.0001, orderSize = 0.002))
+      engine.addStrategy(OneShotMakerStrategy(Exchange.Binance, sym, offsetRatio = 0.0001, orderSize = 0.002), AccountId.Live)
 
       // 初始行情 -> 策略在买一下方挂 PostOnly 买单 (~49995), resting
       market.emitBbo(50000, 50001, 1)

@@ -146,6 +146,7 @@ final class OkxClient(
           fromOkx(d.instId).map { sym =>
             val filled = d.accFillSz.asDouble
             OrderUpdate(
+              account = AccountId.Live,
               orderId = d.ordId,
               clientOrderId = Some(if d.clOrdId.nonEmpty then d.clOrdId else d.ordId),
               exchange = Exchange.Okx,
@@ -174,7 +175,7 @@ final class OkxClient(
       ensureOk(r.code, r.msg).flatMap { _ =>
         r.data.headOption
           .toRight(ExchangeError.Other("OKX no balance data"))
-          .map(b => AccountInfo(exchange, equity = b.totalEq.asDouble, notional = 0.0))
+          .map(b => AccountInfo(AccountId.Live, exchange, equity = b.totalEq.asDouble, notional = 0.0))
       }
     }
 
@@ -191,6 +192,7 @@ final class OkxClient(
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator.map { d =>
           Greeks(
+            account = AccountId.Live,
             exchange = Exchange.Okx,
             ccy = d.ccy,
             delta = d.deltaBS.asDouble,

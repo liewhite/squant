@@ -1,7 +1,7 @@
 package strategy.strategies.makerhedge.live
 import strategy.utils.option.*
 
-import hft.domain.{Balance, Exchange, Greeks}
+import hft.domain.{AccountId, Balance, Exchange, Greeks}
 import hft.exchange.AccountStream
 import hft.event.{Event, EventBus, Topics}
 import org.slf4j.LoggerFactory
@@ -22,7 +22,7 @@ final class OptionGreeksStream(opt: OptionsExchange, exch: Exchange, ccy: String
 
   override def start(eventBus: EventBus)(using Ox): Unit =
     // 同步兜底: 保证 cashBalances(ccy) 存在, 否则 StateManager.greeks 恒为 None -> 不对冲。真实现货余额(若有)随后覆盖。
-    eventBus.publish(Event.local(Topics.Balance, Balance(exch, ccy, 0.0, System.currentTimeMillis)))
+    eventBus.publish(Event.local(Topics.Balance, Balance(AccountId.Live, exch, ccy, 0.0, System.currentTimeMillis)))
     fork {
       var fails = 0
       while true do
@@ -30,7 +30,7 @@ final class OptionGreeksStream(opt: OptionsExchange, exch: Exchange, ccy: String
           opt.optionAccountGreeks() match
             case Right((delta, gamma)) =>
               fails = 0
-              eventBus.publish(Event.local(Topics.Greeks, Greeks(exch, ccy, delta = delta, gamma = gamma, theta = 0.0, vega = 0.0, timestamp = System.currentTimeMillis)))
+              eventBus.publish(Event.local(Topics.Greeks, Greeks(AccountId.Live, exch, ccy, delta = delta, gamma = gamma, theta = 0.0, vega = 0.0, timestamp = System.currentTimeMillis)))
             case Left(e) =>
               fails += 1
               if fails >= 3 then logger.error(s"!!! 期权 greeks 已连续 $fails 次轮询失败, 对冲在用陈旧 delta, 期权敞口可能失真, 请人工介入: $e")

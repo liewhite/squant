@@ -1,7 +1,7 @@
 package strategy.strategies.makerhedge.live
 import strategy.utils.option.*
 
-import hft.domain.Exchange
+import hft.domain.{AccountId, Exchange}
 import hft.engine.{Engine, ExchangeGateway}
 import hft.exchange.okx.{OkxAccountStream, OkxClient, OkxCredentials, OkxMarketStream}
 import strategy.strategies.makerhedge.logic.{AsymHedgeBand, MakerHedgeStrategy}
@@ -61,7 +61,7 @@ import hft.state.{StateManager}
     opt.linearKlines(t.symbol, t.klineBar, 64) match
       case Right(bars) => strategy.prewarm(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.klineBar} K线 -> ATR/均线就绪")
       case Left(e)     => logger.error(s"prewarm 取 K 线失败 (ATR 将靠实时 BBO 慢热): $e")
-    engine.addStrategy(strategy)
+    engine.addStrategy(strategy, AccountId.Live) // 真实盘
 
     logger.warn("对冲腿运行中 (BBO 复用引擎行情流, 期权 greeks 每 %dms 注入). Ctrl+C 退出".format(t.greeksPollMs))
     Thread.sleep(Long.MaxValue)

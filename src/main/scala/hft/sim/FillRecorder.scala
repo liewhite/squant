@@ -24,7 +24,7 @@ import scala.util.control.NonFatal
 final class FillRecorder(csvPath: Path):
   private val logger = LoggerFactory.getLogger(classOf[FillRecorder])
 
-  @volatile private var ledger = Ledger.empty(0.0)
+  @volatile private var ledger = Ledger.empty(AccountId.Live, 0.0)
   @volatile private var writer: Option[BufferedWriter] = None
 
   /** 累计已实现利润 (跨 symbol)。供外部观察/日志 */

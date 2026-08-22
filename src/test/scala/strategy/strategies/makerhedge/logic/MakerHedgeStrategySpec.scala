@@ -22,13 +22,13 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
 
   private def bbo(px: Price, ts: Timestamp) = Event.stamped(Topics.Bbo, BBO(ex, sym, px, 1.0, px, 1.0, ts), ts, ts)
   private def ordUpd(status: OrderStatus, side: Side, px: Price, ts: Timestamp, oid: OrderId = "o1") =
-    Event.stamped(Topics.OrderUpdate, OrderUpdate(oid, Some("c1"), ex, sym, side, status, px, 0.5, 0.0, 0.0, ts), ts, ts)
+    Event.stamped(Topics.OrderUpdate, OrderUpdate(AccountId.Live, oid, Some("c1"), ex, sym, side, status, px, 0.5, 0.0, 0.0, ts), ts, ts)
   private def feed(sm: StateManager, s: MakerHedgeStrategy, ev: AnyEvent) = { sm.apply(ev); s.onEvent(ev, sm) }
 
   private def warm(band: HedgeBand, rawDelta: Double): (StateManager, MakerHedgeStrategy) =
     val sm = StateManager(Iterable(sym), orderTimeoutMs = 60000)
-    sm.apply(Event.stamped(Topics.Balance, Balance(ex, ccy, 0.0, 0), 0, 0))
-    sm.apply(Event.stamped(Topics.Greeks, Greeks(ex, ccy, rawDelta, 0.01, -0.5, 1.0, 0), 0, 0))
+    sm.apply(Event.stamped(Topics.Balance, Balance(AccountId.Live, ex, ccy, 0.0, 0), 0, 0))
+    sm.apply(Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, rawDelta, 0.01, -0.5, 1.0, 0), 0, 0))
     val s = strat(band)
     (0 to 7).foreach(i => feed(sm, s, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
     (sm, s)
@@ -70,8 +70,8 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
 
   test("对冲量超 maxHedgeQty 硬上限 -> 不下单 (防 delta/gamma bug)"):
     val sm = StateManager(Iterable(sym), orderTimeoutMs = 60000)
-    sm.apply(Event.stamped(Topics.Balance, Balance(ex, ccy, 0.0, 0), 0, 0))
-    sm.apply(Event.stamped(Topics.Greeks, Greeks(ex, ccy, 0.5, 0.01, -0.5, 1.0, 0), 0, 0))
+    sm.apply(Event.stamped(Topics.Balance, Balance(AccountId.Live, ex, ccy, 0.0, 0), 0, 0))
+    sm.apply(Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, 0.5, 0.01, -0.5, 1.0, 0), 0, 0))
     val s = MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
       atrPeriodBars = 5, rvShortWindowBars = 3, rvLongWindowBars = 6, maSmaPeriod = 5, maxHedgeQty = 0.3, barIntervalMs = hour, minHedgeQty = 0.001)
     (0 to 7).foreach(i => feed(sm, s, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
@@ -79,15 +79,15 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
 
   test("无 ccy 余额 -> greeks()=None -> 不对冲 (实盘由 OptionGreeksStream 同步兜底余额)"):
     val sm = StateManager(Iterable(sym), orderTimeoutMs = 60000)
-    sm.apply(Event.stamped(Topics.Greeks, Greeks(ex, ccy, 0.5, 0.01, -0.5, 1.0, 0), 0, 0)) // 只 greeks, 无 Balance
+    sm.apply(Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, 0.5, 0.01, -0.5, 1.0, 0), 0, 0)) // 只 greeks, 无 Balance
     val s = strat(ConstantBand(2.0, 2.0))
     (0 to 7).foreach(i => feed(sm, s, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
     assertEquals(feed(sm, s, bbo(104.0, 8 * hour)), Vector.empty) // 越带但 greeks()=None -> 不挂
 
   test("greeks 陈旧超 maxGreeksStaleMs -> 暂停对冲"):
     val sm = StateManager(Iterable(sym), orderTimeoutMs = 60000)
-    sm.apply(Event.stamped(Topics.Balance, Balance(ex, ccy, 0.0, 0), 0, 0))
-    sm.apply(Event.stamped(Topics.Greeks, Greeks(ex, ccy, 0.5, 0.01, -0.5, 1.0, 0), 0, 0)) // ts=0 (旧)
+    sm.apply(Event.stamped(Topics.Balance, Balance(AccountId.Live, ex, ccy, 0.0, 0), 0, 0))
+    sm.apply(Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, 0.5, 0.01, -0.5, 1.0, 0), 0, 0)) // ts=0 (旧)
     val s = MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
       atrPeriodBars = 5, rvShortWindowBars = 3, rvLongWindowBars = 6, maSmaPeriod = 5, maxGreeksStaleMs = 1000, barIntervalMs = hour, minHedgeQty = 0.001)
     (0 to 7).foreach(i => feed(sm, s, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
@@ -96,12 +96,12 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
   test("gammaAdjust: 两次 greeks 间用 gamma×价差修正净 delta"):
     // greeks: delta=0.0, gamma=0.1; greeksRefMid=100 (greeks 更新时); 现价 104 -> 修正 delta = 0.1×(104-100)=0.4
     val sm = StateManager(Iterable(sym), orderTimeoutMs = 60000)
-    sm.apply(Event.stamped(Topics.Balance, Balance(ex, ccy, 0.0, 0), 0, 0))
-    sm.apply(Event.stamped(Topics.Greeks, Greeks(ex, ccy, 0.0, 0.1, -0.5, 1.0, 0), 0, 0)) // delta0=0, gamma=0.1
+    sm.apply(Event.stamped(Topics.Balance, Balance(AccountId.Live, ex, ccy, 0.0, 0), 0, 0))
+    sm.apply(Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, 0.0, 0.1, -0.5, 1.0, 0), 0, 0)) // delta0=0, gamma=0.1
     val s = MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
       atrPeriodBars = 5, rvShortWindowBars = 3, rvLongWindowBars = 6, maSmaPeriod = 5, gammaAdjust = true, barIntervalMs = hour, minHedgeQty = 0.001)
     (0 to 7).foreach(i => feed(sm, s, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
-    feed(sm, s, Event.stamped(Topics.Greeks, Greeks(ex, ccy, 0.0, 0.1, -0.5, 1.0, 8 * hour), 8 * hour, 8 * hour)) // 设 greeksRefMid≈101
+    feed(sm, s, Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, 0.0, 0.1, -0.5, 1.0, 8 * hour), 8 * hour, 8 * hour)) // 设 greeksRefMid≈101
     // 现价 104: gammaAdj=0.1×(104-101)=0.3, 净delta≈0.3 -> 卖 0.3
     val q = placed(feed(sm, s, bbo(104.0, 8 * hour + 1))).quantity
     assert(math.abs(q - 0.1 * (104.0 - 101.0)) < 1e-9, s"qty=$q")

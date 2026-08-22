@@ -13,9 +13,9 @@ class BacktestReportSpec extends munit.FunSuite:
   private def trade(ts: Long, px: Double): AnyEvent =
     Event.stamped(Topics.Trade, MarketTrade(ex, sym, px, 1.0, isBuyerMaker = false, ts), ts, ts)
   private def fill(ts: Long, side: Side, px: Double, qty: Double): AnyEvent =
-    Event.stamped(Topics.Fill, Fill(ex, sym, side, px, qty, ts), ts, ts)
+    Event.stamped(Topics.Fill, Fill(AccountId.Live, ex, sym, side, px, qty, ts), ts, ts)
   private def acct(ts: Long, equity: Double): AnyEvent =
-    Event.stamped(Topics.AccountInfo, AccountInfo(ex, equity = equity, notional = 0.0), ts, ts)
+    Event.stamped(Topics.AccountInfo, AccountInfo(AccountId.Live, ex, equity = equity, notional = 0.0), ts, ts)
 
   test("预热区间 (startMs 之前) 的成交/采样全部忽略"):
     val rec = BacktestRecorder(ex, sym, startMs = 1000L, initialBalance = 100.0)

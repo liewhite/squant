@@ -49,6 +49,10 @@ final class SimulatedExchange(
     market: MarketDataStream,
     publicClient: ExchangeClient,
     config: SimConfig = SimConfig(),
+    /** 本柜台服务的账户。作为实盘替身时是 [[AccountId.Live]] (策略对真假无感知)；
+      * 与实盘并行跑影子盘时是 `Paper(n)`，两边的回报靠这个维度分开。
+      * 无默认值，理由同 [[hft.engine.Executor]] */
+    account: AccountId,
 ) extends ExchangeClient,
       MarketDataStream,
       AccountStream:
@@ -66,7 +70,7 @@ final class SimulatedExchange(
   // ---- actor 基础设施 ----
   private val mailbox = Channel.unlimited[Command]
   /** 唯一写者 = actor 线程；读者 = REST 查询线程。不可变快照 + @volatile 保证可见性 */
-  @volatile private var state: SimState = SimState.empty(config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
+  @volatile private var state: SimState = SimState.empty(account, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   @volatile private var strategyBus: EventBus = scala.compiletime.uninitialized
 
   private val orderIdSeq = AtomicLong(1)
@@ -150,14 +154,14 @@ final class SimulatedExchange(
   override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] =
     val s = state
     Right(s.resting.values.filter(_.symbol == symbol).map { o =>
-      OrderUpdate(o.orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Pending, o.limitPrice, o.quantity, 0.0, 0.0, nowMs)
+      OrderUpdate(account, o.orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Pending, o.limitPrice, o.quantity, 0.0, 0.0, nowMs)
     }.toVector)
 
   override def setLeverage(symbol: Symbol, leverage: Int): Either[ExchangeError, Unit] = Right(())
 
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] =
     val s = state
-    Right(AccountInfo(exchange, equity = s.ledger.equity(s.markOf), notional = s.ledger.notional(s.markOf)))
+    Right(AccountInfo(account, exchange, equity = s.ledger.equity(s.markOf), notional = s.ledger.notional(s.markOf)))
 
   override def fetchPositions(): Either[ExchangeError, Vector[Position]] =
     val s = state

@@ -16,6 +16,26 @@ enum Exchange:
       case Okx     => hex // 32 字符纯字母数字, OKX clOrdId 上限 32
       case Bybit   => hex // 32 字符, Bybit orderLinkId 上限 36
 
+/** 账户身份。
+  *
+  * 同一份策略逻辑可以同时跑在实盘与若干模拟账户上 —— 它们看同一份行情、下同样的单，
+  * 只有账户不同。因此账户**不是**策略的属性，而是装配期绑定的：策略自己不知道、
+  * 也不该知道它跑在哪个账户上，否则同一份逻辑就没法既做实盘又做影子盘。
+  *
+  * 账户归属是**必填**的结构字段，不靠"来源即实盘"这类推断。参考实现在这里栽过：
+  * 用一张手工维护的分类表判断私有事件归属，新增一个变体漏改一行就会把实盘私有事件
+  * 广播给模拟策略 —— 危险侧、且编译器不报。
+  */
+enum AccountId:
+  /** 真实交易所账户 */
+  case Live
+  /** 本地模拟账户 (影子盘)。同一进程可以有多个 */
+  case Paper(id: Int)
+
+  override def toString: String = this match
+    case Live     => "live"
+    case Paper(n) => s"paper$n"
+
 /** 标的 = (交易所, 交易对) —— 公共行情与持仓/订单/成交的路由键。
   *
   * 独立类型而非 `(Exchange, Symbol)` 元组：它是事件路由的键，会进哈希表、进日志、
@@ -23,6 +43,19 @@ enum Exchange:
   */
 final case class Instrument(exchange: Exchange, symbol: Symbol):
   override def toString: String = s"$exchange:$symbol"
+
+/** 某账户在某标的上的口子 —— **私有回报**的路由键。
+  *
+  * 行情按 [[Instrument]] 路由 (一份服务所有账户)，私有回报按本类型路由。于是实盘策略与
+  * 影子策略即便交易同一标的，也从投递层就收不到对方的成交与订单回报 —— 订单归属由路由
+  * 保证，不需要在消费侧再判一次"这笔是不是我的"。
+  */
+final case class AccountInstrument(account: AccountId, instrument: Instrument):
+  override def toString: String = s"$account@$instrument"
+
+/** 某账户在某交易所的口子 —— **账户级读数** (余额/净值/希腊值) 的路由键 */
+final case class AccountExchange(account: AccountId, exchange: Exchange):
+  override def toString: String = s"$account@$exchange"
 
 /** 撤单时如何指名一张订单。
   *
@@ -93,6 +126,7 @@ final case class Order(
 
 /** 订单更新事件 */
 final case class OrderUpdate(
+    account: AccountId,
     orderId: OrderId,
     clientOrderId: Option[String],
     exchange: Exchange,
@@ -124,6 +158,7 @@ final case class MarketTrade(
 
 /** 成交事件 (用于乐观更新仓位) */
 final case class Fill(
+    account: AccountId,
     exchange: Exchange,
     symbol: Symbol,
     side: Side,
@@ -134,6 +169,7 @@ final case class Fill(
 
 /** 仓位。size 为正表示多头，为负表示空头 */
 final case class Position(
+    account: AccountId,
     exchange: Exchange,
     symbol: Symbol,
     size: Quantity,
@@ -152,11 +188,12 @@ final case class Position(
 object Position:
   val Epsilon: Double = 1e-10
 
-  def empty(exchange: Exchange, symbol: Symbol): Position =
-    Position(exchange, symbol, 0.0, 0.0, 0.0)
+  def empty(account: AccountId, exchange: Exchange, symbol: Symbol): Position =
+    Position(account, exchange, symbol, 0.0, 0.0, 0.0)
 
 /** 资产余额 */
 final case class Balance(
+    account: AccountId,
     exchange: Exchange,
     asset: String,
     available: Double,
@@ -227,6 +264,7 @@ final case class IndexPrice(
   * BS 合成源在 [[hft.backtest.BsGreeksSource]] 内把数学约定的每年 theta、对 1.0 vega 换算到此约定。)
   */
 final case class Greeks(
+    account: AccountId,
     exchange: Exchange,
     /** 币种, e.g. "BTC" / "ETH" (非 symbol "BTCUSDT") */
     ccy: String,
@@ -239,6 +277,7 @@ final case class Greeks(
 
 /** 账户信息 (净值 + 总持仓名义价值，原子读取) */
 final case class AccountInfo(
+    account: AccountId,
     exchange: Exchange,
     /** 账户净值 (balance + unrealizedPnl) */
     equity: Double,

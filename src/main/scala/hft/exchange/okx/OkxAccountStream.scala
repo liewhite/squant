@@ -128,6 +128,7 @@ final class OkxAccountStream(
       meta <- metaOf(sym)
     do
       val position = Position(
+        account = AccountId.Live,
         exchange = Exchange.Okx,
         symbol = sym,
         size = meta.qtyToCoin(d.pos.asDouble),
@@ -139,11 +140,11 @@ final class OkxAccountStream(
   private def publishAccount(d: AccountData): Unit =
     val ts = d.uTime.toLongOption.getOrElse(nowMs)
     bus.publish(
-      Event.at(Topics.AccountInfo, AccountInfo(Exchange.Okx, d.totalEq.asDouble, d.notionalUsd.asDouble), ts)
+      Event.at(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, d.totalEq.asDouble, d.notionalUsd.asDouble), ts)
     )
     // 各币种现金余额：供 StateManager 修正 greeks delta 的现货敞口
     d.details.foreach { detail =>
-      bus.publish(Event.at(Topics.Balance, Balance(Exchange.Okx, detail.ccy, detail.cashBal.asDouble, ts), ts))
+      bus.publish(Event.at(Topics.Balance, Balance(AccountId.Live, Exchange.Okx, detail.ccy, detail.cashBal.asDouble, ts), ts))
     }
 
   private def publishOrder(d: OrderPushData): Unit =
@@ -157,9 +158,10 @@ final class OkxAccountStream(
     val filledQty = meta.qtyToCoin(d.accFillSz.asDouble)
     // Fill 先于 OrderUpdate (确保乐观更新 position 后再处理订单终态)
     if fillSz > 0 then
-      val fill = Fill(Exchange.Okx, sym, side, price = d.fillPx.asDouble, size = fillSz, timestamp = nowMs)
+      val fill = Fill(AccountId.Live, Exchange.Okx, sym, side, price = d.fillPx.asDouble, size = fillSz, timestamp = nowMs)
       bus.publish(Event.local(Topics.Fill, fill))
     val update = OrderUpdate(
+      account = AccountId.Live,
       orderId = d.ordId,
       clientOrderId = if d.clOrdId.nonEmpty then Some(d.clOrdId) else None,
       exchange = Exchange.Okx,

@@ -6,7 +6,7 @@ import hft.domain.*
 class LedgerSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private def empty = Ledger.empty(10_000.0)
+  private def empty = Ledger.empty(AccountId.Live, 10_000.0)
   private def sizeOf(l: Ledger): Double = l.positions.get(sym).map(_.size).getOrElse(0.0)
   private def entryOf(l: Ledger): Double = l.positions.get(sym).map(_.entryPrice).getOrElse(0.0)
 

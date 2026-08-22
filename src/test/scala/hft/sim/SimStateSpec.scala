@@ -7,7 +7,7 @@ import hft.event.{AnyEvent, Event, Topics}
 class SimStateSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private def empty = SimState.empty(10_000.0)
+  private def empty = SimState.empty(AccountId.Live, 10_000.0)
 
   private def bbo(bid: Price, ask: Price, ts: Timestamp = 1): BBO = BBO(ex, sym, bid, 1.0, ask, 1.0, ts)
   private def marketEv(b: BBO): AnyEvent = Event.at(Topics.Bbo, b, b.timestamp)

@@ -11,12 +11,12 @@ class FillRecorderSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
   private def fill(side: Side, price: Price, size: Quantity, ts: Timestamp): Fill =
-    Fill(ex, sym, side, price, size, ts)
+    Fill(AccountId.Live, ex, sym, side, price, size, ts)
 
   // ==================== 纯 record: 累计已实现利润 ====================
 
   test("record: 开仓本笔实现 0, 平仓实现盈亏并累计"):
-    val l0 = Ledger.empty(0.0)
+    val l0 = Ledger.empty(AccountId.Live, 0.0)
     val (l1, r1) = FillRecorder.record(l0, fill(Side.Long, 100.0, 2.0, 1))
     assertEquals(l1.cash, 0.0)        // 开仓不实现
     assert(r1.endsWith(",0.0,0.0"))   // realizedPnl=0, cumulative=0
@@ -31,7 +31,7 @@ class FillRecorderSpec extends munit.FunSuite:
     assert(r4.endsWith(",10.0,50.0"))
 
   test("record: CSV 行包含成交字段"):
-    val (_, row) = FillRecorder.record(Ledger.empty(0.0), fill(Side.Long, 100.0, 2.0, 1700000000000L))
+    val (_, row) = FillRecorder.record(Ledger.empty(AccountId.Live, 0.0), fill(Side.Long, 100.0, 2.0, 1700000000000L))
     assertEquals(row, "1700000000000,Binance,BTCUSDT,Long,100.0,2.0,0.0,0.0")
 
   // ==================== 集成: 订阅总线写文件 ====================

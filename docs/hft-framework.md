@@ -46,13 +46,31 @@ object AlphaSignal extends Topic[Symbol, Score]("alphaSignal"):
 
 | 维度 | topic | 说明 |
 |---|---|---|
-| `Instrument` | Bbo / Trade / MarkPrice / IndexPrice / FundingRate | 公共行情，需向交易所订阅 |
-| `Instrument` | Position / OrderUpdate / Fill | 私有回报，账户流推送 |
-| `Exchange` | Balance / AccountInfo / Greeks | 账户级读数 |
+| `Instrument` | Bbo / Trade / MarkPrice / IndexPrice / FundingRate | 公共行情，**无账户归属**，一份服务所有账户 |
+| `AccountInstrument` | Position / OrderUpdate / Fill | 私有回报，账户流推送 |
+| `AccountExchange` | Balance / AccountInfo / Greeks | 账户级读数 |
+| `AccountId` | OrderIntent | 策略信号，按账户路由到各自出口 |
 | 无 | Clock | 全局节拍，用 `Interest.All` 订阅 |
 
-账户级读数**按交易所路由而非广播**，是一条越界防线：否则策略能读到自己没订阅的交易所的净值，
+### 账户维度
+
+`AccountId` 是 `Live` 或 `Paper(n)`。同一份策略逻辑可以同时跑在实盘与若干影子账户上 ——
+它们看同一份行情、下同样的单，只有账户不同。所以**账户不是策略的属性，而是装配期绑定的**：
+策略自己不知道也不该知道它跑在哪个账户上，否则同一份逻辑就没法既做实盘又做影子盘。
+
+私有回报带账户维度，是订单归属的**结构保证**：实盘实例与影子实例即便交易同一标的，
+也从投递层就收不到对方的成交与订单回报。只按标的路由的话两者会互相收养对方的挂单，
+各自还把账户总仓位当成自己的敞口 —— 决策依据错了却没有任何症状。
+
+账户级读数同时按交易所过滤，是另一条越界防线：策略读不到自己没订阅的交易所的净值，
 而杠杆闸门正是拿净值算的。
+
+`OrderIntent` 也按账户路由，于是"这条信号该由谁执行"由投递层回答：实盘出口订阅
+`{Live}`，每个虚拟柜台订阅自己那个 `Paper(n)`，两个出口互不知情。若改成全量订阅再各自
+过滤，新增一类账户时两处都不会编译失败，失效方式是静默双执行或静默不执行。
+
+**唯一性约束**（`InstrumentClaims`，装配期 fail-fast）：一个 `(账户, 标的)` 最多归一个策略
+实例。实盘与影子盘跑同一标的是允许的 —— 账户不同，键就不同。
 
 ### 订阅是数据，不是谓词
 
@@ -144,10 +162,6 @@ ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内
 
 #### 已知限制
 
-- **共享标的的多策略不要动态撤下**。订单回报按标的路由，两个交易同一标的的策略会互相收到
-  对方的订单确认，而 `SymbolState.applyOrderUpdate` 无法区分"启动时的遗留挂单"与"另一个
-  运行中策略的单"，会照单收养 —— 于是撤下 B 有可能撤掉 A 的活单。根因是订单缺所有者判据，
-  属上层架构问题，待引入模拟盘/实盘并行时一并解决（那时正好要给订单加账户归属）。
 - `onStart` 里 fork 的线程不受 `stop` 控制，生命周期绑在根作用域上。
   一个阻塞在 socket 读上的线程没法被协作式叫停，假装能停会让停机链在那里静默等下去。
   要能动态起停的 actor 必须走事件驱动形态。

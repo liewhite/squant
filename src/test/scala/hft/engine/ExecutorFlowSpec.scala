@@ -4,7 +4,7 @@ import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.state.StateManager
-import hft.strategy.{OrderIntent, OutcomeEvent, Strategy}
+import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy}
 import ox.supervised
 
 /** Executor 集成测试: 通过 EventBus + ActorSystem 驱动完整的 事件 -> 策略 -> 信号 链路 */
@@ -44,10 +44,10 @@ class ExecutorFlowSpec extends munit.FunSuite:
       val outcomes = bus.subscribe(Set(Interest.All(OrderIntent)))
       val system = ActorSystem(bus)
 
-      system.spawn(Executor(ClockOrderStrategy(), Map((Exchange.Binance, "BTCUSDT") -> meta)))
+      system.spawn(Executor(ClockOrderStrategy(), Map((Exchange.Binance, "BTCUSDT") -> meta), AccountId.Live))
       bus.publish(Event.local(Topics.Clock, ()))
 
-      outcomes.events.receive().as(OrderIntent).get match
+      outcomes.events.receive().as(OrderIntent).get.outcome match
         case OutcomeEvent.PlaceOrders(orders, comment) =>
           assertEquals(comment, "test")
           assertEquals(orders.size, 1)
@@ -63,7 +63,7 @@ class ExecutorFlowSpec extends munit.FunSuite:
       val outcomes = bus.subscribe(Set(Interest.All(OrderIntent)))
       val system = ActorSystem(bus)
 
-      system.spawn(Executor(ClockOrderStrategy(), Map((Exchange.Binance, "BTCUSDT") -> meta)))
+      system.spawn(Executor(ClockOrderStrategy(), Map((Exchange.Binance, "BTCUSDT") -> meta), AccountId.Live))
 
       // 范围外 symbol 事件 (若未被过滤会触发 StateManager 路由 sys.error 使作用域崩溃)
       val other = BBO(Exchange.Binance, "DOGEUSDT", 0.1, 1.0, 0.2, 1.0, 0L)
@@ -71,7 +71,7 @@ class ExecutorFlowSpec extends munit.FunSuite:
       // Clock 紧随其后仍能正常产出信号，证明 executor 没有被范围外事件破坏
       bus.publish(Event.local(Topics.Clock, ()))
 
-      assert(outcomes.events.receive().as(OrderIntent).exists(_.isInstanceOf[OutcomeEvent.PlaceOrders]))
+      assert(outcomes.events.receive().as(OrderIntent).exists(_.outcome.isInstanceOf[OutcomeEvent.PlaceOrders]))
 
   test("策略交易的 symbol 缺少 SymbolMeta -> 配置错误，作用域终止"):
     intercept[RuntimeException] {
@@ -81,7 +81,7 @@ class ExecutorFlowSpec extends munit.FunSuite:
         val system = ActorSystem(bus)
 
         // 空 metas: 策略下单时 convertOrder 抛错 -> actor 循环失败 -> 作用域级联终止
-        system.spawn(Executor(ClockOrderStrategy(), Map.empty))
+        system.spawn(Executor(ClockOrderStrategy(), Map.empty, AccountId.Live))
         bus.publish(Event.local(Topics.Clock, ()))
         outcomes.events.receive() // 阻塞至 fork 失败取消作用域
     }

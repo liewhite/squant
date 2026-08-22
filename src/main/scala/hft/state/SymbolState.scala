@@ -167,7 +167,7 @@ final class SymbolState(val symbol: Symbol):
       case Side.Short => -fill.size
     val pos = positions.getOrElseUpdate(
       fill.exchange,
-      Position(fill.exchange, symbol, 0.0, fill.price, 0.0),
+      Position(fill.account, fill.exchange, symbol, 0.0, fill.price, 0.0),
     )
     val updated = pos.copy(size = pos.size + delta)
     positions(fill.exchange) = updated

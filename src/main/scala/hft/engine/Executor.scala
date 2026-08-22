@@ -3,7 +3,7 @@ package hft.engine
 import hft.actor.Actor
 import hft.domain.*
 import hft.event.{AnyEvent, Event, Interest, Subscription}
-import hft.strategy.{OrderIntent, Strategy}
+import hft.strategy.{AccountOutcome, OrderIntent, Strategy}
 
 /** 策略执行器：把一个 [[Strategy]] 包装成引擎里的 [[Actor]]。
   *
@@ -14,10 +14,20 @@ import hft.strategy.{OrderIntent, Strategy}
   * 此前它自带 `fork { while true ... }` 与总线引用；现在这些都归 [[hft.actor.ActorSystem]]，
   * 于是策略实例可以被动态起停 —— 这正是"按模拟盘表现起停实盘策略"的着力点。
   */
-final class Executor(strategy: Strategy, symbolMetas: Map[(Exchange, Symbol), SymbolMeta]) extends Actor:
-  private val runner = StrategyRunner(strategy, symbolMetas)
+final class Executor(
+    strategy: Strategy,
+    symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
+    /** 本实例绑定的账户 —— 装配期决定。同一份策略逻辑可以同时跑实盘与影子盘，
+      * 两个实例只有这一处不同，策略代码不必知情。
+      *
+      * **没有默认值是有意的**：payload 的 account 必填，是因为"漏一处、默认推断成实盘"
+      * 是危险侧失效；装配处若留个 `= Live` 的默认值，等于把同一个坑重新挖开 ——
+      * 给影子策略装配时忘传账户，它就真金白银在实盘上跑，而编译器不会吭声。 */
+    val account: AccountId,
+) extends Actor:
+  private val runner = StrategyRunner(strategy, symbolMetas, account)
 
-  override def name: String = s"executor(${strategy.getClass.getSimpleName})"
+  override def name: String = s"executor(${strategy.getClass.getSimpleName}@$account)"
 
   /** 本策略的订阅范围 = 策略声明 + 框架补齐。引擎据此向交易所订阅行情、做启动对齐 */
   def subscription: Subscription = runner.subscription
@@ -25,7 +35,7 @@ final class Executor(strategy: Strategy, symbolMetas: Map[(Exchange, Symbol), Sy
   override def interests: Set[Interest] = runner.subscription.interests
 
   override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-    runner.onEvent(event, now).map(outcome => Event.local(OrderIntent, outcome))
+    runner.onEvent(event, now).map(outcome => Event.local(OrderIntent, AccountOutcome(account, outcome)))
 
   /** 停机收尾：撤掉本策略还挂在交易所的单。
     *
@@ -33,4 +43,4 @@ final class Executor(strategy: Strategy, symbolMetas: Map[(Exchange, Symbol), Sy
     * 的决定 (换个策略接管、还是真的清掉敞口)，框架替它决定会在撤下实例时制造非预期的市价单。
     */
   override def onStop(now: Timestamp): Vector[AnyEvent] =
-    runner.pendingCancels.map(outcome => Event.local(OrderIntent, outcome))
+    runner.pendingCancels.map(outcome => Event.local(OrderIntent, AccountOutcome(account, outcome)))

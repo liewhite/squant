@@ -4,7 +4,7 @@ import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.state.StateManager
-import hft.strategy.{OrderIntent, OutcomeEvent, Strategy}
+import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy}
 import ox.supervised
 
 /** 撤下一个策略实例时的收尾语义。 */
@@ -33,17 +33,17 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val intents = bus.subscribe(Set(Interest.All(OrderIntent)))
-      val h = system.spawn(Executor(OneShotMaker(), metas))
+      val h = system.spawn(Executor(OneShotMaker(), metas, AccountId.Live))
 
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, 1.0, 100.1, 1.0, 0L), 0L))
-      val placed = intents.events.receive().as(OrderIntent).get match
+      val placed = intents.events.receive().as(OrderIntent).get.outcome match
         case OutcomeEvent.PlaceOrders(orders, _) => orders.head
         case other                               => fail(s"expected PlaceOrders, got $other")
 
       // 交易所确认挂单 (给它一个 orderId) —— 只有已确认的单才撤得掉
       bus.publish(Event.local(
         Topics.OrderUpdate,
-        OrderUpdate("EX-1", Some(placed.clientOrderId), ex, sym, Side.Long, OrderStatus.Pending, 100.0, 0.01, 0.0, 0.0, 0L),
+        OrderUpdate(AccountId.Live, "EX-1", Some(placed.clientOrderId), ex, sym, Side.Long, OrderStatus.Pending, 100.0, 0.01, 0.0, 0.0, 0L),
       ))
 
       system.stop(h)
@@ -56,10 +56,10 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val intents = bus.subscribe(Set(Interest.All(OrderIntent)))
-      val h = system.spawn(Executor(OneShotMaker(), metas))
+      val h = system.spawn(Executor(OneShotMaker(), metas, AccountId.Live))
 
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, 1.0, 100.1, 1.0, 0L), 0L))
-      val placed = intents.events.receive().as(OrderIntent).get match
+      val placed = intents.events.receive().as(OrderIntent).get.outcome match
         case OutcomeEvent.PlaceOrders(orders, _) => orders.head
         case other                               => fail(s"expected PlaceOrders, got $other")
       // 不推 OrderUpdate: 订单停留在 Created, 本地没有交易所 id
@@ -75,9 +75,9 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
 
   /** 取下一条撤单信号。先发哨兵作栅栏 —— 撤单若没发出，读到的是哨兵而不是永久挂死测试进程 */
   private def firstCancel(bus: EventBus, intents: EventBus.Mailbox): OutcomeEvent.CancelOrder =
-    bus.publish(Event.local(OrderIntent, sentinel))
+    bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, sentinel)))
     val got = Iterator
-      .continually(intents.events.receive().as(OrderIntent))
+      .continually(intents.events.receive().as(OrderIntent).map(_.outcome))
       .collect { case Some(c: OutcomeEvent.CancelOrder) => c }
       .next()
     assertNotEquals(got, sentinel, "没有收到撤单信号 (先读到了哨兵)")
@@ -88,8 +88,8 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val intents = bus.subscribe(Set(Interest.All(OrderIntent)))
-      val h = system.spawn(Executor(OneShotMaker(), metas))
+      val h = system.spawn(Executor(OneShotMaker(), metas, AccountId.Live))
       system.stop(h)
       // 哨兵作栅栏: 若收尾误发了信号, 先读到的会是它而不是哨兵
-      bus.publish(Event.local(OrderIntent, sentinel))
-      assertEquals(intents.events.receive().as(OrderIntent), Some(sentinel))
+      bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, sentinel)))
+      assertEquals(intents.events.receive().as(OrderIntent).map(_.outcome), Some(sentinel))

@@ -40,6 +40,8 @@ final case class RestingOrder(
   * @param restingSeq 下一张入簿挂单的到达序号，撮合按 (价格, 到达序) 优先级排序 (FIFO)。
   */
 final case class SimState(
+    /** 本柜台服务的账户 —— 撮合产出的回报都标它。实盘替身标 Live，影子盘标 Paper(n) */
+    account: AccountId,
     ledger: Ledger,
     resting: Map[OrderId, RestingOrder],
     lastBbo: Map[Symbol, BBO],
@@ -149,7 +151,7 @@ final case class SimState(
       case Some((orderId, o)) =>
         val ev = Event.stamped(
           Topics.OrderUpdate,
-          OrderUpdate(orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, 0.0, 0.0, now),
+          OrderUpdate(account, orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, 0.0, 0.0, now),
           now,
           now,
         )
@@ -192,7 +194,7 @@ final case class SimState(
           case Side.Long  => math.min(qty, math.max(0.0, -posSize)) // 买平空: 至多平掉现有空头
     if reduceOnly && effectiveQty <= Position.Epsilon then
       // reduceOnly 无可平仓位 -> 不成交，回 Cancelled (订单已被调用方移出簿 / 不入簿)
-      val update = OrderUpdate(orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Cancelled, fillPrice, qty, 0.0, 0.0, now)
+      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Cancelled, fillPrice, qty, 0.0, 0.0, now)
       (this, Vector(Event.stamped(Topics.OrderUpdate, update, now, now)))
     else
       val feeRate = liquidity match
@@ -200,18 +202,23 @@ final case class SimState(
         case Liquidity.Taker => takerFeeRate
       val fee = fillPrice * effectiveQty * feeRate
       val next = copy(ledger = ledger.applyFill(exchange, symbol, side, fillPrice, effectiveQty, fee))
-      val update = OrderUpdate(orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, effectiveQty, now)
-      val f = Fill(exchange, symbol, side, fillPrice, effectiveQty, now)
+      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, effectiveQty, now)
+      val f = Fill(account, exchange, symbol, side, fillPrice, effectiveQty, now)
       (next, Vector(Event.stamped(Topics.OrderUpdate, update, now, now), Event.stamped(Topics.Fill, f, now, now)))
 
   private def statusEvent(exchange: Exchange, order: Order, orderId: OrderId, status: OrderStatus, price: Price, now: Timestamp): AnyEvent =
     Event.stamped(
       Topics.OrderUpdate,
-      OrderUpdate(orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, 0.0, 0.0, now),
+      OrderUpdate(account, orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, 0.0, 0.0, now),
       now,
       now,
     )
 
 object SimState:
-  def empty(cash: Double, makerFeeRate: Double = 0.0, takerFeeRate: Double = 0.0): SimState =
-    SimState(Ledger.empty(cash), Map.empty, Map.empty, Map.empty, Map.empty, makerFeeRate, takerFeeRate)
+  def empty(
+      account: AccountId,
+      cash: Double,
+      makerFeeRate: Double = 0.0,
+      takerFeeRate: Double = 0.0,
+  ): SimState =
+    SimState(account, Ledger.empty(account, cash), Map.empty, Map.empty, Map.empty, Map.empty, makerFeeRate, takerFeeRate)

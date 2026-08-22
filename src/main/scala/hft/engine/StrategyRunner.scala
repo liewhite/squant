@@ -20,10 +20,12 @@ import hft.strategy.{OutcomeEvent, Strategy}
 final class StrategyRunner(
     strategy: Strategy,
     symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
+    /** 本实例绑定的账户 —— 装配期决定，策略自己不知道 */
+    val account: AccountId = AccountId.Live,
     clientOrderIdGen: Exchange => String = _.newClientOrderId,
 ):
   /** 策略实际的订阅范围 = 策略声明 + 框架补齐 (见 [[StrategyRunner.subscriptionFor]]) */
-  val subscription: Subscription = StrategyRunner.subscriptionFor(strategy)
+  val subscription: Subscription = StrategyRunner.subscriptionFor(strategy, account)
 
   val state: StateManager = StateManager(subscription.instruments.map(_.symbol), strategy.orderTimeoutMs)
 
@@ -90,17 +92,19 @@ object StrategyRunner:
     * 账户级读数按**交易所**补齐而不是全收：策略读不到自己没订阅的交易所的净值，
     * 而杠杆闸门正是拿净值算的。
     */
-  def subscriptionFor(strategy: Strategy): Subscription =
+  def subscriptionFor(strategy: Strategy, account: AccountId): Subscription =
     val declared = strategy.interests
     val base = Subscription(declared)
     val instrumentKeys = base.instruments
     val exchangeKeys = base.exchanges
+    // 补齐的私有回报与账户级读数都带账户维度：同一份策略逻辑跑在实盘与影子账户上时，
+    // 两个实例声明的行情完全相同，靠这个维度才分得开谁的成交是谁的。
     val privateInterests: Set[Interest] =
       if instrumentKeys.isEmpty then Set.empty
-      else Topics.instrumentPrivate.map(t => Interest.Keyed(t, instrumentKeys))
+      else Topics.instrumentPrivate.map(t => Interest.Keyed(t, instrumentKeys.map(AccountInstrument(account, _))))
     val accountInterests: Set[Interest] =
       if exchangeKeys.isEmpty then Set.empty
-      else Topics.account.map(t => Interest.Keyed(t, exchangeKeys))
+      else Topics.account.map(t => Interest.Keyed(t, exchangeKeys.map(AccountExchange(account, _))))
     Subscription(declared ++ privateInterests ++ accountInterests + Interest.All(Topics.Clock))
 
   /** 回测用确定性 client_order_id 生成器：自增计数 bt0/bt1/...，使逐笔回报/CSV 跨运行可复现。
@@ -114,4 +118,4 @@ object StrategyRunner:
 
   /** 回测专用工厂：注入确定性 client_order_id 生成器 (杜绝 UUID 随机带来的不可复现)。 */
   def backtest(strategy: Strategy, symbolMetas: Map[(Exchange, Symbol), SymbolMeta]): StrategyRunner =
-    StrategyRunner(strategy, symbolMetas, deterministicIdGen())
+    StrategyRunner(strategy, symbolMetas, AccountId.Live, deterministicIdGen())

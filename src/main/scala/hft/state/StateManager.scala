@@ -87,19 +87,28 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long):
     // 只有框架内置的按标的路由 topic 才进 SymbolState。用户自定义的、同样以 Instrument 为 key
     // 的 topic (如订阅别的策略在某标的上的指标) 不代表交易该标的，其标的未必注册过 ——
     // 不加这道判别的话，它的首条事件就会撞上下面的 fail-fast 把引擎拉崩。
-    if StateManager.instrumentTopics.contains(event.topic) then
+    // 行情按 Instrument 路由、私有回报按 AccountInstrument 路由，两者都落到同一个
+    // SymbolState (本 StateManager 只服务一个策略实例, 也就只服务一个账户)。
+    instrumentOf(event).foreach { instrument =>
+      states
+        .getOrElse(
+          instrument.symbol,
+          sys.error(
+            s"Symbol not found in StateManager (routing bug): $instrument —— " +
+              "策略若要交易该标的, 需为它声明至少一条公共行情 Interest"
+          ),
+        )
+        .apply(event)
+    }
+
+  /** 事件落在哪个标的上；不是标的类事件 (账户级/时钟/用户自定义) 返回 None */
+  private def instrumentOf(event: AnyEvent): Option[Instrument] =
+    if !StateManager.instrumentTopics.contains(event.topic) then None
+    else
       event.key match
-        case instrument: Instrument =>
-          states
-            .getOrElse(
-              instrument.symbol,
-              sys.error(
-                s"Symbol not found in StateManager (routing bug): $instrument —— " +
-                  "策略若要交易该标的, 需为它声明至少一条公共行情 Interest"
-              ),
-            )
-            .apply(event)
-        case _ => ()
+        case ai: AccountInstrument => Some(ai.instrument)
+        case i: Instrument         => Some(i)
+        case _                     => None
 
 object StateManager:
   /** 框架内置的按标的路由 topic —— 只有它们的事件进 [[SymbolState]] */

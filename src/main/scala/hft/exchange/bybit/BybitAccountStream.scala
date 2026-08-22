@@ -89,6 +89,7 @@ final class BybitAccountStream(
   private def publishExecution(d: ExecutionData): Unit =
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in execution: '${d.symbol}'"))
     val fill = Fill(
+      account = AccountId.Live,
       exchange = Exchange.Bybit,
       symbol = sym,
       side = sideFromBybit(d.side),
@@ -103,6 +104,7 @@ final class BybitAccountStream(
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in order: '${d.symbol}'"))
     val filled = d.cumExecQty.asDouble
     val update = OrderUpdate(
+      account = AccountId.Live,
       orderId = d.orderId,
       clientOrderId = if d.orderLinkId.nonEmpty then Some(d.orderLinkId) else None,
       exchange = Exchange.Bybit,
@@ -121,10 +123,10 @@ final class BybitAccountStream(
   private def publishWallet(d: WalletData): Unit =
     val ts = nowMs
     bus.publish(
-      Event.at(Topics.AccountInfo, AccountInfo(Exchange.Bybit, d.totalEquity.asDouble, notional = 0.0), ts)
+      Event.at(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Bybit, d.totalEquity.asDouble, notional = 0.0), ts)
     )
     d.coin.foreach { c =>
-      bus.publish(Event.at(Topics.Balance, Balance(Exchange.Bybit, c.coin, c.walletBalance.asDoubleOrZero, ts), ts))
+      bus.publish(Event.at(Topics.Balance, Balance(AccountId.Live, Exchange.Bybit, c.coin, c.walletBalance.asDoubleOrZero, ts), ts))
     }
 
   /** 心跳发送线程：定期入队 ping 帧，维持私有连接 (无成交时也不致空闲被断) */

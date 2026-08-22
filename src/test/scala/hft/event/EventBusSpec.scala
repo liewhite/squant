@@ -59,13 +59,13 @@ class EventBusSpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       val sub = bus.subscribe(Set(
-        Interest.Keyed(Topics.Fill, Set(btc)),
-        Interest.Keyed(Topics.Fill, Set(btc, eth)),
+        Interest.Keyed(Topics.Fill, Set(AccountInstrument(AccountId.Live, btc))),
+        Interest.Keyed(Topics.Fill, Set(AccountInstrument(AccountId.Live, btc), AccountInstrument(AccountId.Live, eth))),
       ))
-      val btcFill = Fill(ex, "BTCUSDT", Side.Long, 100.0, 1.0, t0)
+      val btcFill = Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, 1.0, t0)
       bus.publish(Event.local(Topics.Fill, btcFill))
       // 栅栏: 若上一条被投了两次, 这里读到的会是重复的 BTC 而不是 ETH
-      bus.publish(Event.local(Topics.Fill, Fill(ex, "ETHUSDT", Side.Long, 100.0, 1.0, t0)))
+      bus.publish(Event.local(Topics.Fill, Fill(AccountId.Live, ex, "ETHUSDT", Side.Long, 100.0, 1.0, t0)))
       assertEquals(sub.events.receive().as(Topics.Fill).map(_.symbol), Some("BTCUSDT"))
       assertEquals(sub.events.receive().as(Topics.Fill).map(_.symbol), Some("ETHUSDT"))
 
@@ -109,7 +109,7 @@ class EventBusSpec extends munit.FunSuite:
     val interests: Set[Interest] = Set(
       Interest.Keyed(Topics.Bbo, Set(btc)),
       Interest.All(Topics.Clock),
-      Interest.Keyed(Topics.AccountInfo, Set(Exchange.Binance)),
+      Interest.Keyed(Topics.AccountInfo, Set(AccountExchange(AccountId.Live, Exchange.Binance))),
     )
     val sub = Subscription(interests)
     val events: Vector[AnyEvent] = Vector(
@@ -117,9 +117,9 @@ class EventBusSpec extends munit.FunSuite:
       Event.at(Topics.Bbo, bboOf(eth), t0),
       Event.at(Topics.Trade, tradeOf(btc), t0),
       Topics.clockAt(t0),
-      Event.local(Topics.AccountInfo, AccountInfo(Exchange.Binance, 1.0, 0.0)),
-      Event.local(Topics.AccountInfo, AccountInfo(Exchange.Okx, 1.0, 0.0)),
-      Event.local(Topics.Balance, Balance(Exchange.Binance, "USDT", 1.0, t0)),
+      Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Binance, 1.0, 0.0)),
+      Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, 1.0, 0.0)),
+      Event.local(Topics.Balance, Balance(AccountId.Live, Exchange.Binance, "USDT", 1.0, t0)),
     )
     supervised:
       val bus = EventBus()

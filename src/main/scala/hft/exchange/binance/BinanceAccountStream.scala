@@ -83,6 +83,7 @@ final class BinanceAccountStream(
       // 未知状态意味着无法解释交易所的订单状态机，继续运行只会静默发散
       case other => throw IllegalStateException(s"Unknown order status '$other': $o")
     val update = OrderUpdate(
+      account = AccountId.Live,
       orderId = o.i.toString,
       clientOrderId = Some(o.c),
       exchange = Exchange.Binance,
@@ -98,16 +99,16 @@ final class BinanceAccountStream(
     bus.publish(Event.at(Topics.OrderUpdate, update, msg.E))
     // 本次有成交 -> 同步发布 Fill 事件，乐观更新仓位
     if o.l.asDouble > 0 then
-      val fill = Fill(Exchange.Binance, o.s, side, price = o.L.asDouble, size = o.l.asDouble, timestamp = o.T)
+      val fill = Fill(AccountId.Live, Exchange.Binance, o.s, side, price = o.L.asDouble, size = o.l.asDouble, timestamp = o.T)
       bus.publish(Event.at(Topics.Fill, fill, msg.E))
 
   private def publishAccountUpdate(msg: AccountUpdateMsg): Unit =
     msg.a.B.foreach { b =>
       bus.publish(
-        Event.at(Topics.Balance, Balance(Exchange.Binance, b.a, b.wb.asDouble, msg.E), msg.E)
+        Event.at(Topics.Balance, Balance(AccountId.Live, Exchange.Binance, b.a, b.wb.asDouble, msg.E), msg.E)
       )
     }
     msg.a.P.filter(_.ps == "BOTH").foreach { p =>
-      val position = Position(Exchange.Binance, p.s, p.pa.asDouble, p.ep.asDouble, p.up.asDouble)
+      val position = Position(AccountId.Live, Exchange.Binance, p.s, p.pa.asDouble, p.ep.asDouble, p.up.asDouble)
       bus.publish(Event.at(Topics.Position, position, msg.E))
     }

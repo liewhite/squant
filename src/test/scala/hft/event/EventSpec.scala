@@ -39,7 +39,7 @@ class EventSpec extends munit.FunSuite:
 
   test("载荷类型相同的两个 topic 互不串味"):
     // Position 与 Fill 都按 Instrument 路由；判别靠 topic 身份而非载荷结构
-    val pos = Position(ex, sym, 1.0, 100.0, 0.0)
+    val pos = Position(AccountId.Live, ex, sym, 1.0, 100.0, 0.0)
     val ev: AnyEvent = Event.local(Topics.Position, pos)
     assert(ev.as(Topics.Position).isDefined)
     assertEquals(ev.as(Topics.Fill), None)
@@ -80,7 +80,7 @@ class EventSpec extends munit.FunSuite:
     val sub = Subscription(Set(
       Interest.Keyed(Topics.Bbo, Set(inst)),
       Interest.Keyed(Topics.Trade, Set(Instrument(Exchange.Okx, "ETHUSDT"))),
-      Interest.Keyed(Topics.AccountInfo, Set(Exchange.Bybit)),
+      Interest.Keyed(Topics.AccountInfo, Set(AccountExchange(AccountId.Live, Exchange.Bybit))),
     ))
     assertEquals(sub.instruments, Set(inst, Instrument(Exchange.Okx, "ETHUSDT")))
     assertEquals(sub.exchanges, Set(Exchange.Binance, Exchange.Okx, Exchange.Bybit))
@@ -88,6 +88,6 @@ class EventSpec extends munit.FunSuite:
   test("账户级读数按交易所过滤 —— 越界防线"):
     // 此前账户级事件没有路由键因而广播，策略能读到自己没订阅的交易所的净值，
     // 而杠杆闸门正是拿净值算的。
-    val sub = Subscription(Set(Interest.Keyed(Topics.AccountInfo, Set(Exchange.Binance))))
-    assert(sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(Exchange.Binance, 1.0, 0.0))))
-    assert(!sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(Exchange.Okx, 1.0, 0.0))))
+    val sub = Subscription(Set(Interest.Keyed(Topics.AccountInfo, Set(AccountExchange(AccountId.Live, Exchange.Binance)))))
+    assert(sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Binance, 1.0, 0.0))))
+    assert(!sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, 1.0, 0.0))))

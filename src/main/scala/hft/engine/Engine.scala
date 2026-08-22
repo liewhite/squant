@@ -8,6 +8,8 @@ import hft.event.{Event, EventBus, Interest, Subscription, Topics}
 import hft.strategy.Strategy
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
+
+import scala.collection.mutable
 import ox.channels.Source
 
 /** 一个交易所的接入单元: REST 客户端 + 公共行情流 + 可选私有账户流。
@@ -47,6 +49,9 @@ final class Engine private (
 )(using Ox):
   private val logger = LoggerFactory.getLogger(classOf[Engine])
 
+  /** (账户, 标的) 的独占登记，见 [[InstrumentClaims]] */
+  private val claims = InstrumentClaims[ActorHandle]()
+
   /** 在策略**之外**订阅事件 (成交记录、监控、指标导出)，策略因此无需承担写文件等副作用。
     *
     * 返回一个邮箱：调用方负责在自己的作用域内 fork 消费，**并在不再需要时 `close()` 退订**
@@ -57,13 +62,17 @@ final class Engine private (
     */
   def subscribe(interests: Set[Interest]): EventBus.Mailbox = bus.subscribe(interests)
 
-  def addStrategy(strategy: Strategy): ActorHandle = addStrategies(Vector(strategy)).head
+  def addStrategy(strategy: Strategy, account: AccountId): ActorHandle = addStrategies(Vector(strategy), account).head
 
-  /** 撤下一个策略实例：先撤掉它挂在交易所的单 (见 [[Executor.onStop]])，再退订、摘除。
+  /** 撤下一个策略实例：先撤掉它挂在交易所的单 (见 [[Executor.onStop]])，再退订、摘除，
+    * 最后释放它占用的 (账户, 标的)。
     *
     * 返回时收尾已经跑完。**不平仓** —— 仓位归谁管是策略之外的决定。
     */
-  def removeStrategy(handle: ActorHandle): Unit = system.stop(handle)
+  def removeStrategy(handle: ActorHandle): Unit = synchronized {
+    system.stop(handle)
+    claims.release(handle)
+  }
 
   /** 批量添加策略。
     *
@@ -75,12 +84,25 @@ final class Engine private (
     *   4. REST 查询现有挂单并发布 —— 策略接管启动前的遗留订单
     *   5. 向交易所订阅行情 —— 市场数据从此处开始流动
     */
-  def addStrategies(strategies: Seq[Strategy]): Seq[ActorHandle] =
+  def addStrategies(strategies: Seq[Strategy], account: AccountId): Seq[ActorHandle] =
+    synchronized {
     if strategies.isEmpty then return Vector.empty
+    // 启动对齐 (下面 2/3/4 步) 一律从**真实交易所** REST 拉取并以 Live 归属发布，
+    // Paper 账户的策略订阅的是 (Paper(n), 标的)，一条都收不到 —— 会盲启。
+    // 虚拟柜台落地前诚实拒绝，好过静默坏掉。
+    require(
+      account == AccountId.Live,
+      s"$account 的启动对齐路径尚未实现 (初始持仓/挂单只能从真实交易所拉取)，" +
+        "影子账户须待虚拟柜台落地后再启用",
+    )
 
-    // 1. 创建 Executor 并 spawn (spawn 内部先订阅总线, 之后的事件不丢)
-    val executors = strategies.map(Executor(_, symbolMetas))
+    // 1. 创建 Executor，先查唯一性再 spawn (查完再落地，避免半启动状态)
+    val executors = strategies.map(Executor(_, symbolMetas, account))
+    def keysOf(ex: Executor) = ex.subscription.instruments.map(AccountInstrument(ex.account, _))
+    // 先查后起：(账户, 标的) 冲突要在策略启动之前拒绝
+    claims.checkAll(executors.map(ex => (ex.name, keysOf(ex))))
     val ids = executors.map(system.spawn)
+    claims.claimAll(executors.zip(ids).map((ex, handle) => (handle, ex.name, keysOf(ex))))
 
     // 策略订阅范围的并集 —— 行情订阅与启动对齐都从这一处派生
     val combined = Subscription(executors.flatMap(_.subscription.interests).toSet)
@@ -106,6 +128,7 @@ final class Engine private (
 
     logger.info(s"${strategies.size} strategies added")
     ids
+  }
 
   private def requireClient(exchange: Exchange): ExchangeClient =
     clients.getOrElse(exchange, throw IllegalStateException(s"No client configured for exchange $exchange"))
@@ -123,7 +146,7 @@ final class Engine private (
         case Right(positions) =>
           val bySymbol = positions.map(p => p.symbol -> p).toMap
           symbols.foreach { symbol =>
-            val pos = bySymbol.getOrElse(symbol, Position.empty(exchange, symbol))
+            val pos = bySymbol.getOrElse(symbol, Position.empty(AccountId.Live, exchange, symbol))
             logger.info(s"Initial position loaded: $exchange $symbol size=${pos.size}")
             bus.publish(Event.local(Topics.Position, pos))
           }
@@ -188,7 +211,7 @@ object Engine:
 
     // 消费者先起、生产者后起: 事件开始流动时下游必须已经在总线上, 否则最早的那批事件没人接。
     // 这也是停机顺序的反面 —— 生产者先停, 它们收尾时补发的最后一批事件仍有人消费。
-    system.spawn(OutcomeProcessor(clients, dryRun))
+    system.spawn(OutcomeProcessor(clients, dryRun, AccountId.Live))
     system.spawn(Clock(clockIntervalMs))
     system.spawn(AccountRefresher(clients.values, accountRefreshMs))
 

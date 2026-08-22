@@ -29,7 +29,7 @@ class ActorSystemSpec extends munit.FunSuite:
       Vector.empty
     override def onStop(now: Timestamp): Vector[AnyEvent] =
       seen.add(s"$name:stopped")
-      emitOnStop.map(sym => Event.local(Topics.Fill, Fill(ex, sym, Side.Long, 1.0, 1.0, now))).toVector
+      emitOnStop.map(sym => Event.local(Topics.Fill, Fill(AccountId.Live, ex, sym, Side.Long, 1.0, 1.0, now))).toVector
 
   test("spawn 后收到订阅的事件, stop 后不再收到 (退订生效)"):
     supervised:
@@ -174,7 +174,7 @@ class ActorSystemSpec extends munit.FunSuite:
         override def name = "relay"
         override def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
         override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-          event.as(Topics.Bbo).map(b => Event.local(Topics.Fill, Fill(ex, b.symbol, Side.Long, b.bidPrice, 1.0, now))).toVector
+          event.as(Topics.Bbo).map(b => Event.local(Topics.Fill, Fill(AccountId.Live, ex, b.symbol, Side.Long, b.bidPrice, 1.0, now))).toVector
       val downstream = bus.subscribe(Set(Interest.All(Topics.Fill)))
       system.spawn(Relay())
       bus.publish(Event.at(Topics.Bbo, bbo(123.0), t0))

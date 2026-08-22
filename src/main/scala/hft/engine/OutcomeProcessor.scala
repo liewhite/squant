@@ -20,6 +20,8 @@ import org.slf4j.LoggerFactory
 final class OutcomeProcessor(
     clients: Map[Exchange, ExchangeClient],
     dryRun: Boolean,
+    /** 本出口负责的账户 (真实交易所出口即 [[AccountId.Live]])。无默认值，理由同 [[Executor]] */
+    account: AccountId,
 ) extends Actor:
   private val logger = LoggerFactory.getLogger(classOf[OutcomeProcessor])
 
@@ -27,10 +29,15 @@ final class OutcomeProcessor(
     * 由 [[hft.actor.ActorSystem]] 在 onStart 时注入，之后只读。 */
   @volatile private var ctx: ActorContext = scala.compiletime.uninitialized
 
-  override def name: String = "outcome-processor"
+  override def name: String = s"outcome-processor@$account"
 
-  /** 全量订阅 [[OrderIntent]] —— 它是唯一通往交易所的出口，没有"只执行一部分信号"的语义 */
-  override def interests: Set[Interest] = Set(Interest.All(OrderIntent))
+  /** 只订阅本出口负责的账户。
+    *
+    * "这条信号该由谁执行"因此由投递层回答：实盘信号进这里、影子盘信号进它自己的柜台，
+    * 两个出口互不知情。若改成全量订阅再各自过滤，新增一类账户时两处都不会编译失败，
+    * 失效方式是静默双执行或静默不执行。
+    */
+  override def interests: Set[Interest] = Set(Interest.Keyed(OrderIntent, Set(account)))
 
   override def onStart(context: ActorContext): Unit =
     ctx = context
@@ -38,7 +45,7 @@ final class OutcomeProcessor(
     else logger.info("OutcomeProcessor started")
 
   override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-    event.as(OrderIntent).foreach(handle)
+    event.as(OrderIntent).foreach(intent => handle(intent.outcome))
     Vector.empty
 
   private def handle(signal: OutcomeEvent): Unit = signal match
@@ -99,9 +106,10 @@ final class OutcomeProcessor(
   private def requireClient(exchange: Exchange): ExchangeClient =
     clients.getOrElse(exchange, throw IllegalStateException(s"No client configured for exchange $exchange"))
 
-  /** 确定性的下单失败以 OrderUpdate(Error) 回流，驱动 pending order 清理 */
+  /** 确定性的下单失败以 OrderUpdate(AccountId.Live, Error) 回流，驱动 pending order 清理 */
   private def publishOrderError(order: Order, reason: String): Unit =
     val update = OrderUpdate(
+      account = account,
       orderId = "",
       clientOrderId = Some(order.clientOrderId),
       exchange = order.exchange,

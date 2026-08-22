@@ -16,17 +16,25 @@ enum OutcomeEvent:
     */
   case CancelOrder(exchange: Exchange, symbol: Symbol, ref: OrderRef)
 
+/** 带账户归属的策略信号 —— 一次决策要发往哪个账户执行。 */
+final case class AccountOutcome(account: AccountId, outcome: OutcomeEvent)
+
 /** 策略信号的事件族。
   *
-  * 定义在这里而不是 [[hft.event.Topics]]：载荷 [[OutcomeEvent]] 属于策略层，而 `hft.event`
-  * 是它的下游依赖 —— 放进框架内置 topic 会造出一条反向依赖边。这正是 [[Topic]] 作为
-  * **开放扩展点**的用法：任何模块都能定义自己的事件族，框架无需知情。
+  * 定义在这里而不是 [[hft.event.Topics]]：载荷属于策略层，而 `hft.event` 是它的下游依赖
+  * —— 放进框架内置 topic 会造出一条反向依赖边。这正是 [[Topic]] 作为**开放扩展点**的用法：
+  * 任何模块都能定义自己的事件族，框架无需知情。
   *
-  * 无路由维度 (`K = Unit`)：一次决策可以包含跨交易所、跨标的的多张订单，没有单一的路由键。
-  * 执行出口用 `Interest.All(OrderIntent)` 订阅，策略不订阅它，故信号不会回流给任何策略。
+  * **按账户路由**：实盘出口订阅 `Keyed(OrderIntent, {Live})`，每个虚拟柜台订阅自己那个
+  * `Paper(n)`。于是"这条信号该由谁执行"由投递层回答，不需要每个出口再自己判一次
+  * ——两个出口各写各的否定条件时，新增一类账户不会有任何一处编译失败，失效方式是静默
+  * 双执行或静默不执行。
+  *
+  * 一次决策可以包含跨交易所、跨标的的多张订单，所以 key 只到账户，不含标的。
+  * 策略不订阅本 topic，故信号不会回流给任何策略。
   */
-object OrderIntent extends Topic[Unit, OutcomeEvent]("orderIntent"):
-  def keyOf(payload: OutcomeEvent): Unit = ()
+object OrderIntent extends Topic[AccountId, AccountOutcome]("orderIntent"):
+  def keyOf(payload: AccountOutcome): AccountId = payload.account
 
 /** 策略接口，用户实现此 trait 定义自己的策略逻辑。
   *

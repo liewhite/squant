@@ -73,7 +73,7 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
               balanceEmitted = true
               val balanceEv = Event.stamped(
                 Topics.Balance,
-                Balance(config.exchange, config.ccy, config.spotHolding, now),
+                Balance(AccountId.Live, config.exchange, config.ccy, config.spotHolding, now),
                 ev.exchangeTs,
                 ev.localTs,
               )
@@ -97,6 +97,7 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
   private def greeksAt(s: Double, now: Timestamp): Greeks =
     val g = Straddle.greeks(config.straddles, s, callStrike, putStrike, tYears(now), config.impliedVol, config.riskFreeRate)
     Greeks(
+      account = AccountId.Live,
       exchange = config.exchange,
       ccy = config.ccy,
       delta = g.delta,

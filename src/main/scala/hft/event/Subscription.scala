@@ -22,10 +22,12 @@ final case class Subscription(interests: Set[Interest]):
     * 混为一谈的后果是补过头 —— 一个只看指标的监控/元策略会被补上该标的的私有回报订阅，
     * 进而被引擎拉去做持仓对齐、要求 SymbolMeta，而它根本不交易那个标的。
     */
-  def instruments: Set[Instrument] = keysOf(Topics.market ++ Topics.instrumentPrivate)
+  def instruments: Set[Instrument] =
+    keysOf(Topics.market) ++ keysOf(Topics.instrumentPrivate).map(_.instrument)
 
   /** 涉及的全部交易所：交易标的所属的，加上账户级声明直接指名的 */
-  def exchanges: Set[Exchange] = instruments.map(_.exchange) ++ keysOf(Topics.account)
+  def exchanges: Set[Exchange] =
+    instruments.map(_.exchange) ++ keysOf(Topics.account).map(_.exchange)
 
   private def keysOf[K](topics: Set[Topic[K, ?]]): Set[K] =
     topics.flatMap(t => interests.flatMap(_.keysOf(t)))

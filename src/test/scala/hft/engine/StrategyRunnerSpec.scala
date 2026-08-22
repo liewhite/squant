@@ -16,15 +16,15 @@ class StrategyRunnerSpec extends munit.FunSuite:
     def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] = Vector.empty
 
   private def subOf(interests: Set[Interest]): Subscription =
-    StrategyRunner.subscriptionFor(Stub(interests))
+    StrategyRunner.subscriptionFor(Stub(interests), AccountId.Live)
 
   test("补齐所声明标的的私有回报 —— 策略不该有机会漏订成交"):
     val sub = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
-    val fill = Event.local(Topics.Fill, Fill(ex, "BTCUSDT", Side.Long, 100.0, 1.0, 0L))
-    val position = Event.local(Topics.Position, Position(ex, "BTCUSDT", 1.0, 100.0, 0.0))
+    val fill = Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, 1.0, 0L))
+    val position = Event.local(Topics.Position, Position(AccountId.Live, ex, "BTCUSDT", 1.0, 100.0, 0.0))
     val orderUpdate = Event.local(
       Topics.OrderUpdate,
-      OrderUpdate("1", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Filled, 100.0, 1.0, 1.0, 1.0, 0L),
+      OrderUpdate(AccountId.Live, "1", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Filled, 100.0, 1.0, 1.0, 1.0, 0L),
     )
     assert(sub.accepts(fill), "Fill 必须自动补齐: 漏订会让本地仓位与交易所长期发散")
     assert(sub.accepts(position))
@@ -32,11 +32,11 @@ class StrategyRunnerSpec extends munit.FunSuite:
 
   test("补齐所涉交易所的账户级读数, 但不越界到别的交易所"):
     val sub = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
-    assert(sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(ex, 1.0, 0.0))))
-    assert(sub.accepts(Event.local(Topics.Balance, Balance(ex, "USDT", 1.0, 0L))))
-    assert(sub.accepts(Event.local(Topics.Greeks, Greeks(ex, "BTC", 0.0, 0.0, 0.0, 0.0, 0L))))
+    assert(sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, ex, 1.0, 0.0))))
+    assert(sub.accepts(Event.local(Topics.Balance, Balance(AccountId.Live, ex, "USDT", 1.0, 0L))))
+    assert(sub.accepts(Event.local(Topics.Greeks, Greeks(AccountId.Live, ex, "BTC", 0.0, 0.0, 0.0, 0.0, 0L))))
     assert(
-      !sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(Exchange.Okx, 1.0, 0.0))),
+      !sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, 1.0, 0.0))),
       "未订阅交易所的净值不该到达策略 —— 杠杆闸门就是拿它算的",
     )
 
@@ -45,13 +45,13 @@ class StrategyRunnerSpec extends munit.FunSuite:
 
   test("不补齐未声明标的的任何东西"):
     val sub = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
-    val ethFill = Event.local(Topics.Fill, Fill(ex, "ETHUSDT", Side.Long, 100.0, 1.0, 0L))
+    val ethFill = Event.local(Topics.Fill, Fill(AccountId.Live, ex, "ETHUSDT", Side.Long, 100.0, 1.0, 0L))
     assert(!sub.accepts(ethFill))
 
   test("无任何声明的策略只收时钟"):
     val sub = subOf(Set.empty)
     assert(sub.accepts(Topics.clockAt(0L)))
-    assert(!sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(ex, 1.0, 0.0))))
+    assert(!sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, ex, 1.0, 0.0))))
 
   test("行情订阅由同一份声明派生 —— 一处声明, 两处派生"):
     val sub = subOf(Set(
@@ -76,7 +76,7 @@ class StrategyRunnerSpec extends munit.FunSuite:
     // 拉去做持仓对齐、要求 SymbolMeta —— 它根本不交易那个标的。
     val sub = subOf(Set(Interest.Keyed(StrategyRunnerSpec.AlphaSignal, Set(btc))))
     assertEquals(sub.instruments, Set.empty[Instrument])
-    assert(!sub.accepts(Event.local(Topics.Fill, Fill(ex, "BTCUSDT", Side.Long, 100.0, 1.0, 0L))))
+    assert(!sub.accepts(Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, 1.0, 0L))))
     assertEquals(SubscriptionKind.from(sub), Set.empty[(Exchange, SubscriptionKind)])
     // 但它自己声明的那条依然收得到
     assert(sub.accepts(Event.local(StrategyRunnerSpec.AlphaSignal, StrategyRunnerSpec.Score(btc, 1.0))))

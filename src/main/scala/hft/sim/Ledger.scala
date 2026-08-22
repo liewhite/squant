@@ -29,7 +29,7 @@ object Matcher:
   *
   * 仓位 size 带符号 (正多负空)，entryPrice 为持仓均价，现金累加已实现盈亏。
   */
-final case class Ledger(positions: Map[Symbol, Position], cash: Double):
+final case class Ledger(account: AccountId, positions: Map[Symbol, Position], cash: Double):
 
   /** 应用一笔成交，返回新账本：
     *   - 新开 / 同向加仓：加权平均成本
@@ -42,7 +42,7 @@ final case class Ledger(positions: Map[Symbol, Position], cash: Double):
     val signed = side match
       case Side.Long  => qty
       case Side.Short => -qty
-    val pos = positions.getOrElse(symbol, Position.empty(exchange, symbol))
+    val pos = positions.getOrElse(symbol, Position.empty(account, exchange, symbol))
     val oldSize = pos.size
     val newSize = oldSize + signed
     if math.abs(oldSize) < Position.Epsilon || (oldSize > 0) == (signed > 0) then
@@ -58,7 +58,7 @@ final case class Ledger(positions: Map[Symbol, Position], cash: Double):
         if math.abs(signed) <= math.abs(oldSize) then
           if math.abs(newSize) < Position.Epsilon then 0.0 else pos.entryPrice
         else price // 反手: 剩余在成交价重开
-      Ledger(positions.updated(symbol, pos.copy(size = newSize, entryPrice = newEntry)), cash + realized - fee)
+      Ledger(account, positions.updated(symbol, pos.copy(size = newSize, entryPrice = newEntry)), cash + realized - fee)
 
   /** 账户净值 = 现金 + 未实现盈亏 (markOf 提供各 symbol 的估值价格) */
   def equity(markOf: Symbol => Double): Double =
@@ -73,7 +73,7 @@ final case class Ledger(positions: Map[Symbol, Position], cash: Double):
     positions.values.filterNot(_.isEmpty).map(p => p.copy(unrealizedPnl = Ledger.unrealizedPnl(p, markOf(p.symbol)))).toVector
 
 object Ledger:
-  def empty(cash: Double): Ledger = Ledger(Map.empty, cash)
+  def empty(account: AccountId, cash: Double): Ledger = Ledger(account, Map.empty, cash)
 
   /** 未实现盈亏：(标记价 - 均价) * 带符号仓位；无估值价格时记 0 */
   private def unrealizedPnl(pos: Position, mark: Double): Double =

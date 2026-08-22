@@ -4,7 +4,7 @@ import hft.domain.*
 import hft.exchange.ExchangeClient
 import hft.actor.ActorSystem
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
-import hft.strategy.{OrderIntent, OutcomeEvent}
+import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent}
 import ox.supervised
 
 /** OutcomeProcessor 的 fail-fast 语义:
@@ -39,26 +39,26 @@ class OutcomeProcessorSpec extends munit.FunSuite:
     val ev = incomes.receive()
     ev.as(Topics.OrderUpdate).getOrElse(fail(s"unexpected event: $ev"))
 
-  test("dry-run: 信号以 OrderUpdate(Error) 回流清理 pending"):
+  test("dry-run: 信号以 OrderUpdate(AccountId.Live, Error) 回流清理 pending"):
     supervised:
       val bus = EventBus()
       val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
 
-      ActorSystem(bus).spawn(OutcomeProcessor(Map.empty, dryRun = true))
-      bus.publish(Event.local(OrderIntent, OutcomeEvent.PlaceOrders(Vector(order), "test")))
+      ActorSystem(bus).spawn(OutcomeProcessor(Map.empty, dryRun = true, AccountId.Live))
+      bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), "test"))))
 
       val update = receivedError(incomes.events)
       assertEquals(update.clientOrderId, Some("c1"))
       assert(update.status.isInstanceOf[OrderStatus.Error])
 
-  test("交易所明确拒单 (4xx): OrderUpdate(Error) 事件回流策略"):
+  test("交易所明确拒单 (4xx): OrderUpdate(AccountId.Live, Error) 事件回流策略"):
     supervised:
       val bus = EventBus()
       val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
       val clients = Map[Exchange, ExchangeClient](Exchange.Binance -> StubClient(Left(ExchangeError.Http(400, """{"code":-2019,"msg":"Margin is insufficient."}"""))))
 
-      ActorSystem(bus).spawn(OutcomeProcessor(clients, dryRun = false))
-      bus.publish(Event.local(OrderIntent, OutcomeEvent.PlaceOrders(Vector(order), "test")))
+      ActorSystem(bus).spawn(OutcomeProcessor(clients, dryRun = false, AccountId.Live))
+      bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), "test"))))
 
       val update = receivedError(incomes.events)
       assertEquals(update.clientOrderId, Some("c1"))
@@ -71,8 +71,8 @@ class OutcomeProcessorSpec extends munit.FunSuite:
         val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
         val clients = Map[Exchange, ExchangeClient](Exchange.Binance -> StubClient(Left(ExchangeError.Network("connection reset"))))
 
-        ActorSystem(bus).spawn(OutcomeProcessor(clients, dryRun = false))
-        bus.publish(Event.local(OrderIntent, OutcomeEvent.PlaceOrders(Vector(order), "test")))
+        ActorSystem(bus).spawn(OutcomeProcessor(clients, dryRun = false, AccountId.Live))
+        bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), "test"))))
         incomes.events.receive() // 阻塞至下单 fork 失败取消作用域
     }
 
@@ -82,7 +82,7 @@ class OutcomeProcessorSpec extends munit.FunSuite:
         val bus = EventBus()
         val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
 
-        ActorSystem(bus).spawn(OutcomeProcessor(Map.empty, dryRun = false))
-        bus.publish(Event.local(OrderIntent, OutcomeEvent.PlaceOrders(Vector(order), "test")))
+        ActorSystem(bus).spawn(OutcomeProcessor(Map.empty, dryRun = false, AccountId.Live))
+        bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), "test"))))
         incomes.events.receive()
     }

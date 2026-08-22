@@ -34,7 +34,7 @@ object AccountRefresher:
     */
   private[engine] def publishAccountInfo(
       client: ExchangeClient,
-      publish: Event[Exchange, AccountInfo] => Unit,
+      publish: Event[AccountExchange, AccountInfo] => Unit,
       logger: org.slf4j.Logger,
   ): Boolean =
     client.fetchAccountInfo() match
