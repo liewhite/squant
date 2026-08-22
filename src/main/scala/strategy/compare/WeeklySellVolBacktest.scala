@@ -132,7 +132,8 @@ import scala.concurrent.{Await, ExecutionContext, Future}
         exchange = Exchange.Binance, source = source, runners = Seq(runner),
         config = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = delayMs,
           initialBalanceUsdt = initialBalance, makerFeeRate = makerFee, takerFeeRate = takerFee),
-        observers = Seq(obs),
+        symbolMetas = symbolMetas,
+    observers = Seq(obs),
       )
       val result = engine.run()
       val optionPnl = withGreeks.optionPnl(lastMid, lastTs)

@@ -54,6 +54,7 @@ import java.time.{LocalDate, ZoneOffset}
       exchangeToStrategyDelayMs = 100, orderToExchangeDelayMs = 50,
       initialBalanceUsdt = initBalance, makerFeeRate = makerFee, takerFeeRate = takerFee,
     ),
+    symbolMetas = symbolMetas,
     observers = Seq(rec.observe),
   )
   val r = try engine.run() finally backend.close()

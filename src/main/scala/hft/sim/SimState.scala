@@ -42,6 +42,8 @@ final case class RestingOrder(
 final case class SimState(
     /** 本柜台服务的账户 —— 撮合产出的回报都标它。实盘替身标 Live，影子盘标 Paper(n) */
     account: AccountId,
+    /** 用于在入口把订单数量从交易所格式 (合约张数) 还原成币本位，见 [[onOrderArrived]] */
+    symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     ledger: Ledger,
     resting: Map[OrderId, RestingOrder],
     lastBbo: Map[Symbol, BBO],
@@ -115,7 +117,13 @@ final case class SimState(
   // ==================== 下单到达撮合 ====================
 
   /** 订单到达撮合：按类型/TIF 决定 resting / 成交 / 拒单。`now` 为到达时刻 (回报时间戳取自它) */
-  def onOrderArrived(exchange: Exchange, order: Order, orderId: OrderId, now: Timestamp): (SimState, Vector[AnyEvent]) =
+  def onOrderArrived(exchange: Exchange, rawOrder: Order, orderId: OrderId, now: Timestamp): (SimState, Vector[AnyEvent]) =
+    // 入口还原币本位：进来的订单是**交易所格式** (合约张数, 由 StrategyRunner 换算过)，
+    // 而账本、仓位、回报一律用币本位 —— 真实网关正是这样在回报侧 `qtyToCoin` 还原的
+    // (见 OkxAccountStream)。虚拟柜台若不做这一步, 在 contractSize ≠ 1 的交易所上
+    // 影子盘的成交量/盈亏/仓位会整体差一个 contractSize 倍, 与实盘不可比 ——
+    // 而"两边数字可比"正是影子盘存在的理由。Binance contractSize = 1, 症状会被掩盖。
+    val order = rawOrder.copy(quantity = metaOf(exchange, rawOrder.symbol).qtyToCoin(rawOrder.quantity))
     val bboOpt = lastBbo.get(order.symbol)
     order.orderType match
       case OrderType.Market =>
@@ -157,6 +165,13 @@ final case class SimState(
         )
         (copy(resting = resting - orderId), Vector(ev))
       case None => (this, Vector.empty)
+
+  /** 缺 [[SymbolMeta]] 说明柜台收到了未预加载标的的订单，是配置错误，立即终止 */
+  private def metaOf(exchange: Exchange, symbol: Symbol): SymbolMeta =
+    symbolMetas.getOrElse(
+      (exchange, symbol),
+      sys.error(s"SymbolMeta not found for $exchange $symbol, 虚拟柜台无法还原币本位数量"),
+    )
 
   /** 按交易所 id 或 clientOrderId 找挂单 —— 与真实交易所的两种撤单指名方式一致 */
   def findResting(ref: OrderRef): Option[(OrderId, RestingOrder)] = ref match
@@ -217,8 +232,9 @@ final case class SimState(
 object SimState:
   def empty(
       account: AccountId,
+      symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
       cash: Double,
       makerFeeRate: Double = 0.0,
       takerFeeRate: Double = 0.0,
   ): SimState =
-    SimState(account, Ledger.empty(account, cash), Map.empty, Map.empty, Map.empty, Map.empty, makerFeeRate, takerFeeRate)
+    SimState(account, symbolMetas, Ledger.empty(account, cash), Map.empty, Map.empty, Map.empty, Map.empty, makerFeeRate, takerFeeRate)

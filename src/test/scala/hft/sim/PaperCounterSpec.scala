@@ -16,6 +16,8 @@ class PaperCounterSpec extends munit.FunSuite:
   private val paper = AccountId.Paper(1)
   /** 无延迟配置：断言不必等时钟 (延迟本身另有用例) */
   private val instant = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
+  /** contractSize = 1 的常规标的 */
+  private val metas1 = Map((ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0))
 
   private def bbo(bid: Double, ask: Double, ts: Long = 0L) = BBO(ex, sym, bid, 1.0, ask, 1.0, ts)
 
@@ -45,7 +47,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
-      system.spawn(PaperCounter(paper, ex, instant))
+      system.spawn(PaperCounter(paper, ex, instant, metas1))
 
       // 挂一张买单在 bid 下方, 随后行情下穿 -> 成交
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 0.5, "c1"))))
@@ -62,7 +64,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
-      system.spawn(PaperCounter(paper, ex, instant))
+      system.spawn(PaperCounter(paper, ex, instant, metas1))
 
       // 实盘意图: 柜台不该撮合它
       bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, buyLimit(99.0, 0.5, "live1"))))
@@ -80,7 +82,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val infos = collect(bus, Set(Interest.All(Topics.AccountInfo)))
-      val counter = PaperCounter(paper, ex, instant, equityRefreshMs = 0)
+      val counter = PaperCounter(paper, ex, instant, metas1, equityRefreshMs = 0)
       system.spawn(counter)
 
       bus.publish(Topics.clockAt(1L))
@@ -88,8 +90,28 @@ class PaperCounterSpec extends munit.FunSuite:
       assertEquals(first.account, paper)
       assertEqualsDouble(first.equity, 10_000.0, 1e-9, "起始净值 = 初始资金")
 
+  test("contractSize != 1: 回报是币本位, 与真实网关同单位"):
+    // 影子盘与实盘的数字必须可比 —— 这是 PerformanceTracker 存在的理由。
+    // 真实网关在回报侧 qtyToCoin 还原成币本位 (见 OkxAccountStream)，柜台必须对称。
+    // 从前柜台把交易所格式 (合约张数) 原样当成交量, 在 contractSize != 1 的交易所上
+    // 影子的成交量/盈亏/仓位整体差一个 contractSize 倍; Binance contractSize = 1 掩盖了它。
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+      val fills = collect(bus, Set(Interest.All(Topics.Fill)))
+      val ctVal = 0.01
+      val metas = Map((ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = ctVal))
+      system.spawn(PaperCounter(paper, ex, instant, metas))
+
+      // 下 3 张合约 = 3 * 0.01 = 0.03 币
+      bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 3.0, "c1"))))
+      bus.publish(Event.at(Topics.Bbo, bbo(98.0, 98.1), 1L))
+
+      val fill = eventually(fills)(_.is(Topics.Fill)).as(Topics.Fill).get
+      assertEqualsDouble(fill.size, 3.0 * ctVal, 1e-12, "回报必须是币本位")
+
   test("拒绝占用实盘账户"):
-    intercept[IllegalArgumentException](PaperCounter(AccountId.Live, ex, instant))
+    intercept[IllegalArgumentException](PaperCounter(AccountId.Live, ex, instant, metas1))
 
   test("下单在途与回报回传都有延迟 —— 否则影子盘系统性偏乐观"):
     supervised:
@@ -97,7 +119,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
       val delayed = SimConfig(exchangeToStrategyDelayMs = 120, orderToExchangeDelayMs = 120, initialBalanceUsdt = 10_000.0)
-      system.spawn(PaperCounter(paper, ex, delayed))
+      system.spawn(PaperCounter(paper, ex, delayed, metas1))
 
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 0.5, "c1"))))
       // 订单还在途 (120ms 未到)，此刻的下穿行情不该让它成交

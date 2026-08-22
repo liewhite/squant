@@ -5,13 +5,17 @@ import hft.event.{AnyEvent, Event, Topics}
 
 /** 撮合手续费单测：maker/taker 成交按对应费率扣现金，非成交路径 (拒单/撤单) 不扣费。 */
 class SimStateFeeSpec extends munit.FunSuite:
+  /** contractSize = 1：撮合入口的币本位还原对这些用例是恒等变换 */
+  private val metasOf: Map[(Exchange, Symbol), SymbolMeta] =
+    Map((Exchange.Binance, "ETHUSDT") -> SymbolMeta(Exchange.Binance, "ETHUSDT", 0.1, 0.001, 0.001, 1.0))
+
   private val ex = Exchange.Binance
   private val sym = "ETHUSDT"
   private val makerFee = 0.001 // 0.1%
   private val takerFee = 0.002 // 0.2%
   private val initCash = 10_000.0
 
-  private def state = SimState.empty(AccountId.Live, initCash, makerFee, takerFee)
+  private def state = SimState.empty(AccountId.Live, metasOf, initCash, makerFee, takerFee)
   private def bboEv(bid: Price, ask: Price, ts: Timestamp): AnyEvent =
     Event.stamped(Topics.Bbo, BBO(ex, sym, bid, 1.0, ask, 1.0, ts), ts, ts)
   private def order(side: Side, ot: OrderType, qty: Quantity): Order =
@@ -53,7 +57,7 @@ class SimStateFeeSpec extends munit.FunSuite:
     near(s3.ledger.cash, initCash)
 
   test("零费率 (默认) 不扣费 -> 与历史行为一致"):
-    var s = SimState.empty(AccountId.Live, initCash) // 默认 maker/taker = 0
+    var s = SimState.empty(AccountId.Live, metasOf, initCash) // 默认 maker/taker = 0
     val (s1, _) = s.onMarket(ex, bboEv(100.0, 100.0, 1), 1)
     val (s2, _) = s1.onOrderArrived(ex, order(Side.Long, OrderType.Market, 2.0), "o1", 1)
     near(s2.ledger.cash, initCash) // 开仓无已实现、无费

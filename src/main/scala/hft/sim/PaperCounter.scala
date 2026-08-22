@@ -41,13 +41,15 @@ final class PaperCounter(
     val account: AccountId,
     exchange: Exchange,
     config: SimConfig,
+    /** 撮合要用它把订单从交易所格式还原成币本位 (见 [[SimState.onOrderArrived]]) */
+    symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     /** 净值刷新间隔：与实盘的 [[hft.engine.AccountRefresher]] 对齐，让两边的净值同频 */
     equityRefreshMs: Long = 1000,
 ) extends Actor:
   require(account != AccountId.Live, s"虚拟柜台不能占用实盘账户: $account")
 
   private val logger = LoggerFactory.getLogger(classOf[PaperCounter])
-  private var state: SimState = SimState.empty(account, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
+  private var state: SimState = SimState.empty(account, symbolMetas, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   private var ctx: ActorContext = scala.compiletime.uninitialized
   private var orderIdSeq: Long = 0L
   private var lastEquityAt: Timestamp = 0L

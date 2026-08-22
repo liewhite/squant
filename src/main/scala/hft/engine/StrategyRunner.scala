@@ -20,8 +20,8 @@ import hft.strategy.{OutcomeEvent, Strategy}
 final class StrategyRunner(
     strategy: Strategy,
     symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
-    /** 本实例绑定的账户 —— 装配期决定，策略自己不知道 */
-    val account: AccountId = AccountId.Live,
+    /** 本实例绑定的账户 —— 装配期决定，策略自己不知道。无默认值，理由同 [[Executor]] */
+    val account: AccountId,
     clientOrderIdGen: Exchange => String = _.newClientOrderId,
 ):
   /** 策略实际的订阅范围 = 策略声明 + 框架补齐 (见 [[StrategyRunner.subscriptionFor]]) */
@@ -66,19 +66,7 @@ final class StrategyRunner(
       }
       .toVector
 
-  /** 币本位数量 -> 合约张数，价格/数量按交易所精度取整。
-    * 缺少 SymbolMeta 说明策略交易了未预加载的 symbol，是配置错误，立即终止
-    */
-  private def convertOrder(order: Order): Order =
-    val meta = symbolMetas.getOrElse(
-      (order.exchange, order.symbol),
-      sys.error(s"SymbolMeta not found for ${order.exchange} ${order.symbol}, cannot convert order"),
-    )
-    val quantity = meta.roundSizeDown(meta.coinToQty(order.quantity))
-    val orderType = order.orderType match
-      case OrderType.Market            => OrderType.Market
-      case OrderType.Limit(price, tif) => OrderType.Limit(meta.roundPrice(price), tif)
-    order.copy(quantity = quantity, orderType = orderType)
+  private def convertOrder(order: Order): Order = OrderConversion.toExchangeFormat(order, symbolMetas)
 
 object StrategyRunner:
   /** 策略声明 + 框架补齐 = 策略实际的订阅范围。

@@ -70,7 +70,7 @@ final class SimulatedExchange(
   // ---- actor 基础设施 ----
   private val mailbox = Channel.unlimited[Command]
   /** 唯一写者 = actor 线程；读者 = REST 查询线程。不可变快照 + @volatile 保证可见性 */
-  @volatile private var state: SimState = SimState.empty(account, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
+  @volatile private var state: SimState = SimState.empty(account, Map.empty, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   @volatile private var strategyBus: EventBus = scala.compiletime.uninitialized
 
   private val orderIdSeq = AtomicLong(1)
@@ -100,6 +100,12 @@ final class SimulatedExchange(
     require((strategyBus eq null) || (strategyBus eq eventBus), "SimulatedExchange started with two different buses")
     strategyBus = eventBus
     if started.compareAndSet(false, true) then
+      // 合约规格从自己的 client 取 —— 柜台扮演的是交易所, 交易所本就知道自己的合约规格,
+      // 不该让装配方再拉一遍。撮合用它把订单还原成币本位 (见 SimState.onOrderArrived)。
+      val metas = publicClient.fetchAllSymbolMetas() match
+        case Right(ms) => ms.map(m => (m.exchange, m.symbol) -> m).toMap
+        case Left(e)   => sys.error(s"SimulatedExchange 无法加载合约规格: ${e.message}")
+      state = state.copy(symbolMetas = metas)
       // 上游真实行情发布到内部 rawBus；转发线程把行情即时投入 mailbox (撮合用实时行情)
       market.start(rawBus)
       // 只订公共行情：柜台撮合的输入就是行情，别的 topic 与它无关

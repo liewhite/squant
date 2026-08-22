@@ -46,6 +46,9 @@ final class BacktestEngine(
     source: MarketDataSource,
     runners: Seq[StrategyRunner],
     config: SimConfig = SimConfig(),
+    /** 合约规格：撮合入口据此把订单从交易所格式还原成币本位 (见 [[hft.sim.SimState.onOrderArrived]])。
+      * 无默认值 —— 缺了它任何订单都撮合不了，与其在首笔成交时炸，不如装配期就写清楚。 */
+    symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     observers: Seq[AnyEvent => Unit] = Nil,
     clockIntervalMs: Long = 1000,
 ):
@@ -70,7 +73,7 @@ final class BacktestEngine(
       if byTime != 0 then byTime else java.lang.Long.compare(b.seq, a.seq)
   private val pq = mutable.PriorityQueue.empty[Scheduled]
 
-  private var state: SimState = SimState.empty(AccountId.Live, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
+  private var state: SimState = SimState.empty(AccountId.Live, symbolMetas, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   private var now: Timestamp = 0L
   private var seqGen: Long = 0L
   private var orderIdGen: Long = 0L

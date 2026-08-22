@@ -43,13 +43,13 @@ class BacktestEngineSpec extends munit.FunSuite:
 
   private def runOnce(): BacktestResult =
     val runner = StrategyRunner.backtest(OneShotBuy(), metas)
-    BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0)).run()
+    BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0), metas).run()
 
   /** 跑一次并收集投递给观察者的全部事件 (含逐笔回报的 client_order_id 与时间戳)。 */
   private def runCollect(): Vector[AnyEvent] =
     val collected = Vector.newBuilder[AnyEvent]
     val runner = StrategyRunner.backtest(OneShotBuy(), metas)
-    BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0), observers = Seq(collected += _)).run()
+    BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0), metas, observers = Seq(collected += _)).run()
     collected.result()
 
   test("挂单越价成交: 1 笔成交, 持仓 +1, 已实现盈亏 0"):
