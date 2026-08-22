@@ -1,8 +1,7 @@
 package hft.strategy
 
 import hft.domain.*
-import hft.event.{AnyEvent, Interest, Topic}
-import hft.state.StateManager
+import hft.event.Topic
 
 /** 策略输出的信号 */
 enum OutcomeEvent:
@@ -16,8 +15,14 @@ enum OutcomeEvent:
     */
   case CancelOrder(exchange: Exchange, symbol: Symbol, ref: OrderRef)
 
-/** 带账户归属的策略信号 —— 一次决策要发往哪个账户执行。 */
-final case class AccountOutcome(account: AccountId, outcome: OutcomeEvent)
+/** 带账户归属的策略信号 —— 一次决策要发往哪个账户执行。
+  *
+  * 构造器限定 `private[hft]`：策略在 `strategy.*` 包里，因此**无法自己拼一条下单意图** ——
+  * 既绕不过 [[StrategyContext.place]] 的 clientOrderId 生成 / pending 登记 / 精度换算，
+  * 也冒充不了别的账户下单。后者是账户隔离这条防线上原本唯一敞开的口子。
+  * 读侧（订阅、`as`、模式匹配）不受影响。
+  */
+final case class AccountOutcome private[hft] (account: AccountId, outcome: OutcomeEvent)
 
 /** 策略信号的事件族。
   *
@@ -36,26 +41,33 @@ final case class AccountOutcome(account: AccountId, outcome: OutcomeEvent)
 object OrderIntent extends Topic[AccountId, AccountOutcome]("orderIntent"):
   def keyOf(payload: AccountOutcome): AccountId = payload.account
 
-/** 策略接口，用户实现此 trait 定义自己的策略逻辑。
+/** 策略接口。
   *
-  * 策略是纯函数式的：接收事件和状态，返回要执行的动作。
-  * onEvent 由框架保证在单一虚拟线程上串行调用，策略内部状态无需同步。
+  * 策略是**纯函数式**的：处理器接收事件与状态、返回要发出的事件，不碰总线、不起线程。
+  * 框架保证同一策略实例的处理器在单一虚拟线程上串行调用，内部可变状态无需同步。
+  *
+  * ## 只需声明一处
+  *
+  * [[handlers]] 同时给出"订阅什么"与"怎么处理" —— 订阅声明从处理器派生，
+  * 因此不存在"订阅了不处理"或"处理了没订阅"。处理器拿到的载荷已是具体类型，
+  * 不需要模式匹配、也不会漏掉兜底分支。
+  *
+  * {{{
+  * def handlers = StrategyHandlers.empty
+  *   .market(Topics.Bbo, instrument) { (bbo, ctx, now) => ctx.place(myOrder(bbo), "quote") }
+  *   .own(Topics.Fill)               { (fill, ctx, now) => Vector.empty }
+  *   .account(Topics.Greeks)         { (g, ctx, now) => if g.ccy == ccy then hedge(ctx) else Vector.empty }
+  * }}}
+  *
+  * ## 账户无关
+  *
+  * 策略不知道自己跑在实盘还是影子账户上 —— 同一份逻辑要能两边同时跑。私有回报用
+  * `own`/`account` 以账户无关的语气声明，装配期才绑定；下单经 [[StrategyContext.place]]，
+  * 账户由它补。
   */
 trait Strategy:
-  /** 策略要收哪些事件。
-    *
-    * 只需声明**公共行情**与用户自定义 topic，且公共行情必须用 [[Interest.Keyed]] 精确到
-    * 标的 (框架要据此决定向交易所订阅哪些流，[[Interest.All]] 给不出这个信息)。
-    *
-    * 框架会自动补齐三类**不该由策略选择**的订阅，见 [[hft.engine.StrategyRunner]]：
-    *   - 所声明标的的私有回报 (持仓/订单回报/成交) —— 漏订会让本地仓位与交易所发散；
-    *   - 所涉交易所的账户级读数 (余额/净值/希腊值)；
-    *   - 时钟 (订单超时检测的驱动)。
-    */
-  def interests: Set[Interest]
+  /** 订阅与处理 —— 一处声明 */
+  def handlers: StrategyHandlers
 
   /** 订单超时时间 (毫秒): Created 状态超过该时长未获交易所确认则视为丢失，自动清理 */
   def orderTimeoutMs: Long
-
-  /** 处理事件，可产出零到多个信号 */
-  def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent]

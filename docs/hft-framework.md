@@ -137,6 +137,34 @@ object AlphaSignal extends Topic[Symbol, Score]("alphaSignal"):
   多平不防少平。所以降级后持续盯该标的的敞口直到归零，平仓单有终态超时，两者都**反复**
   告警 —— 单次日志在无人盯屏时等于没有。
 
+### 策略只声明一处
+
+`Strategy` 的 `handlers` 同时给出"订阅什么"与"怎么处理" —— 订阅声明**从处理器派生**，
+因此不存在"订阅了不处理"或"处理了没订阅"。处理器拿到的载荷已是具体类型，
+不需要 `as`、不需要模式匹配、也不会漏掉兜底分支。
+
+```scala
+def handlers = StrategyHandlers.empty
+  .market(Topics.Bbo, instrument) { (bbo, ctx, _) => ctx.place(quote(bbo), "quote") }
+  .own(Topics.Fill)               { (fill, ctx, _) => Vector.empty }
+  .account(Topics.Greeks)         { (g, ctx, _) => hedge(g, ctx) }
+```
+
+`market` / `own` / `account` 三种声明形式对应三档路由维度。策略用**账户无关**的语气说话
+（"我自己的成交"而不是"Paper(1) 的成交"），装配期才绑定账户 —— 同一份逻辑因此能同时跑
+实盘与影子盘。`market` 的参数限定为 `MarketTopic`：用它声明即表示**交易该标的**，
+只是想读一条按标的路由的自定义事件请用 `custom`，那不代表交易。
+
+**`StrategyContext`：账户是构造能力而非可读数据。** 策略能用 `ctx.place` 发单却读不到账户
+值；`AccountOutcome` 的构造器是 `private[hft]`，策略连自己拼一条下单意图都做不到 ——
+既绕不过 clientOrderId 生成 / pending 登记 / 精度换算，也冒充不了别的账户。
+
+`ctx.emit(topic, payload)` 是**策略对外输出**的通道：外部订阅那个 topic 即可消费，
+框架不需要知情。时间戳取自本次事件的处理时刻而非墙钟，回测才能同一输入必得同一结果。
+
+一条纪律：`ctx.place` 只**构造**，副作用（pending 登记）由框架对处理器**真正返回**的意图
+施加。若在构造时就登记，策略把结果丢弃或中途抛异常就会留下永远不会发出的幽灵挂单。
+
 ### 订阅是数据，不是谓词
 
 `Interest` / `Subscription` 是可枚举、可哈希的数据结构，因为同一份声明有三个下游：

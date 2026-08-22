@@ -4,7 +4,7 @@ import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.state.StateManager
-import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy}
+import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy, StrategyHandlers}
 import ox.supervised
 
 /** 撤下一个策略实例时的收尾语义。 */
@@ -17,16 +17,16 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
   /** 收到首个 BBO 就挂一张限价单 */
   private class OneShotMaker extends Strategy:
     private var placed = false
-    def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(Instrument(ex, sym))))
     def orderTimeoutMs: Long = 0L
-    def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] =
-      event.as(Topics.Bbo).filter(_ => !placed).map { b =>
+    def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument(ex, sym)) { (b, ctx, _) =>
+      if placed then Vector.empty
+      else
         placed = true
-        OutcomeEvent.PlaceOrders(
-          Vector(Order("", ex, sym, Side.Long, OrderType.Limit(b.bidPrice, TimeInForce.GTC), 0.01, reduceOnly = false, clientOrderId = "")),
+        Vector(ctx.place(
+          Order("", ex, sym, Side.Long, OrderType.Limit(b.bidPrice, TimeInForce.GTC), 0.01, reduceOnly = false, clientOrderId = ""),
           "maker",
-        )
-      }.toVector
+        ))
+    }
 
   test("撤下策略时先撤掉它挂在交易所的单, 且不平仓"):
     supervised:

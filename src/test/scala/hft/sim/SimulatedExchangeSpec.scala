@@ -4,7 +4,7 @@ import hft.domain.*
 import hft.engine.{Engine, ExchangeGateway}
 import hft.exchange.{ExchangeClient, MarketDataStream, SubscriptionKind}
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
-import hft.strategy.{OutcomeEvent, Strategy}
+import hft.strategy.{OutcomeEvent, Strategy, StrategyHandlers}
 import ox.{Ox, fork, supervised}
 
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -22,16 +22,16 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   private class OneShotMakerStrategy(ex: Exchange, symbol: Symbol, offsetRatio: Double, orderSize: Quantity) extends Strategy:
     private var placed = false
     override def orderTimeoutMs: Long = 60_000
-    override def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(Instrument(ex, symbol))))
-    override def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] =
-      event.as(Topics.Bbo).filter(_ => !placed).map { b =>
+    override def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument(ex, symbol)) { (b, ctx, _) =>
+      if placed then Vector.empty
+      else
         placed = true
         val buyPx = b.bidPrice * (1.0 - offsetRatio) // 买一下方, PostOnly 静止挂单
-        OutcomeEvent.PlaceOrders(
-          Vector(Order("", ex, symbol, Side.Long, OrderType.Limit(buyPx, TimeInForce.PostOnly), orderSize, reduceOnly = false, clientOrderId = "")),
+        Vector(ctx.place(
+          Order("", ex, symbol, Side.Long, OrderType.Limit(buyPx, TimeInForce.PostOnly), orderSize, reduceOnly = false, clientOrderId = ""),
           "oneshot maker buy",
-        )
-      }.toVector
+        ))
+    }
 
   /** 可手动喂行情的假上游公共流 */
   private class FakeMarketStream extends MarketDataStream:

@@ -4,7 +4,7 @@ import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.state.StateManager
-import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy}
+import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy, StrategyHandlers}
 import ox.supervised
 
 /** Executor 集成测试: 通过 EventBus + ActorSystem 驱动完整的 事件 -> 策略 -> 信号 链路 */
@@ -20,23 +20,25 @@ class ExecutorFlowSpec extends munit.FunSuite:
 
   /** Clock 触发即下单的 stub 策略 */
   private class ClockOrderStrategy extends Strategy:
-    override def interests: Set[Interest] =
-      Set(Interest.Keyed(Topics.Bbo, Set(Instrument(Exchange.Binance, "BTCUSDT"))))
     override def orderTimeoutMs: Long = 5000
-    override def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] =
-      event.as(Topics.Clock).map { _ =>
-        val order = Order(
-          id = "",
-          exchange = Exchange.Binance,
-          symbol = "BTCUSDT",
-          side = Side.Long,
-          orderType = OrderType.Limit(62761.333, TimeInForce.GTC),
-          quantity = 0.0015,
-          reduceOnly = false,
-          clientOrderId = "",
-        )
-        OutcomeEvent.PlaceOrders(Vector(order), "test")
-      }.toVector
+    override def handlers: StrategyHandlers = StrategyHandlers.empty
+      // 声明标的以获得订阅范围与 SymbolMeta 校验；下单由时钟触发
+      .market(Topics.Bbo, Instrument(Exchange.Binance, "BTCUSDT")) { (_, _, _) => Vector.empty }
+      .onClock { (ctx, _) =>
+        Vector(ctx.place(
+          Order(
+            id = "",
+            exchange = Exchange.Binance,
+            symbol = "BTCUSDT",
+            side = Side.Long,
+            orderType = OrderType.Limit(62761.333, TimeInForce.GTC),
+            quantity = 0.0015,
+            reduceOnly = false,
+            clientOrderId = "",
+          ),
+          "test",
+        ))
+      }
 
   test("事件驱动策略产出信号: clientOrderId 生成 + 精度转换"):
     supervised:

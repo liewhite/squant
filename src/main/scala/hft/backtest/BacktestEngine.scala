@@ -4,7 +4,7 @@ import hft.domain.*
 import hft.engine.StrategyRunner
 import hft.event.{AnyEvent, Event, Topics}
 import hft.sim.{SimConfig, SimState}
-import hft.strategy.OutcomeEvent
+import hft.strategy.{OrderIntent, OutcomeEvent}
 import org.slf4j.LoggerFactory
 
 import scala.collection.mutable
@@ -162,14 +162,21 @@ final class BacktestEngine(
     }
     runners.foreach { r =>
       if r.accepts(ev) then
-        r.onEvent(ev, now).foreach {
-          case OutcomeEvent.PlaceOrders(orders, _) =>
-            orders.foreach { o =>
-              orderIdGen += 1
-              schedule(now + config.orderToExchangeDelayMs, Action.OrderArrive(o, orderIdGen.toString))
-            }
-          case OutcomeEvent.CancelOrder(_, _, ref) =>
-            schedule(now + config.orderToExchangeDelayMs, Action.CancelArrive(ref))
+        r.onEvent(ev, now).foreach { produced =>
+          // 策略产出的可以是下单意图, 也可以是它自己的指标事件。前者进撮合, 后者只投给观察者
+          produced.as(OrderIntent) match
+            case Some(intent) =>
+              intent.outcome match
+                case OutcomeEvent.PlaceOrders(orders, _) =>
+                  orders.foreach { o =>
+                    orderIdGen += 1
+                    schedule(now + config.orderToExchangeDelayMs, Action.OrderArrive(o, orderIdGen.toString))
+                  }
+                case OutcomeEvent.CancelOrder(_, _, ref) =>
+                  schedule(now + config.orderToExchangeDelayMs, Action.CancelArrive(ref))
+            case None =>
+              // 自定义事件 (如策略指标): 回测里同样按虚拟时间投递, 观察者与其他 runner 都能收到
+              schedule(now, Action.Deliver(produced))
         }
     }
 

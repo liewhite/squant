@@ -4,9 +4,8 @@ import strategy.utils.hedge.{HedgeBand, HedgeCtx}
 import hft.domain.*
 import hft.exchange.SubscriptionKind
 import hft.indicator.{Atr, KlineSeries, Macd, RealizedVol, Sma}
-import hft.event.{AnyEvent, Interest, Topics}
-import hft.strategy.{OutcomeEvent, Strategy}
-import hft.state.{StateManager}
+import hft.event.{AnyEvent, Topics}
+import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
 
 /** **Maker (被动挂单) 对冲** —— 用 [[HedgeBand]] 决定**何时**对冲 (市价 take 的被动版), 执行改为
   * 在 **BBO 外** [[offsetPct]] (默认 0.01%) 挂 PostOnly 限价单 (省 taker 费 + 赚价差改善), [[requoteMs]] (默认 5s)
@@ -72,52 +71,50 @@ final class MakerHedgeStrategy(
       val t = i.toLong * barIntervalMs; klines.update(t, h); klines.update(t, l); klines.update(t, c)
     }
 
-  override def interests: Set[Interest] =
-    Set(Interest.Keyed(Topics.Bbo, Set(Instrument(exchange, symbol))))
-
   // 订单超时需 > requote, 否则框架会先把我们的正常挂单当超时清理
   override def orderTimeoutMs: Long = requoteMs * 3
 
-  override def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] =
-    event
-      .as(Topics.OrderUpdate)
-      .map { u =>
-        u.status match
-          case OrderStatus.Pending | OrderStatus.PartiallyFilled(_) =>
-            restingId = Some(u.orderId); restingAt = u.timestamp; awaitingAck = false
-          case OrderStatus.Filled =>
-            center = u.price; restingId = None; awaitingAck = false // 对冲成交 -> 中心重置
-          case OrderStatus.Cancelled | OrderStatus.Rejected(_) | OrderStatus.Error(_) =>
-            restingId = None; awaitingAck = false
-          case OrderStatus.Created => () // 本地态, 等确认
-        Vector.empty
-      }
-      .orElse(event.as(Topics.Bbo).map { b =>
-        val px = b.midPrice
-        klines.update(b.timestamp, px)
-        if center.isNaN then center = px
-        manage(px, event.exchangeTs, state)
-      })
-      // greeks 的路由键只到交易所，币种在载荷里，故 ccy 仍需自行判断
-      .orElse(event.as(Topics.Greeks).filter(_.ccy == ccy).map { _ =>
-        state.symbolState(symbol).flatMap(_.bbo(exchange)).map { b =>
+  override def handlers: StrategyHandlers = StrategyHandlers.empty
+    .own(Topics.OrderUpdate) { (u, _, _) =>
+      u.status match
+        case OrderStatus.Pending | OrderStatus.PartiallyFilled(_) =>
+          restingId = Some(u.orderId); restingAt = u.timestamp; awaitingAck = false
+        case OrderStatus.Filled =>
+          center = u.price; restingId = None; awaitingAck = false // 对冲成交 -> 中心重置
+        case OrderStatus.Cancelled | OrderStatus.Rejected(_) | OrderStatus.Error(_) =>
+          restingId = None; awaitingAck = false
+        case OrderStatus.Created => () // 本地态, 等确认
+      Vector.empty
+    }
+    .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, _) =>
+      val px = b.midPrice
+      klines.update(b.timestamp, px)
+      if center.isNaN then center = px
+      // 用**交易所时钟** b.timestamp 而非处理时刻：requote 判据里的 restingAt 取自订单回报的
+      // 交易所时间戳，两边必须同一个时钟域。混用的话 requote 时机会随投递延迟与时钟偏斜漂移。
+      manage(px, b.timestamp, ctx)
+    }
+    // greeks 的路由键只到交易所，币种在载荷里，故 ccy 仍需自行判断
+    .account(Topics.Greeks) { (g, ctx, _) =>
+      if g.ccy != ccy then Vector.empty
+      else
+        ctx.state.symbolState(symbol).flatMap(_.bbo(exchange)).map { b =>
           greeksRefMid = b.midPrice // 记录本次 greeks 对应的现价, 供 gamma 修正
-          manage(b.midPrice, event.exchangeTs, state)
+          manage(b.midPrice, b.timestamp, ctx) // 同上: 交易所时钟域
         }.getOrElse(Vector.empty)
-      })
-      .getOrElse(Vector.empty)
+    }
 
-  private def manage(px: Price, now: Timestamp, state: StateManager): Vector[OutcomeEvent] =
+  private def manage(px: Price, now: Timestamp, ctx: StrategyContext): Vector[AnyEvent] =
     if awaitingAck then Vector.empty
     else
       restingId match
         case Some(id) =>
           if now - restingAt > requoteMs then
             restingId = None // 撤后下一 tick 重挂 (按新价)
-            Vector(OutcomeEvent.CancelOrder(exchange, symbol, OrderRef.ByExchangeId(id)))
+            Vector(ctx.cancel(exchange, symbol, OrderRef.ByExchangeId(id)))
           else Vector.empty
         case None =>
-          state.greeks(exchange, ccy) match
+          ctx.state.greeks(exchange, ccy) match
             case None =>
               warnThrottled("greeks/ccy 余额未就绪 -> 未对冲 (检查期权 greeks 流是否在推、ccy 余额是否注入)")
               Vector.empty
@@ -126,7 +123,7 @@ final class MakerHedgeStrategy(
               Vector.empty
             case Some(greeks) =>
               (for
-                ss <- state.symbolState(symbol)
+                ss <- ctx.state.symbolState(symbol)
                 atr <- klines.atr
                 if atr > 0.0 && !center.isNaN
               yield
@@ -137,8 +134,8 @@ final class MakerHedgeStrategy(
                   else if klines.macdHistSeries.rising(1) then 1
                   else if klines.macdHistSeries.falling(1) then -1
                   else 0
-                val ctx = HedgeCtx(px, center, atr, klines.volRatio.getOrElse(1.0), klines.histBias(macdTrendBars), maBias, macdHistDir)
-                val (up, down) = band.bands(ctx)
+                val hc = HedgeCtx(px, center, atr, klines.volRatio.getOrElse(1.0), klines.histBias(macdTrendBars), maBias, macdHistDir)
+                val (up, down) = band.bands(hc)
                 val crossed = (px - center > up) || (center - px > down)
                 if !crossed then Vector.empty
                 else
@@ -161,8 +158,8 @@ final class MakerHedgeStrategy(
                     val limitPx = if side == Side.Short then refPx * (1.0 + offsetPct) else refPx * (1.0 - offsetPct)
                     awaitingAck = true
                     Vector(
-                      OutcomeEvent.PlaceOrders(
-                        Vector(Order("", exchange, symbol, side, OrderType.Limit(limitPx, TimeInForce.PostOnly), qty, reduceOnly = false, clientOrderId = "")),
+                      ctx.place(
+                        Order("", exchange, symbol, side, OrderType.Limit(limitPx, TimeInForce.PostOnly), qty, reduceOnly = false, clientOrderId = ""),
                         f"maker_hedge | $side qty=$qty%.4f limit=$limitPx%.2f px=$px%.2f netDelta=$netDelta%.4f maBias=$maBias band=($up%.2f,$down%.2f)",
                       )
                     )

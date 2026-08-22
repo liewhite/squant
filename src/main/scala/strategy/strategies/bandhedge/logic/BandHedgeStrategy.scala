@@ -5,9 +5,8 @@ import strategy.utils.hedge.{HedgeBand, HedgeCtx}
 import hft.domain.*
 import hft.exchange.SubscriptionKind
 import hft.indicator.{Atr, KlineSeries, Macd, RealizedVol, Sma}
-import hft.event.{AnyEvent, Interest, Topics}
-import hft.strategy.{OutcomeEvent, Strategy}
-import hft.state.{StateManager}
+import hft.event.{AnyEvent, Topics}
+import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
 
 /** **价格主导、delta 定量、带宽可插拔** 的期权买方 (long-gamma) 对冲核心。
   *
@@ -52,37 +51,32 @@ final class BandHedgeStrategy(
   /** 对冲中心价 (NaN = 尚未初始化，首个行情设为现价) */
   private var center: Double = Double.NaN
 
-  override def interests: Set[Interest] =
-    Set(Interest.Keyed(Topics.Bbo, Set(Instrument(exchange, symbol))))
-
   override def orderTimeoutMs: Long = 5000
 
-  override def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] =
-    event
-      .as(Topics.Bbo)
-      .map { b =>
-        val px = b.midPrice
-        klines.update(b.timestamp, px)
-        if center.isNaN then center = px
-        hedge(px, state)
-      }
-      // greeks 的路由键只到交易所，币种在载荷里，故 ccy 仍需自行判断
-      .orElse(event.as(Topics.Greeks).filter(_.ccy == ccy).map { _ =>
-        state.symbolState(symbol).flatMap(_.bbo(exchange)).map(b => hedge(b.midPrice, state)).getOrElse(Vector.empty)
-      })
-      .getOrElse(Vector.empty)
+  override def handlers: StrategyHandlers = StrategyHandlers.empty
+    .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, _) =>
+      val px = b.midPrice
+      klines.update(b.timestamp, px)
+      if center.isNaN then center = px
+      hedge(px, ctx)
+    }
+    // greeks 的路由键只到交易所，币种在载荷里，故 ccy 仍需自行判断
+    .account(Topics.Greeks) { (g, ctx, _) =>
+      if g.ccy != ccy then Vector.empty
+      else ctx.state.symbolState(symbol).flatMap(_.bbo(exchange)).map(b => hedge(b.midPrice, ctx)).getOrElse(Vector.empty)
+    }
 
-  private def hedge(px: Price, state: StateManager): Vector[OutcomeEvent] =
+  private def hedge(px: Price, ctx: StrategyContext): Vector[AnyEvent] =
     (for
-      symbolState <- state.symbolState(symbol)
-      greeks <- state.greeks(exchange, ccy) // greeks 与 cashBal 均到达才动作
+      symbolState <- ctx.state.symbolState(symbol)
+      greeks <- ctx.state.greeks(exchange, ccy) // greeks 与 cashBal 均到达才动作
       atr <- klines.atr                     // ATR 未预热 -> 不动作 (gating)
       if atr > 0.0 && !center.isNaN
     yield
       // 信号未就绪时以中性默认填充, 各带在预热期自然退化为对称基线
       val maBias = klines.sma.fold(0)(m => math.signum(px - m).toInt)
-      val ctx = HedgeCtx(px, center, atr, klines.volRatio.getOrElse(1.0), klines.histBias(macdTrendBars), maBias)
-      val (upBand, downBand) = band.bands(ctx)
+      val hc = HedgeCtx(px, center, atr, klines.volRatio.getOrElse(1.0), klines.histBias(macdTrendBars), maBias)
+      val (upBand, downBand) = band.bands(hc)
       val crossed = (px - center > upBand) || (center - px > downBand)
       if !crossed then Vector.empty
       else
@@ -93,9 +87,9 @@ final class BandHedgeStrategy(
           val side = if netDelta > 0 then Side.Short else Side.Long // 净多 -> 卖, 净空 -> 买
           center = px // 成交后中心移到成交价 (market@touch、delay=0)，并防止本笔重复触发
           Vector(
-            OutcomeEvent.PlaceOrders(
-              Vector(Order("", exchange, symbol, side, OrderType.Market, qty, reduceOnly = false, clientOrderId = "")),
-              f"band_hedge | $side netDelta=$netDelta%.4f qty=$qty%.4f px=$px%.2f atr=$atr%.2f up=$upBand%.2f down=$downBand%.2f macdBias=${ctx.macdBias} maBias=${ctx.maBias} volR=${ctx.volRatio}%.2f",
+            ctx.place(
+              Order("", exchange, symbol, side, OrderType.Market, qty, reduceOnly = false, clientOrderId = ""),
+              f"band_hedge | $side netDelta=$netDelta%.4f qty=$qty%.4f px=$px%.2f atr=$atr%.2f up=$upBand%.2f down=$downBand%.2f macdBias=${hc.macdBias} maBias=${hc.maBias} volR=${hc.volRatio}%.2f",
             )
           )
     ).getOrElse(Vector.empty)

@@ -50,3 +50,15 @@ abstract class Topic[K, P](val name: String):
   final override def hashCode: Int = System.identityHashCode(this)
 
   override def toString: String = name
+
+/** 公共行情 topic 的标记类型。
+  *
+  * 存在的理由是区分两件被混为一谈过的事：**订阅某标的的行情 = 交易它**，而"订阅一条按标的
+  * 路由的自定义事件"（比如别的策略在该标的上的指标）只是**关注**它。框架据"交易标的"补齐
+  * 私有回报订阅、做启动对齐、要求 SymbolMeta —— 把关注当成交易就会给一个根本不碰那个标的
+  * 的监控策略补上这一整套。
+  *
+  * 用类型而不是一张登记表来区分：用户自定义的行情源继承本类即被视为交易标的，
+  * 而普通的 `Topic[Instrument, P]` 不会 —— 判定不依赖"记得把它加进某个 Set"。
+  */
+abstract class MarketTopic[P](name: String) extends Topic[hft.domain.Instrument, P](name)

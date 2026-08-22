@@ -24,20 +24,20 @@ object Topics:
 
   // ==================== 公共行情 (按标的) ====================
 
-  object Bbo extends Topic[Instrument, BBO]("bbo"):
+  object Bbo extends MarketTopic[BBO]("bbo"):
     def keyOf(p: BBO): Instrument = instrumentOf(p.exchange, p.symbol)
 
   /** 公共成交印记 (市场匿名成交)：策略信号与模拟撮合的价格来源，非本账户成交 */
-  object Trade extends Topic[Instrument, MarketTrade]("trade"):
+  object Trade extends MarketTopic[MarketTrade]("trade"):
     def keyOf(p: MarketTrade): Instrument = instrumentOf(p.exchange, p.symbol)
 
-  object MarkPrice extends Topic[Instrument, hft.domain.MarkPrice]("markPrice"):
+  object MarkPrice extends MarketTopic[hft.domain.MarkPrice]("markPrice"):
     def keyOf(p: hft.domain.MarkPrice): Instrument = instrumentOf(p.exchange, p.symbol)
 
-  object IndexPrice extends Topic[Instrument, hft.domain.IndexPrice]("indexPrice"):
+  object IndexPrice extends MarketTopic[hft.domain.IndexPrice]("indexPrice"):
     def keyOf(p: hft.domain.IndexPrice): Instrument = instrumentOf(p.exchange, p.symbol)
 
-  object FundingRate extends Topic[Instrument, hft.domain.FundingRate]("fundingRate"):
+  object FundingRate extends MarketTopic[hft.domain.FundingRate]("fundingRate"):
     def keyOf(p: hft.domain.FundingRate): Instrument = instrumentOf(p.exchange, p.symbol)
 
   // ==================== 账户私有回报 (按标的) ====================
@@ -76,7 +76,7 @@ object Topics:
   // ==================== 分组 (框架派生订阅用) ====================
 
   /** 公共行情 topic：需要**向交易所订阅**才会有数据 */
-  val market: Set[Topic[Instrument, ?]] = Set(Bbo, Trade, MarkPrice, IndexPrice, FundingRate)
+  val market: Set[MarketTopic[?]] = Set(Bbo, Trade, MarkPrice, IndexPrice, FundingRate)
 
   /** 归属某账户某标的的私有回报：由账户流推送，无需订阅 */
   val instrumentPrivate: Set[Topic[AccountInstrument, ?]] = Set(Position, OrderUpdate, Fill)

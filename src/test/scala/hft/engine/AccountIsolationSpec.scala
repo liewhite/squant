@@ -4,7 +4,7 @@ import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.state.StateManager
-import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy}
+import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy, StrategyHandlers}
 import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -25,12 +25,10 @@ class AccountIsolationSpec extends munit.FunSuite:
 
   /** 记录自己看到的成交与仓位；两个实例共用同一份逻辑 */
   private class Recorder(seen: ConcurrentLinkedQueue[String], tag: String) extends Strategy:
-    def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(inst)))
     def orderTimeoutMs: Long = 0L
-    def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] =
-      event.as(Topics.Fill).foreach(f => seen.add(s"$tag:fill:${f.size}"))
-      event.as(Topics.Bbo).foreach(_ => seen.add(s"$tag:bbo"))
-      Vector.empty
+    def handlers = StrategyHandlers.empty
+      .market(Topics.Bbo, inst) { (_, _, _) => seen.add(s"$tag:bbo"); Vector.empty }
+      .own(Topics.Fill) { (f, _, _) => seen.add(s"$tag:fill:${f.size}"); Vector.empty }
 
   private def fill(account: AccountId, size: Double) =
     Fill(account, ex, sym, Side.Long, 100.0, size, 0L)

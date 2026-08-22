@@ -5,7 +5,7 @@ import hft.engine.StrategyRunner
 import hft.exchange.SubscriptionKind
 import hft.event.{AnyEvent, Event, Interest, Topics}
 import hft.sim.SimConfig
-import hft.strategy.{OutcomeEvent, Strategy}
+import hft.strategy.{OutcomeEvent, Strategy, StrategyHandlers}
 import hft.state.{StateManager}
 
 /** 回测引擎单测：用内存假数据源驱动，验证 下单->挂单->越价成交 全链路 + 确定性。 */
@@ -24,16 +24,16 @@ class BacktestEngineSpec extends munit.FunSuite:
   /** 首个 BBO 时挂一张 PostOnly 买单 (挂在买一价, 不可成交故 resting)。 */
   private class OneShotBuy extends Strategy:
     private var placed = false
-    def interests = Set(Interest.Keyed(Topics.Bbo, Set(Instrument(ex, sym))))
     def orderTimeoutMs = 0L
-    def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] =
-      event.as(Topics.Bbo).filter(_ => !placed).map { b =>
+    def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument(ex, sym)) { (b, ctx, _) =>
+      if placed then Vector.empty
+      else
         placed = true
-        OutcomeEvent.PlaceOrders(
-          Vector(Order("", ex, sym, Side.Long, OrderType.Limit(b.bidPrice, TimeInForce.PostOnly), 1.0, reduceOnly = false, clientOrderId = "")),
+        Vector(ctx.place(
+          Order("", ex, sym, Side.Long, OrderType.Limit(b.bidPrice, TimeInForce.PostOnly), 1.0, reduceOnly = false, clientOrderId = ""),
           "buy",
-        )
-      }.toVector
+        ))
+    }
 
   private val series = Vector(
     bboEv(100.0, 100.1, 1000), // 挂买单 @100

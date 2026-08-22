@@ -2,8 +2,8 @@ package hft.engine
 
 import hft.actor.Actor
 import hft.domain.*
-import hft.event.{AnyEvent, Event, Interest, Subscription}
-import hft.strategy.{AccountOutcome, OrderIntent, Strategy}
+import hft.event.{AnyEvent, Interest, Subscription}
+import hft.strategy.Strategy
 
 /** 策略执行器：把一个 [[Strategy]] 包装成引擎里的 [[Actor]]。
   *
@@ -34,13 +34,13 @@ final class Executor(
 
   override def interests: Set[Interest] = runner.subscription.interests
 
-  override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-    runner.onEvent(event, now).map(outcome => Event.local(OrderIntent, AccountOutcome(account, outcome)))
+  /** 策略产出什么就发什么 —— 下单意图、也可以是它自己的指标事件。
+    * 账户由 [[hft.strategy.StrategyContext]] 在构造下单意图时补上，这里不再包一层。 */
+  override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] = runner.onEvent(event, now)
 
   /** 停机收尾：撤掉本策略还挂在交易所的单。
     *
     * 在退订之前发出，那时总线与下单出口都还活着。不平仓 —— 平不平、怎么平是**策略之外**
     * 的决定 (换个策略接管、还是真的清掉敞口)，框架替它决定会在撤下实例时制造非预期的市价单。
     */
-  override def onStop(now: Timestamp): Vector[AnyEvent] =
-    runner.pendingCancels.map(outcome => Event.local(OrderIntent, AccountOutcome(account, outcome)))
+  override def onStop(now: Timestamp): Vector[AnyEvent] = runner.pendingCancels(now)

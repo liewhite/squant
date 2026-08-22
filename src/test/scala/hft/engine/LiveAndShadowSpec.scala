@@ -6,7 +6,7 @@ import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.exchange.ExchangeClient
 import hft.sim.{PaperCounter, SimConfig}
 import hft.state.StateManager
-import hft.strategy.{OrderIntent, OutcomeEvent, Strategy}
+import hft.strategy.{OrderIntent, OutcomeEvent, Strategy, StrategyHandlers}
 import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -41,16 +41,16 @@ class LiveAndShadowSpec extends munit.FunSuite:
   /** 收到首个 BBO 就挂一张买单 —— 同一份逻辑给两个账户各跑一份 */
   private class OneShotMaker extends Strategy:
     private var placed = false
-    def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(inst)))
     def orderTimeoutMs: Long = 0L
-    def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] =
-      event.as(Topics.Bbo).filter(_ => !placed).map { b =>
+    def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (b, ctx, _) =>
+      if placed then Vector.empty
+      else
         placed = true
-        OutcomeEvent.PlaceOrders(
-          Vector(Order("", ex, sym, Side.Long, OrderType.Limit(b.bidPrice - 1.0, TimeInForce.GTC), 0.5, reduceOnly = false, clientOrderId = "")),
+        Vector(ctx.place(
+          Order("", ex, sym, Side.Long, OrderType.Limit(b.bidPrice - 1.0, TimeInForce.GTC), 0.5, reduceOnly = false, clientOrderId = ""),
           "maker",
-        )
-      }.toVector
+        ))
+    }
 
   private def eventually(cond: => Boolean, what: String): Unit =
     val deadline = System.nanoTime() + 3_000_000_000L

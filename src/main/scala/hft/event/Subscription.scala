@@ -1,6 +1,6 @@
 package hft.event
 
-import hft.domain.{Exchange, Instrument}
+import hft.domain.{AccountInstrument, Exchange, Instrument}
 
 /** 一个订阅者的完整订阅范围：若干 [[Interest]] 的聚合，以及"这条事件归不归它"的判据。
   *
@@ -22,8 +22,14 @@ final case class Subscription(interests: Set[Interest]):
     * 混为一谈的后果是补过头 —— 一个只看指标的监控/元策略会被补上该标的的私有回报订阅，
     * 进而被引擎拉去做持仓对齐、要求 SymbolMeta，而它根本不交易那个标的。
     */
-  def instruments: Set[Instrument] =
-    keysOf(Topics.market) ++ keysOf(Topics.instrumentPrivate).map(_.instrument)
+  def instruments: Set[Instrument] = interests.flatMap {
+    // 按**类型**判定而非查一张内置表：用户自定义的行情源继承 MarketTopic 即被认作交易标的，
+    // 而普通的 Topic[Instrument, P]（如别人的指标）不会 —— 判定不依赖"记得登记进某个 Set"。
+    case Interest.Keyed(_: MarketTopic[?], keys) => keys.collect { case i: Instrument => i }
+    case Interest.Keyed(t, keys) if Topics.instrumentPrivate.exists(_ eq t) =>
+      keys.collect { case ai: AccountInstrument => ai.instrument }
+    case _ => Set.empty[Instrument]
+  }
 
   /** 涉及的全部交易所：交易标的所属的，加上账户级声明直接指名的 */
   def exchanges: Set[Exchange] =

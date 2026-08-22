@@ -1,9 +1,9 @@
 package hft.engine
 
 import hft.domain.*
-import hft.event.{AnyEvent, Interest, Subscription, Topics}
+import hft.event.{AnyEvent, Event, Handlers, Interest, Subscription, Topics}
 import hft.state.StateManager
-import hft.strategy.{OutcomeEvent, Strategy}
+import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy, StrategyContext}
 
 /** 策略执行的**纯逻辑核心**：把一个事件喂给策略、维护策略独享状态、产出"已按交易所精度转换"的信号。
   *
@@ -24,31 +24,42 @@ final class StrategyRunner(
     val account: AccountId,
     clientOrderIdGen: Exchange => String = _.newClientOrderId,
 ):
-  /** 策略实际的订阅范围 = 策略声明 + 框架补齐 (见 [[StrategyRunner.subscriptionFor]]) */
-  val subscription: Subscription = StrategyRunner.subscriptionFor(strategy, account)
+  /** 策略声明的处理器，账户已绑定 */
+  // 只取一次：handlers 是 def，业务策略在里面捕获自身可变状态构造闭包，两次调用得到两个实例
+  private val handlers: Handlers[StrategyContext] = strategy.handlers.bind(account)
+
+  /** 策略实际的订阅范围 = 处理器派生的声明 + 框架补齐 (见 [[StrategyRunner.subscriptionFor]]) */
+  val subscription: Subscription = StrategyRunner.subscriptionFor(handlers.interests, account)
 
   val state: StateManager = StateManager(subscription.instruments.map(_.symbol), strategy.orderTimeoutMs)
 
   /** 这条事件是否归本策略。判据来自 [[Subscription]]，与总线索引同源 */
   def accepts(event: AnyEvent): Boolean = subscription.accepts(event)
 
-  /** 更新状态并运行策略，返回**已转换为交易所格式**的信号 (下单已分配 id、登记 pending、取整)。
-    * `now` 为当前处理时刻 (回测虚拟时间 / 实盘墙钟)，作为 pending order 的 createdAt (超时检测基准)。
+  /** 更新状态并运行策略，返回策略产出的事件 (下单意图已分配 id、登记 pending、按精度换算)。
+    * `now` 为当前处理时刻 (回测虚拟时间 / 实盘墙钟)，作为 pending order 的 createdAt。
     */
-  def onEvent(event: AnyEvent, now: Timestamp): Vector[OutcomeEvent] =
+  def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
     state.apply(event)
-    strategy.onEvent(event, state).map {
-      case OutcomeEvent.PlaceOrders(orders, comment) =>
-        val converted = orders.map { order =>
+    handlers.dispatch(event, StrategyContext(state, account, now), now).map(prepareIntent(_, now))
+
+  /** 对策略**真正返回**的下单意图施加发单前的三件必做事：分配 clientOrderId、
+    * 以币本位登记 pending、换算成交易所格式。
+    *
+    * 收在这里而不是在 `ctx.place` 构造时做 —— 策略可能构造了却不返回（条件分支丢弃），
+    * 那样会登记一条永远不会发出的幽灵挂单。只有返回的才算数。
+    * 非下单意图（策略自己的指标等）原样透传。
+    */
+  private def prepareIntent(produced: AnyEvent, now: Timestamp): AnyEvent =
+    produced.as(OrderIntent) match
+      case Some(AccountOutcome(acct, OutcomeEvent.PlaceOrders(orders, comment))) =>
+        val prepared = orders.map { order =>
           val withId = order.copy(clientOrderId = clientOrderIdGen(order.exchange))
-          // 原始订单 (币本位) 登记到 pending，策略端统一看到币的数量
-          state.addPendingOrder(withId, now)
-          // 转换为交易所格式 (合约张数 + 价格/数量取整)
-          convertOrder(withId)
+          state.addPendingOrder(withId, now) // 币本位登记，策略端统一看到币的数量
+          OrderConversion.toExchangeFormat(withId, symbolMetas)
         }
-        OutcomeEvent.PlaceOrders(converted, comment)
-      case cancel: OutcomeEvent.CancelOrder => cancel
-    }
+        Event.stamped(OrderIntent, AccountOutcome(acct, OutcomeEvent.PlaceOrders(prepared, comment)), now, now)
+      case _ => produced
 
   /** 撤掉本策略全部挂单的信号 —— 停机收尾用。
     *
@@ -58,15 +69,14 @@ final class StrategyRunner(
     *
     * 撤一张已经成交或本就不存在的单会得到 `OrderNotFound`，那是既有的容忍路径 (非致命)。
     */
-  def pendingCancels: Vector[OutcomeEvent] =
+  def pendingCancels(now: Timestamp): Vector[AnyEvent] =
+    val ctx = StrategyContext(state, account, now)
     state.allPendingOrders.view
       .map { p =>
         val ref = if p.order.id.nonEmpty then OrderRef.ByExchangeId(p.order.id) else OrderRef.ByClientId(p.order.clientOrderId)
-        OutcomeEvent.CancelOrder(p.order.exchange, p.order.symbol, ref)
+        ctx.cancel(p.order.exchange, p.order.symbol, ref)
       }
       .toVector
-
-  private def convertOrder(order: Order): Order = OrderConversion.toExchangeFormat(order, symbolMetas)
 
 object StrategyRunner:
   /** 策略声明 + 框架补齐 = 策略实际的订阅范围。
@@ -80,8 +90,7 @@ object StrategyRunner:
     * 账户级读数按**交易所**补齐而不是全收：策略读不到自己没订阅的交易所的净值，
     * 而杠杆闸门正是拿净值算的。
     */
-  def subscriptionFor(strategy: Strategy, account: AccountId): Subscription =
-    val declared = strategy.interests
+  def subscriptionFor(declared: Set[Interest], account: AccountId): Subscription =
     val base = Subscription(declared)
     val instrumentKeys = base.instruments
     val exchangeKeys = base.exchanges

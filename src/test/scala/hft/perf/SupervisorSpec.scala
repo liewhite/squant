@@ -4,7 +4,7 @@ import hft.actor.{Actor, ActorHandle, ActorSystem}
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.state.StateManager
-import hft.strategy.{OrderIntent, OutcomeEvent, Strategy}
+import hft.strategy.{OrderIntent, OutcomeEvent, Strategy, StrategyHandlers}
 import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -21,9 +21,8 @@ class SupervisorSpec extends munit.FunSuite:
   private val paper = AccountId.Paper(1)
 
   private class Noop extends Strategy:
-    def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(inst)))
     def orderTimeoutMs: Long = 0L
-    def onEvent(event: AnyEvent, state: StateManager): Vector[OutcomeEvent] = Vector.empty
+    def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (_, _, _) => Vector.empty }
 
   private class Idle extends Actor:
     override def name = "idle"
