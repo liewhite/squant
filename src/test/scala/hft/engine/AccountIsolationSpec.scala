@@ -9,6 +9,7 @@ import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.jdk.CollectionConverters.*
+import hft.TestUnits.given
 
 /** 账户隔离：同一份策略逻辑跑在实盘与影子账户上，两个实例互不串味。
   *
@@ -41,11 +42,11 @@ class AccountIsolationSpec extends munit.FunSuite:
       system.spawn(Executor(Recorder(seen, "live"), metas, AccountId.Live))
       system.spawn(Executor(Recorder(seen, "paper"), metas, paper))
 
-      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, 1.0, 100.1, 1.0, 0L), 0L))
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
       bus.publish(Event.local(Topics.Fill, fill(AccountId.Live, 1.0)))
       bus.publish(Event.local(Topics.Fill, fill(paper, 2.0)))
       // 用一条两边都收的行情作栅栏，确保前面的都已处理
-      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 101.0, 1.0, 101.1, 1.0, 1L), 1L))
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 101.0, Coin(1.0), 101.1, Coin(1.0), 1L), 1L))
       while seen.asScala.count(_.endsWith(":bbo")) < 4 do Thread.sleep(5)
 
       val got = seen.asScala.toVector

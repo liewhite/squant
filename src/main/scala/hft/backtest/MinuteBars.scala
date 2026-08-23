@@ -1,6 +1,6 @@
 package hft.backtest
 
-import hft.domain.{Exchange, MarketTrade, Symbol}
+import hft.domain.{Coin, Exchange, MarketTrade, Symbol}
 import hft.event.{AnyEvent, Event, Topics}
 
 import java.io.PrintWriter
@@ -32,9 +32,9 @@ object MinuteBars:
           val b = t.timestamp / 60000L
           if b != bucket then
             flush()
-            bucket = b; o = t.price; h = t.price; l = t.price; c = t.price; v = t.qty
+            bucket = b; o = t.price; h = t.price; l = t.price; c = t.price; v = t.qty.value
           else
-            h = math.max(h, t.price); l = math.min(l, t.price); c = t.price; v += t.qty
+            h = math.max(h, t.price); l = math.min(l, t.price); c = t.price; v += t.qty.value
         }
       }
       flush()
@@ -58,7 +58,7 @@ final class MinuteBarReplaySource(bars: Vector[MinuteBar], exchange: Exchange, s
       val (first, second) = if math.abs(b.high - b.open) <= math.abs(b.open - b.low) then (b.high, b.low) else (b.low, b.high)
       val vq = b.volume / 4.0
       Seq((0L, b.open), (15000L, first), (30000L, second), (45000L, b.close)).iterator.map { (dt, px) =>
-        val t = MarketTrade(exchange, symbol, px, vq, isBuyerMaker = false, b.ts + dt)
+        val t = MarketTrade(exchange, symbol, px, Coin(vq), isBuyerMaker = false, b.ts + dt)
         Event.stamped(Topics.Trade, t, b.ts + dt, b.ts + dt)
       }
     }

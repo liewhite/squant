@@ -16,21 +16,21 @@ class SymbolMetaSpec extends munit.FunSuite:
     assertEquals(meta.roundPrice(62761.3), 62761.3)
 
   test("roundSizeDown 向下取整到 sizeStep"):
-    assertEquals(meta.roundSizeDown(0.0015), 0.001)
-    assertEquals(meta.roundSizeDown(0.0029), 0.002)
-    assertEquals(meta.roundSizeDown(0.003), 0.003)
+    assertEquals(meta.roundSizeDown(Contracts(0.0015)).value, 0.001)
+    assertEquals(meta.roundSizeDown(Contracts(0.0029)).value, 0.002)
+    assertEquals(meta.roundSizeDown(Contracts(0.003)).value, 0.003)
 
   test("formatPrice 去除多余的尾零"):
     assertEquals(meta.formatPrice(62700.0), "62700")
     assertEquals(meta.formatPrice(62761.30), "62761.3")
 
   test("formatSize 取整后格式化"):
-    assertEquals(meta.formatSize(0.0015), "0.001")
+    assertEquals(meta.formatSize(Contracts(0.0015)), "0.001")
 
   test("coinToQty/qtyToCoin 按合约乘数互逆"):
     val okxStyle = meta.copy(contractSize = 0.1)
-    assertEqualsDouble(okxStyle.coinToQty(0.5), 5.0, 1e-12)
-    assertEqualsDouble(okxStyle.qtyToCoin(5.0), 0.5, 1e-12)
+    assertEqualsDouble(okxStyle.toContracts(Coin(0.5)).value, 5.0, 1e-12)
+    assertEqualsDouble(okxStyle.toCoin(Contracts(5.0)).value, 0.5, 1e-12)
 
   test("isValid 拒绝零精度"):
     assert(!meta.copy(tickSize = 0.0).isValid)

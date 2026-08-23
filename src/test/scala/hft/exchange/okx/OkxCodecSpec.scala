@@ -22,12 +22,12 @@ class OkxCodecSpec extends munit.FunSuite:
     assertEquals(fromOkxIndex("BTC-USDT-SWAP"), None)
 
   test("订单状态映射"):
-    assertEquals(mapOrderState("live", 0.0), OrderStatus.Pending)
-    assertEquals(mapOrderState("partially_filled", 3.0), OrderStatus.PartiallyFilled(3.0))
-    assertEquals(mapOrderState("filled", 10.0), OrderStatus.Filled)
-    assertEquals(mapOrderState("canceled", 0.0), OrderStatus.Cancelled)
-    assertEquals(mapOrderState("cancelled", 0.0), OrderStatus.Cancelled)
-    assert(mapOrderState("whatever", 0.0).isInstanceOf[OrderStatus.Rejected])
+    assertEquals(mapOrderState("live", Coin(0.0)), OrderStatus.Pending)
+    assertEquals(mapOrderState("partially_filled", Coin(3.0)), OrderStatus.PartiallyFilled(Coin(3.0)))
+    assertEquals(mapOrderState("filled", Coin(10.0)), OrderStatus.Filled)
+    assertEquals(mapOrderState("canceled", Coin(0.0)), OrderStatus.Cancelled)
+    assertEquals(mapOrderState("cancelled", Coin(0.0)), OrderStatus.Cancelled)
+    assert(mapOrderState("whatever", Coin(0.0)).isInstanceOf[OrderStatus.Rejected])
 
   test("asDouble / asDoubleOrZero"):
     assertEquals("42000.5".asDouble, 42000.5)
@@ -71,7 +71,7 @@ class OkxCodecSpec extends munit.FunSuite:
     assertEquals(d.sz.asDouble, 10.0)
     assertEquals(d.fillSz.asDouble, 3.0)
     assertEquals(d.accFillSz.asDouble, 3.0)
-    assertEquals(mapOrderState(d.state, d.accFillSz.asDouble), OrderStatus.PartiallyFilled(3.0))
+    assertEquals(mapOrderState(d.state, Coin(d.accFillSz.asDouble)), OrderStatus.PartiallyFilled(Coin(3.0)))
 
   test("解析 positions 推送 (空仓 avgPx/upl 为空字符串)"):
     val json =

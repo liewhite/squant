@@ -139,10 +139,10 @@ final class BacktestRecorder(
       if t.timestamp >= startMs && firstPxInPeriod == 0.0 then firstPxInPeriod = t.price
     }
     ev.as(Topics.Fill).filter(f => f.exchange == exchange && f.symbol == symbol).foreach { f =>
-      runPos += (if f.side == Side.Long then f.size else -f.size)
+      runPos += (if f.side == Side.Long then f.size.value else -f.size.value)
       if f.timestamp >= startMs then
         nFills += 1
-        fillBuf += ((f.timestamp, f.side, f.price, f.size))
+        fillBuf += ((f.timestamp, f.side, f.price, f.size.value))
     }
     ev.as(Topics.AccountInfo).foreach { info =>
       if ev.exchangeTs >= startMs && info.equity > 0 then

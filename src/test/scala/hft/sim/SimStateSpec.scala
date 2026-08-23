@@ -2,6 +2,7 @@ package hft.sim
 
 import hft.domain.*
 import hft.event.{AnyEvent, Event, Topics}
+import hft.TestUnits.given
 
 /** 撮合状态转移的纯单测：无线程、无延迟、无 sleep，直接断言 (新状态, 回流事件)。 */
 class SimStateSpec extends munit.FunSuite:
@@ -11,13 +12,13 @@ class SimStateSpec extends munit.FunSuite:
 
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private def empty = SimState.empty(AccountId.Live, metasOf, 10_000.0)
+  private def empty = SimState.empty(AccountId.Live, 10_000.0)
 
-  private def bbo(bid: Price, ask: Price, ts: Timestamp = 1): BBO = BBO(ex, sym, bid, 1.0, ask, 1.0, ts)
+  private def bbo(bid: Price, ask: Price, ts: Timestamp = 1): BBO = BBO(ex, sym, bid, Coin(1.0), ask, Coin(1.0), ts)
   private def marketEv(b: BBO): AnyEvent = Event.at(Topics.Bbo, b, b.timestamp)
   private def limit(side: Side, price: Price, tif: TimeInForce, cid: String): Order =
     Order("", ex, sym, side, OrderType.Limit(price, tif), 0.002, reduceOnly = false, clientOrderId = cid)
-  private def limitRO(side: Side, price: Price, tif: TimeInForce, cid: String, qty: Quantity): Order =
+  private def limitRO(side: Side, price: Price, tif: TimeInForce, cid: String, qty: Coin): Order =
     Order("", ex, sym, side, OrderType.Limit(price, tif), qty, reduceOnly = true, clientOrderId = cid)
 
   private def statuses(evs: Vector[AnyEvent]): Vector[OrderStatus] =
@@ -46,7 +47,7 @@ class SimStateSpec extends munit.FunSuite:
     val f = fills(evs)
     assertEquals(f.map(_.price), Vector(49995.0)) // maker 价
     assertEquals(s3.resting.size, 0)
-    assertEquals(s3.ledger.positions(sym).size, 0.002)
+    assertEquals(s3.ledger.positions(sym).size.value, 0.002)
 
   test("行情先于成交回流: onMarket 返回的首事件是行情, 其后才是成交"):
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
@@ -92,8 +93,8 @@ class SimStateSpec extends munit.FunSuite:
     val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 50005, TimeInForce.GTC, "b1"), "1", 1) // taker 开多 0.002
     val (s3, _) = s2.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "s1", 0.005), "2", 2) // 平仓单量 0.005 > 持仓
     val (s4, evs) = s3.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2)), 2)
-    assertEquals(fills(evs).map(_.size), Vector(0.002)) // 截断到多头 0.002
-    assertEquals(s4.ledger.positions(sym).size, 0.0) // 平至 0, 不反手为 -0.003
+    assertEquals(fills(evs).map(_.size.value), Vector(0.002)) // 截断到多头 0.002
+    assertEquals(s4.ledger.positions(sym).size.value, 0.0) // 平至 0, 不反手为 -0.003
 
   test("撮合按到达序 (FIFO) 而非哈希序: 同价 reduceOnly 竞争同一持仓, 先到先成交"):
     // 开多 0.003，两张同价 reduceOnly 卖单 (各 0.002, 合计 0.004 > 持仓) 同刻越价竞争。
@@ -105,6 +106,6 @@ class SimStateSpec extends munit.FunSuite:
     val (s4, _) = s3.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "late", 0.002), "3", 1)  // 后到 seq1
     val (_, evs) = s4.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2)), 2) // bid 50011 >= 50010 -> 两张同刻越价
     val filledOf = evs.flatMap(_.as(Topics.OrderUpdate)).collect {
-      case u if u.status == OrderStatus.Filled => (u.clientOrderId, u.fillSize)
+      case u if u.status == OrderStatus.Filled => (u.clientOrderId, u.fillSize.value)
     }
     assertEquals(filledOf, Vector((Some("early"), 0.002), (Some("late"), 0.001)))

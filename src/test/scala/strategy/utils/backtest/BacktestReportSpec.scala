@@ -2,6 +2,7 @@ package strategy.utils.backtest
 
 import hft.domain.*
 import hft.event.{AnyEvent, Event, Topics}
+import hft.TestUnits.given
 
 /** BacktestRecorder 旁路观察 + BacktestReport 出图 的纯行为单测：
   * 预热过滤、基准/收益/回撤/buy&hold 计算、成交点采集与买卖向、以及 markers 渲染。 */

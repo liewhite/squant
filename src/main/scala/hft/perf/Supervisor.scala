@@ -120,7 +120,7 @@ final class Supervisor(
     */
   private def checkResidual(perf: Performance): Unit =
     if residual.contains(perf.instrument) then
-      if math.abs(perf.position) <= Position.Epsilon then
+      if perf.position.isZero then
         residual -= perf.instrument
         lastResidualWarn -= perf.instrument
         logger.warn(s"降级后敞口已归零: ${perf.instrument}")
@@ -184,7 +184,7 @@ final class Supervisor(
       // 先撤下 (它的收尾会撤掉自己的挂单)，再平掉残留敞口。
       // 顺序不能反：还活着的策略会看见平仓成交并可能立刻反手补回去。
       demoteLive(st.handle)
-      flatten(instrument, st.latest.map(_.position).getOrElse(0.0), now)
+      flatten(instrument, st.latest.map(_.position).getOrElse(Coin.Zero), now)
       // 平仓单是异步的，且这里的仓位读数最迟落后一个发布周期 ——
       // 把该标的挂进残留监控，后续战绩若还带着敞口就告警 (见 checkResidual)
       residual += instrument
@@ -195,25 +195,25 @@ final class Supervisor(
     * `size` 来自最迟落后一个发布周期的快照，所以这一发不保证平干净；真正的兜底是
     * [[checkResidual]] 的持续监控。
     */
-  private def flatten(instrument: Instrument, size: Quantity, now: Timestamp): Unit =
-    if math.abs(size) > Position.Epsilon then
-      val side = if size > 0 then Side.Short else Side.Long
+  private def flatten(instrument: Instrument, size: Coin, now: Timestamp): Unit =
+    if size.nonZero then
+      val side = if size > Coin.Zero then Side.Short else Side.Long
       val clientOrderId = instrument.exchange.newClientOrderId
-      val order = OrderConversion.toExchangeFormat(
+      val order = OrderConversion.roundToExchangePrecision(
         Order(
           id = "",
           exchange = instrument.exchange,
           symbol = instrument.symbol,
           side = side,
           orderType = OrderType.Market,
-          quantity = math.abs(size),
+          quantity = size.abs,
           reduceOnly = true,
           clientOrderId = clientOrderId,
         ),
         symbolMetas,
       )
       flattening(clientOrderId) = (instrument, now)
-      logger.warn(s"flattening live position: $instrument size=$size -> $side ${math.abs(size)}")
+      logger.warn(s"flattening live position: $instrument size=$size -> $side ${size.abs.value}")
       ctx.publish(Event.local(
         OrderIntent,
         AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), s"demote flatten $instrument")),

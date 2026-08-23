@@ -32,7 +32,7 @@ final class MacdGridStrategy(
     maPeriodBars: Int = 20,
     atrPeriodBars: Int = 14,
     /** 最小下单/对账币数 (低于此视为已对齐/空仓)。 */
-    minOrderQty: Quantity = 0.001,
+    minOrderQty: Coin = Coin(0.001),
 ) extends Strategy:
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[MacdGridStrategy])
 
@@ -51,7 +51,7 @@ final class MacdGridStrategy(
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
     .market(Topics.Trade, Instrument(exchange, symbol)) { (t, ctx, _) =>
-      k.update(t.timestamp, t.price, t.qty)
+      k.update(t.timestamp, t.price, t.qty.value)
       reconcile(t.price, t.timestamp, ctx)
     }
     .own(Topics.Fill) { (f, _, _) =>
@@ -76,18 +76,18 @@ final class MacdGridStrategy(
         // 期间锚价固定, 故挂单价稳定 resting、不逐笔追价 (否则单子永远在现价±1ATR 漂移, 永不成交)。
         if ss.pendingOrders.isEmpty then anchorPrice = price
         val posCoin = ss.positionSize(exchange)
-        val flat = math.abs(posCoin) < minOrderQty
+        val flat = posCoin.abs < minOrderQty
         if flat then
           // 空仓: 按当时权益刷新"一份"大小 (持仓期冻结)
           val equity = ctx.state.equity(exchange).filter(_ > 0.0).getOrElse(referenceEquity)
-          unitQty = math.max(minOrderQty, leverage * equity / params.maxUnits / price)
+          unitQty = math.max(minOrderQty.value, leverage * equity / params.maxUnits / price)
         // 真实持仓 (≥minOrderQty) 至少记为 ±1 份: 避免不足一份的残仓/dust 被四舍五入成 0,
         // 导致 DEA 反向时不平仓 (flatten 需 posUnits≠0)、也不挂止盈, 残仓长期挂账。
         val posUnits =
           if unitQty <= 0.0 || flat then 0
           else
-            val u = (posCoin / unitQty).round.toInt
-            if u == 0 then math.signum(posCoin).toInt else u
+            val u = (posCoin.value / unitQty).round.toInt
+            if u == 0 then posCoin.signum else u
         val level = if anchorPrice > 0.0 then anchorPrice else price
 
         val decision = MacdGridLogic.decide(dea, bar, price, level, ma20, atr, posUnits, unitQty, params)
@@ -100,16 +100,16 @@ final class MacdGridStrategy(
     * 时序说明: 撤单异步 (等 Cancelled 确认), 市价平即时。撤单确认前, 若旧 resting 加仓限价单恰被成交价穿越成交,
     * 会多开一份逆 DEA 方向的单; 但下一拍 posUnits 仍与 DEA 冲突 -> 再次 flatten, 最终收敛 (至多多一次 taker 往返)。
     * 加仓单非 reduceOnly、平仓单 reduceOnly, 不会出现"平仓反向开仓"。 */
-  private def flattenAll(ss: hft.state.SymbolState, posCoin: Double, dea: Double, price: Price, ctx: StrategyContext): Vector[AnyEvent] =
+  private def flattenAll(ss: hft.state.SymbolState, posCoin: Coin, dea: Double, price: Price, ctx: StrategyContext): Vector[AnyEvent] =
     val cancels = ss.pendingOrders.flatMap(cancelConfirmed(_, ctx)).toVector
     val close =
-      if math.abs(posCoin) >= minOrderQty then
-        val side = if posCoin > 0 then Side.Short else Side.Long
+      if posCoin.abs >= minOrderQty then
+        val side = if posCoin > Coin.Zero then Side.Short else Side.Long
         logger.info(f"[MacdGrid $symbol] DEA转向平仓 dea=$dea%.4f pos=$posCoin%.4f px=$price%.2f")
         Vector(
           ctx.place(
-            Order("", exchange, symbol, side, OrderType.Market, math.abs(posCoin), reduceOnly = true, ""),
-            f"macdgrid:flatten $side qty=${math.abs(posCoin)}%.4f dea=$dea%.4f px=$price%.2f",
+            Order("", exchange, symbol, side, OrderType.Market, posCoin.abs, reduceOnly = true, ""),
+            f"macdgrid:flatten $side qty=${posCoin.abs.value}%.4f dea=$dea%.4f px=$price%.2f",
           )
         )
       else Vector.empty
@@ -141,9 +141,9 @@ final class MacdGridStrategy(
       posUnits: Int, price: Price, now: Long, actions: mutable.ArrayBuffer[AnyEvent], ctx: StrategyContext,
   ): Unit =
     (desired, present) match
-      case (Some(spec), None) if spec.qty >= minOrderQty =>
+      case (Some(spec), None) if spec.qty >= minOrderQty.value =>
         actions += ctx.place(
-          Order("", exchange, symbol, spec.side, OrderType.Limit(spec.price, TimeInForce.GTC), spec.qty, spec.reduceOnly, ""),
+          Order("", exchange, symbol, spec.side, OrderType.Limit(spec.price, TimeInForce.GTC), Coin(spec.qty), spec.reduceOnly, ""),
           f"macdgrid:$tag${if spec.trail then ":trail" else ""} ${spec.side} px=${spec.price}%.2f qty=${spec.qty}%.4f units=$posUnits mark=$price%.2f",
         )
       case (Some(spec), Some(p)) if spec.trail =>

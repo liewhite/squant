@@ -16,14 +16,14 @@ class BybitCodecSpec extends munit.FunSuite:
     assertEquals(fromBybit(""), None)
 
   test("订单状态映射"):
-    assertEquals(mapOrderStatus("New", 0.0), OrderStatus.Pending)
-    assertEquals(mapOrderStatus("PartiallyFilled", 0.003), OrderStatus.PartiallyFilled(0.003))
-    assertEquals(mapOrderStatus("Filled", 0.01), OrderStatus.Filled)
-    assertEquals(mapOrderStatus("Cancelled", 0.0), OrderStatus.Cancelled)
-    assertEquals(mapOrderStatus("PartiallyFilledCanceled", 0.0), OrderStatus.Cancelled)
-    assertEquals(mapOrderStatus("Deactivated", 0.0), OrderStatus.Cancelled)
-    assert(mapOrderStatus("Rejected", 0.0).isInstanceOf[OrderStatus.Rejected])
-    assert(mapOrderStatus("whatever", 0.0).isInstanceOf[OrderStatus.Rejected])
+    assertEquals(mapOrderStatus("New", Coin(0.0)), OrderStatus.Pending)
+    assertEquals(mapOrderStatus("PartiallyFilled", Coin(0.003)), OrderStatus.PartiallyFilled(Coin(0.003)))
+    assertEquals(mapOrderStatus("Filled", Coin(0.01)), OrderStatus.Filled)
+    assertEquals(mapOrderStatus("Cancelled", Coin(0.0)), OrderStatus.Cancelled)
+    assertEquals(mapOrderStatus("PartiallyFilledCanceled", Coin(0.0)), OrderStatus.Cancelled)
+    assertEquals(mapOrderStatus("Deactivated", Coin(0.0)), OrderStatus.Cancelled)
+    assert(mapOrderStatus("Rejected", Coin(0.0)).isInstanceOf[OrderStatus.Rejected])
+    assert(mapOrderStatus("whatever", Coin(0.0)).isInstanceOf[OrderStatus.Rejected])
 
   test("方向映射 (统一<->Bybit) 与 TimeInForce 映射"):
     assertEquals(sideToParam(Side.Long), "Buy")
@@ -88,7 +88,7 @@ class BybitCodecSpec extends munit.FunSuite:
     assertEquals(d.side, "Buy")
     assertEquals(d.qty.asDouble, 0.01)
     assertEquals(d.cumExecQty.asDouble, 0.003)
-    assertEquals(mapOrderStatus(d.orderStatus, d.cumExecQty.asDouble), OrderStatus.PartiallyFilled(0.003))
+    assertEquals(mapOrderStatus(d.orderStatus, Coin(d.cumExecQty.asDouble)), OrderStatus.PartiallyFilled(Coin(0.003)))
 
   test("解析 execution 推送 (单笔成交 execQty/execPrice)"):
     val json =

@@ -7,6 +7,7 @@ import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.jdk.CollectionConverters.*
+import hft.TestUnits.given
 
 /** 绩效重建：实盘与影子走同一段代码，数字因此可比。 */
 class PerformanceTrackerSpec extends munit.FunSuite:
@@ -48,7 +49,7 @@ class PerformanceTrackerSpec extends munit.FunSuite:
     val p = t.snapshot(AccountInstrument(AccountId.Live, inst)).get
     assertEquals(p.fills, 3)
     assertEquals(p.roundTrips, 1, "三笔成交只构成一次完整的下注结果")
-    assertEqualsDouble(p.position, 0.0, 1e-12)
+    assertEqualsDouble(p.position.value, 0.0, 1e-12)
 
   test("实盘与影子各记各的账"):
     val t = PerformanceTracker(feeRate = 0.0, publishIntervalMs = 0)

@@ -24,7 +24,7 @@ private[bybit] object BybitCodec:
   /** Bybit 订单状态映射。cum 为累计成交量 (币本位)。未知状态归为 Rejected，由上层决定是否致命。
     * PartiallyFilledCanceled/Deactivated 为终态撤单 (部分成交后撤 / 条件单失效)。
     */
-  def mapOrderStatus(status: String, cum: Quantity): OrderStatus = status match
+  def mapOrderStatus(status: String, cum: Coin): OrderStatus = status match
     case "New"                                          => OrderStatus.Pending
     case "PartiallyFilled"                              => OrderStatus.PartiallyFilled(cum)
     case "Filled"                                       => OrderStatus.Filled

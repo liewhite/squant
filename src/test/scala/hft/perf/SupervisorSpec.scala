@@ -10,6 +10,7 @@ import ox.supervised
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicReference
 import scala.jdk.CollectionConverters.*
+import hft.TestUnits.given
 
 /** 监督者：按影子盘战绩起停实盘实例。 */
 class SupervisorSpec extends munit.FunSuite:
@@ -133,7 +134,7 @@ class SupervisorSpec extends munit.FunSuite:
       eventually(intents.asScala.exists(_.isInstanceOf[OutcomeEvent.PlaceOrders]), "应发出平仓单")
       val flatten = intents.asScala.collectFirst { case p: OutcomeEvent.PlaceOrders => p.orders.head }.get
       assertEquals(flatten.side, Side.Short, "多头要用卖单平")
-      assertEqualsDouble(flatten.quantity, 2.0, 1e-9)
+      assertEqualsDouble(flatten.quantity.value, 2.0, 1e-9)
       assert(flatten.reduceOnly, "平仓单必须 reduce-only —— 撮合层据此保证只减不增")
       assert(flatten.clientOrderId.nonEmpty, "平仓单也要有 clientOrderId, 否则回报无从关联")
 

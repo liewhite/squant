@@ -38,25 +38,26 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Position], ca
     *
     * @param fee 本笔手续费 (>=0, 直接从现金扣除)。maker/taker 区分与费率换算由调用方 (SimState) 决定。
     */
-  def applyFill(exchange: Exchange, symbol: Symbol, side: Side, price: Price, qty: Quantity, fee: Double = 0.0): Ledger =
+  def applyFill(exchange: Exchange, symbol: Symbol, side: Side, price: Price, qty: Coin, fee: Double = 0.0): Ledger =
     val signed = side match
       case Side.Long  => qty
       case Side.Short => -qty
     val pos = positions.getOrElse(symbol, Position.empty(account, exchange, symbol))
     val oldSize = pos.size
     val newSize = oldSize + signed
-    if math.abs(oldSize) < Position.Epsilon || (oldSize > 0) == (signed > 0) then
+    if oldSize.isZero || (oldSize > Coin.Zero) == (signed > Coin.Zero) then
+      // 新开 / 同向加仓: 加权平均成本 (按名义额加权, 故用 notional 跨到金额域)
       val newEntry =
-        if math.abs(oldSize) < Position.Epsilon then price
-        else (math.abs(oldSize) * pos.entryPrice + qty * price) / (math.abs(oldSize) + qty)
+        if oldSize.isZero then price
+        else (oldSize.abs.notional(pos.entryPrice) + qty.notional(price)) / (oldSize.abs + qty).value
       copy(positions = positions.updated(symbol, pos.copy(size = newSize, entryPrice = newEntry)), cash = cash - fee)
     else
-      val closeQty = math.min(qty, math.abs(oldSize))
-      val dir = if oldSize > 0 then 1.0 else -1.0
-      val realized = (price - pos.entryPrice) * closeQty * dir
+      val closeQty = qty.min(oldSize.abs)
+      val dir = if oldSize > Coin.Zero then 1.0 else -1.0
+      val realized = closeQty.notional(price - pos.entryPrice) * dir
       val newEntry =
-        if math.abs(signed) <= math.abs(oldSize) then
-          if math.abs(newSize) < Position.Epsilon then 0.0 else pos.entryPrice
+        if signed.abs <= oldSize.abs then
+          if newSize.isZero then 0.0 else pos.entryPrice
         else price // 反手: 剩余在成交价重开
       Ledger(account, positions.updated(symbol, pos.copy(size = newSize, entryPrice = newEntry)), cash + realized - fee)
 
@@ -66,7 +67,7 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Position], ca
 
   /** 总持仓名义价值 (用于杠杆率) */
   def notional(markOf: Symbol => Double): Double =
-    positions.values.map(p => math.abs(p.size) * markOf(p.symbol)).sum
+    positions.values.map(p => p.size.abs.notional(markOf(p.symbol))).sum
 
   /** 非空仓位 (回填最新未实现盈亏) */
   def openPositions(markOf: Symbol => Double): Vector[Position] =
@@ -77,4 +78,4 @@ object Ledger:
 
   /** 未实现盈亏：(标记价 - 均价) * 带符号仓位；无估值价格时记 0 */
   private def unrealizedPnl(pos: Position, mark: Double): Double =
-    if mark <= 0.0 then 0.0 else (mark - pos.entryPrice) * pos.size
+    if mark <= 0.0 then 0.0 else pos.size.notional(mark - pos.entryPrice)

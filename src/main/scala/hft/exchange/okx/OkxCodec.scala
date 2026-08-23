@@ -33,7 +33,7 @@ private[okx] object OkxCodec:
       case _              => None
 
   /** OKX 订单状态映射。未知状态归为 Rejected，由上层决定是否致命 */
-  def mapOrderState(state: String, filled: Quantity): OrderStatus = state match
+  def mapOrderState(state: String, filled: Coin): OrderStatus = state match
     case "live"             => OrderStatus.Pending
     case "partially_filled" => OrderStatus.PartiallyFilled(filled)
     case "filled"           => OrderStatus.Filled

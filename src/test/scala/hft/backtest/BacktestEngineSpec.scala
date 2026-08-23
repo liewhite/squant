@@ -7,6 +7,7 @@ import hft.event.{AnyEvent, Event, Interest, Topics}
 import hft.sim.SimConfig
 import hft.strategy.{OutcomeEvent, Strategy, StrategyHandlers}
 import hft.state.{StateManager}
+import hft.TestUnits.given
 
 /** 回测引擎单测：用内存假数据源驱动，验证 下单->挂单->越价成交 全链路 + 确定性。 */
 class BacktestEngineSpec extends munit.FunSuite:
@@ -15,7 +16,7 @@ class BacktestEngineSpec extends munit.FunSuite:
   private val metas = Map((ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.01, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0))
 
   private def bboEv(bid: Price, ask: Price, ts: Timestamp): AnyEvent =
-    Event.at(Topics.Bbo, BBO(ex, sym, bid, 1.0, ask, 1.0, ts), ts)
+    Event.at(Topics.Bbo, BBO(ex, sym, bid, Coin(1.0), ask, Coin(1.0), ts), ts)
 
   /** 假数据源：手造 BBO 序列。 */
   private class FixedSource(evs: Vector[AnyEvent]) extends MarketDataSource:
@@ -58,7 +59,7 @@ class BacktestEngineSpec extends munit.FunSuite:
     assertEquals(r.marketEvents, 3L)
     assertEquals(r.realizedPnl, 0.0) // 只开仓未平仓
     val pos = r.positions.find(_.symbol == sym).get
-    assertEqualsDouble(pos.size, 1.0, 1e-9)
+    assertEqualsDouble(pos.size.value, 1.0, 1e-9)
     // 未实现 = (mark 99.75 - entry 100) * 1 = -0.25; equity = 10000 - 0.25
     assertEqualsDouble(r.finalEquity, 10_000.0 - 0.25, 1e-6)
 

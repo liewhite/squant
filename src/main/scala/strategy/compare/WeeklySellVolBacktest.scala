@@ -122,7 +122,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       val fillRecs = ArrayBuffer.empty[(Long, Side, Double, Double)]
       val obs: AnyEvent => Unit = ev =>
         ev.as(Topics.Bbo).foreach { b => lastMid = b.midPrice; lastTs = b.timestamp }
-        ev.as(Topics.Fill).foreach(f => fillRecs += ((f.timestamp, f.side, f.price, f.size)))
+        ev.as(Topics.Fill).foreach(f => fillRecs += ((f.timestamp, f.side, f.price, f.size.value)))
         ev.as(Topics.AccountInfo).foreach { info =>
           if lastTs > 0 && ev.exchangeTs - curveLastTs >= 3_600_000L then
             curveLastTs = ev.exchangeTs

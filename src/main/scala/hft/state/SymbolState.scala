@@ -42,15 +42,15 @@ final class SymbolState(val symbol: Symbol):
   def position(exchange: Exchange): Option[Position] = positions.get(exchange)
 
   /** 仓位大小。无仓位记录等价于空仓 (size = 0)，策略启动初期确实没有仓位 */
-  def positionSize(exchange: Exchange): Quantity =
-    positions.get(exchange).map(_.size).getOrElse(0.0)
+  def positionSize(exchange: Exchange): Coin =
+    positions.get(exchange).map(_.size).getOrElse(Coin.Zero)
 
   def hasPositions: Boolean = positions.values.exists(p => !p.isEmpty)
 
   /** 多空仓位大小: (多头总量(正), 空头总量(负)) */
-  def positionSizes: (Quantity, Quantity) =
+  def positionSizes: (Coin, Coin) =
     val sizes = positions.values.map(_.size)
-    (sizes.filter(_ > 0).sum, sizes.filter(_ < 0).sum)
+    (sizes.filter(_ > Coin.Zero).sumCoin, sizes.filter(_ < Coin.Zero).sumCoin)
 
   def hasPendingOrders: Boolean = _pendingOrders.nonEmpty
 
@@ -167,7 +167,7 @@ final class SymbolState(val symbol: Symbol):
       case Side.Short => -fill.size
     val pos = positions.getOrElseUpdate(
       fill.exchange,
-      Position(fill.account, fill.exchange, symbol, 0.0, fill.price, 0.0),
+      Position(fill.account, fill.exchange, symbol, Coin.Zero, fill.price, 0.0),
     )
     val updated = pos.copy(size = pos.size + delta)
     positions(fill.exchange) = updated

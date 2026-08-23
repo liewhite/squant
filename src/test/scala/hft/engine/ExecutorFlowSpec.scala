@@ -6,6 +6,7 @@ import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.state.StateManager
 import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy, StrategyHandlers}
 import ox.supervised
+import hft.TestUnits.given
 
 /** Executor 集成测试: 通过 EventBus + ActorSystem 驱动完整的 事件 -> 策略 -> 信号 链路 */
 class ExecutorFlowSpec extends munit.FunSuite:
@@ -55,7 +56,7 @@ class ExecutorFlowSpec extends munit.FunSuite:
           assertEquals(orders.size, 1)
           val order = orders.head
           assert(order.clientOrderId.nonEmpty, "Executor 应生成 clientOrderId")
-          assertEquals(order.quantity, 0.001) // 0.0015 向下取整到 step
+          assertEquals(order.quantity.value, 0.001) // 0.0015 向下取整到 step
           assertEquals(order.orderType, OrderType.Limit(62761.3, TimeInForce.GTC)) // 价格取整到 tick
         case other => fail(s"unexpected signal: $other")
 
@@ -68,7 +69,7 @@ class ExecutorFlowSpec extends munit.FunSuite:
       system.spawn(Executor(ClockOrderStrategy(), Map((Exchange.Binance, "BTCUSDT") -> meta), AccountId.Live))
 
       // 范围外 symbol 事件 (若未被过滤会触发 StateManager 路由 sys.error 使作用域崩溃)
-      val other = BBO(Exchange.Binance, "DOGEUSDT", 0.1, 1.0, 0.2, 1.0, 0L)
+      val other = BBO(Exchange.Binance, "DOGEUSDT", 0.1, Coin(1.0), 0.2, Coin(1.0), 0L)
       bus.publish(Event.at(Topics.Bbo, other, 0L))
       // Clock 紧随其后仍能正常产出信号，证明 executor 没有被范围外事件破坏
       bus.publish(Event.local(Topics.Clock, ()))

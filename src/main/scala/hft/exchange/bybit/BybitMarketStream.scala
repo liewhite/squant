@@ -97,9 +97,9 @@ final class BybitMarketStream(
       exchange = Exchange.Bybit,
       symbol = sym,
       bidPrice = bid.head.asDouble,
-      bidQty = bid(1).asDouble, // 已是币本位
+      bidQty = Coin(bid(1).asDouble), // 已是币本位
       askPrice = ask.head.asDouble,
-      askQty = ask(1).asDouble,
+      askQty = Coin(ask(1).asDouble),
       timestamp = ts,
     )
     bus.publish(Event.at(Topics.Bbo, bbo, ts))
@@ -122,7 +122,7 @@ final class BybitMarketStream(
 
   private def publishTrade(sym: Symbol, d: PublicTradeData): Unit =
     // Bybit S = taker 方向: S=Sell -> 买方是挂单方 (isBuyerMaker=true)
-    val trade = MarketTrade(Exchange.Bybit, sym, d.p.asDouble, d.v.asDouble, isBuyerMaker = d.S == "Sell", d.T)
+    val trade = MarketTrade(Exchange.Bybit, sym, d.p.asDouble, Coin(d.v.asDouble), isBuyerMaker = d.S == "Sell", d.T)
     bus.publish(Event.at(Topics.Trade, trade, d.T))
 
   /** 心跳发送线程：定期入队 ping 帧，维持连接 (服务端回 pong 同时刷新 WsLoop 空闲计时) */

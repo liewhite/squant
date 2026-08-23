@@ -94,7 +94,7 @@ final class BybitAccountStream(
       symbol = sym,
       side = sideFromBybit(d.side),
       price = d.execPrice.asDouble,
-      size = d.execQty.asDouble,
+      size = Coin(d.execQty.asDouble),
       timestamp = d.execTime.toLongOption.getOrElse(nowMs),
     )
     bus.publish(Event.local(Topics.Fill, fill))
@@ -102,7 +102,7 @@ final class BybitAccountStream(
   /** 订单状态 -> OrderUpdate，仅追踪挂单生命周期；fillSize=0，仓位由 execution 维护 */
   private def publishOrder(d: OrderData): Unit =
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in order: '${d.symbol}'"))
-    val filled = d.cumExecQty.asDouble
+    val filled = Coin(d.cumExecQty.asDouble)
     val update = OrderUpdate(
       account = AccountId.Live,
       orderId = d.orderId,
@@ -112,9 +112,9 @@ final class BybitAccountStream(
       side = sideFromBybit(d.side),
       status = mapOrderStatus(d.orderStatus, filled),
       price = d.price.asDoubleOrZero,
-      quantity = d.qty.asDouble,
+      quantity = Coin(d.qty.asDouble),
       filledQuantity = filled,
-      fillSize = 0.0,
+      fillSize = Coin.Zero,
       timestamp = nowMs,
     )
     bus.publish(Event.local(Topics.OrderUpdate, update))

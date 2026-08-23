@@ -73,7 +73,7 @@ final class BacktestEngine(
       if byTime != 0 then byTime else java.lang.Long.compare(b.seq, a.seq)
   private val pq = mutable.PriorityQueue.empty[Scheduled]
 
-  private var state: SimState = SimState.empty(AccountId.Live, symbolMetas, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
+  private var state: SimState = SimState.empty(AccountId.Live, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   private var now: Timestamp = 0L
   private var seqGen: Long = 0L
   private var orderIdGen: Long = 0L

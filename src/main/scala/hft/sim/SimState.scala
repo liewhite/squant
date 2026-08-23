@@ -20,7 +20,7 @@ final case class RestingOrder(
     symbol: Symbol,
     side: Side,
     limitPrice: Price,
-    quantity: Quantity,
+    quantity: Coin,
     reduceOnly: Boolean,
     seq: Long,
 ):
@@ -42,8 +42,6 @@ final case class RestingOrder(
 final case class SimState(
     /** 本柜台服务的账户 —— 撮合产出的回报都标它。实盘替身标 Live，影子盘标 Paper(n) */
     account: AccountId,
-    /** 用于在入口把订单数量从交易所格式 (合约张数) 还原成币本位，见 [[onOrderArrived]] */
-    symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     ledger: Ledger,
     resting: Map[OrderId, RestingOrder],
     lastBbo: Map[Symbol, BBO],
@@ -117,13 +115,9 @@ final case class SimState(
   // ==================== 下单到达撮合 ====================
 
   /** 订单到达撮合：按类型/TIF 决定 resting / 成交 / 拒单。`now` 为到达时刻 (回报时间戳取自它) */
-  def onOrderArrived(exchange: Exchange, rawOrder: Order, orderId: OrderId, now: Timestamp): (SimState, Vector[AnyEvent]) =
-    // 入口还原币本位：进来的订单是**交易所格式** (合约张数, 由 StrategyRunner 换算过)，
-    // 而账本、仓位、回报一律用币本位 —— 真实网关正是这样在回报侧 `qtyToCoin` 还原的
-    // (见 OkxAccountStream)。虚拟柜台若不做这一步, 在 contractSize ≠ 1 的交易所上
-    // 影子盘的成交量/盈亏/仓位会整体差一个 contractSize 倍, 与实盘不可比 ——
-    // 而"两边数字可比"正是影子盘存在的理由。Binance contractSize = 1, 症状会被掩盖。
-    val order = rawOrder.copy(quantity = metaOf(exchange, rawOrder.symbol).qtyToCoin(rawOrder.quantity))
+  def onOrderArrived(exchange: Exchange, order: Order, orderId: OrderId, now: Timestamp): (SimState, Vector[AnyEvent]) =
+    // 进来的 [[Order]] 按类型即是币本位 —— 换算的职责在 exchange 边界 (虚拟柜台扮演交易所时
+    // 收 ExchangeOrder 并自行换回)，撮合内部不再关心张数。
     val bboOpt = lastBbo.get(order.symbol)
     order.orderType match
       case OrderType.Market =>
@@ -159,19 +153,12 @@ final case class SimState(
       case Some((orderId, o)) =>
         val ev = Event.stamped(
           Topics.OrderUpdate,
-          OrderUpdate(account, orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, 0.0, 0.0, now),
+          OrderUpdate(account, orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, Coin.Zero, Coin.Zero, now),
           now,
           now,
         )
         (copy(resting = resting - orderId), Vector(ev))
       case None => (this, Vector.empty)
-
-  /** 缺 [[SymbolMeta]] 说明柜台收到了未预加载标的的订单，是配置错误，立即终止 */
-  private def metaOf(exchange: Exchange, symbol: Symbol): SymbolMeta =
-    symbolMetas.getOrElse(
-      (exchange, symbol),
-      sys.error(s"SymbolMeta not found for $exchange $symbol, 虚拟柜台无法还原币本位数量"),
-    )
 
   /** 按交易所 id 或 clientOrderId 找挂单 —— 与真实交易所的两种撤单指名方式一致 */
   def findResting(ref: OrderRef): Option[(OrderId, RestingOrder)] = ref match
@@ -195,7 +182,7 @@ final case class SimState(
       symbol: Symbol,
       side: Side,
       fillPrice: Price,
-      qty: Quantity,
+      qty: Coin,
       now: Timestamp,
       liquidity: Liquidity,
       reduceOnly: Boolean,
@@ -203,19 +190,19 @@ final case class SimState(
     val effectiveQty =
       if !reduceOnly then qty
       else
-        val posSize = ledger.positions.get(symbol).map(_.size).getOrElse(0.0)
+        val posSize = ledger.positions.get(symbol).map(_.size).getOrElse(Coin.Zero)
         side match
-          case Side.Short => math.min(qty, math.max(0.0, posSize))  // 卖平多: 至多平掉现有多头
-          case Side.Long  => math.min(qty, math.max(0.0, -posSize)) // 买平空: 至多平掉现有空头
-    if reduceOnly && effectiveQty <= Position.Epsilon then
+          case Side.Short => qty.min(posSize.max(Coin.Zero))    // 卖平多: 至多平掉现有多头
+          case Side.Long  => qty.min((-posSize).max(Coin.Zero)) // 买平空: 至多平掉现有空头
+    if reduceOnly && effectiveQty.isZero then
       // reduceOnly 无可平仓位 -> 不成交，回 Cancelled (订单已被调用方移出簿 / 不入簿)
-      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Cancelled, fillPrice, qty, 0.0, 0.0, now)
+      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Cancelled, fillPrice, qty, Coin.Zero, Coin.Zero, now)
       (this, Vector(Event.stamped(Topics.OrderUpdate, update, now, now)))
     else
       val feeRate = liquidity match
         case Liquidity.Maker => makerFeeRate
         case Liquidity.Taker => takerFeeRate
-      val fee = fillPrice * effectiveQty * feeRate
+      val fee = effectiveQty.notional(fillPrice) * feeRate
       val next = copy(ledger = ledger.applyFill(exchange, symbol, side, fillPrice, effectiveQty, fee))
       val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, effectiveQty, now)
       val f = Fill(account, exchange, symbol, side, fillPrice, effectiveQty, now)
@@ -224,7 +211,7 @@ final case class SimState(
   private def statusEvent(exchange: Exchange, order: Order, orderId: OrderId, status: OrderStatus, price: Price, now: Timestamp): AnyEvent =
     Event.stamped(
       Topics.OrderUpdate,
-      OrderUpdate(account, orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, 0.0, 0.0, now),
+      OrderUpdate(account, orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, Coin.Zero, Coin.Zero, now),
       now,
       now,
     )
@@ -232,9 +219,8 @@ final case class SimState(
 object SimState:
   def empty(
       account: AccountId,
-      symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
       cash: Double,
       makerFeeRate: Double = 0.0,
       takerFeeRate: Double = 0.0,
   ): SimState =
-    SimState(account, symbolMetas, Ledger.empty(account, cash), Map.empty, Map.empty, Map.empty, Map.empty, makerFeeRate, takerFeeRate)
+    SimState(account, Ledger.empty(account, cash), Map.empty, Map.empty, Map.empty, Map.empty, makerFeeRate, takerFeeRate)

@@ -17,7 +17,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
     def events(): Iterator[AnyEvent] = evs.iterator
 
   private def trade(price: Price, ts: Timestamp): AnyEvent =
-    Event.stamped(Topics.Trade, MarketTrade(ex, sym, price, 1.0, isBuyerMaker = false, ts), ts, ts)
+    Event.stamped(Topics.Trade, MarketTrade(ex, sym, price, Coin(1.0), isBuyerMaker = false, ts), ts, ts)
 
   // 到期设在 30 天后 (单只持有, 不滚动)
   private def config(straddles: Double, spot: Double, intervalMs: Long = 1000) =

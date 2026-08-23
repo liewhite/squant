@@ -131,7 +131,7 @@ final class OkxAccountStream(
         account = AccountId.Live,
         exchange = Exchange.Okx,
         symbol = sym,
-        size = meta.qtyToCoin(d.pos.asDouble),
+        size = meta.toCoin(Contracts(d.pos.asDouble)),
         entryPrice = d.avgPx.asDoubleOrZero,
         unrealizedPnl = d.upl.asDoubleOrZero,
       )
@@ -154,10 +154,10 @@ final class OkxAccountStream(
       case "buy"  => Side.Long
       case "sell" => Side.Short
       case other  => throw IllegalStateException(s"Unknown OKX side: '$other'")
-    val fillSz = meta.qtyToCoin(d.fillSz.asDouble)
-    val filledQty = meta.qtyToCoin(d.accFillSz.asDouble)
+    val fillSz = meta.toCoin(Contracts(d.fillSz.asDouble))
+    val filledQty = meta.toCoin(Contracts(d.accFillSz.asDouble))
     // Fill 先于 OrderUpdate (确保乐观更新 position 后再处理订单终态)
-    if fillSz > 0 then
+    if fillSz.nonZero then
       val fill = Fill(AccountId.Live, Exchange.Okx, sym, side, price = d.fillPx.asDouble, size = fillSz, timestamp = nowMs)
       bus.publish(Event.local(Topics.Fill, fill))
     val update = OrderUpdate(
@@ -169,7 +169,7 @@ final class OkxAccountStream(
       side = side,
       status = mapOrderState(d.state, filledQty),
       price = d.px.asDoubleOrZero,
-      quantity = meta.qtyToCoin(d.sz.asDouble),
+      quantity = meta.toCoin(Contracts(d.sz.asDouble)),
       filledQuantity = filledQty,
       fillSize = fillSz,
       timestamp = nowMs,

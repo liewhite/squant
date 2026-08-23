@@ -49,7 +49,7 @@ class StrategyMetricsSpec extends munit.FunSuite:
       ox.forkDiscard { while true do mailbox.events.receive().as(SpreadMetric).foreach(got.add) }
 
       system.spawn(Executor(Quoting(), metas, AccountId.Live))
-      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, 1.0, 100.1, 1.0, 0L), 0L))
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
 
       await(!got.isEmpty, "应收到指标")
       assertEquals(got.asScala.toVector.map(_.instrument), Vector(inst))
@@ -69,7 +69,7 @@ class StrategyMetricsSpec extends munit.FunSuite:
       system.spawn(Executor(Quoting(), metas, AccountId.Live))
       // 消费方绑在另一个账户上：自定义事件不带账户维度，两边都收得到
       system.spawn(Executor(Consumer(), metas, AccountId.Paper(1)))
-      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, 1.0, 100.1, 1.0, 0L), 0L))
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
 
       await(!seen.isEmpty, "另一个策略应收到指标")
       assertEquals(seen.asScala.size, 1)

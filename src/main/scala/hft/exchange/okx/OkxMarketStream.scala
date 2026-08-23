@@ -94,9 +94,9 @@ final class OkxMarketStream(
       exchange = Exchange.Okx,
       symbol = sym,
       bidPrice = bid.head.asDouble,
-      bidQty = meta.qtyToCoin(bid(1).asDouble),
+      bidQty = meta.toCoin(Contracts(bid(1).asDouble)),
       askPrice = ask.head.asDouble,
-      askQty = meta.qtyToCoin(ask(1).asDouble),
+      askQty = meta.toCoin(Contracts(ask(1).asDouble)),
       timestamp = ts,
     )
     bus.publish(Event.at(Topics.Bbo, bbo, ts))
@@ -113,7 +113,8 @@ final class OkxMarketStream(
   private def publishTrade(d: TradeData): Unit =
     val ts = d.ts.toLong
     // OKX side = taker 方向: side=sell -> 买方是挂单方 (isBuyerMaker=true)
-    val trade = MarketTrade(Exchange.Okx, requireSymbol(d.instId), d.px.asDouble, d.sz.asDouble, d.side == "sell", ts)
+    val sym = requireSymbol(d.instId)
+    val trade = MarketTrade(Exchange.Okx, sym, d.px.asDouble, metas.getOrElse(sym, throw IllegalStateException(s"No SymbolMeta for OKX trade symbol: $sym")).toCoin(Contracts(d.sz.asDouble)), d.side == "sell", ts)
     bus.publish(Event.at(Topics.Trade, trade, ts))
 
   private def publishFunding(d: FundingRateData): Unit =

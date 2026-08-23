@@ -56,7 +56,7 @@ final class StrategyRunner(
         val prepared = orders.map { order =>
           val withId = order.copy(clientOrderId = clientOrderIdGen(order.exchange))
           state.addPendingOrder(withId, now) // 币本位登记，策略端统一看到币的数量
-          OrderConversion.toExchangeFormat(withId, symbolMetas)
+          OrderConversion.roundToExchangePrecision(withId, symbolMetas)
         }
         Event.stamped(OrderIntent, AccountOutcome(acct, OutcomeEvent.PlaceOrders(prepared, comment)), now, now)
       case _ => produced

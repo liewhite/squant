@@ -39,9 +39,9 @@ object BinanceCsv:
       exchange = Exchange.Binance,
       symbol = symbol,
       bidPrice = f(1).toDouble,
-      bidQty = f(2).toDouble,
+      bidQty = Coin(f(2).toDouble),
       askPrice = f(3).toDouble,
-      askQty = f(4).toDouble,
+      askQty = Coin(f(4).toDouble),
       timestamp = f(6).toLong,
     )
     // 历史事件的 localTs 即其历史发生时刻 (= exchangeTs)，不取墙钟：既诚实
@@ -60,7 +60,7 @@ object BinanceCsv:
       exchange = Exchange.Binance,
       symbol = symbol,
       price = line.substring(c0 + 1, c1).toDouble,
-      qty = line.substring(c1 + 1, c2).toDouble,
+      qty = Coin(line.substring(c1 + 1, c2).toDouble),
       isBuyerMaker = line.substring(c4 + 1).trim.equalsIgnoreCase("true"),
       timestamp = line.substring(c3 + 1, c4).toLong,
     )

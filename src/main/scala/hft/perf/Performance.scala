@@ -20,7 +20,7 @@ final case class Performance(
     fees: Double,
     fills: Int,
     roundTrips: Int,
-    position: Quantity,
+    position: Coin,
     since: Timestamp,
     updatedAt: Timestamp,
 )

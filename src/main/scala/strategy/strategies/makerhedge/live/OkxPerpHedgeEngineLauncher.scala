@@ -1,7 +1,7 @@
 package strategy.strategies.makerhedge.live
 import strategy.utils.option.*
 
-import hft.domain.{AccountId, Exchange}
+import hft.domain.{AccountId, Coin, Exchange}
 import hft.engine.{Engine, ExchangeGateway}
 import hft.exchange.okx.{OkxAccountStream, OkxClient, OkxCredentials, OkxMarketStream}
 import strategy.strategies.makerhedge.logic.{AsymHedgeBand, MakerHedgeStrategy}
@@ -56,7 +56,7 @@ import hft.state.{StateManager}
 
     // greeks 陈旧阈值 = 4× 轮询间隔 (连续几次拉取失败即暂停对冲, 不按过期 delta 乱挂)
     val strategy = MakerHedgeStrategy(Exchange.Okx, t.symbol, t.ccy, AsymHedgeBand.byMa(t.tightAtr, t.looseAtr),
-      offsetPct = t.offset, requoteMs = t.requoteMs, gammaAdjust = true, maxGreeksStaleMs = t.greeksPollMs * 4, maxHedgeQty = t.maxHedgeQty)
+      offsetPct = t.offset, requoteMs = t.requoteMs, gammaAdjust = true, maxGreeksStaleMs = t.greeksPollMs * 4, maxHedgeQty = Coin(t.maxHedgeQty))
     // 历史 K 线预热 ATR/均线 (开机即就绪)
     opt.linearKlines(t.symbol, t.klineBar, 64) match
       case Right(bars) => strategy.prewarm(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.klineBar} K线 -> ATR/均线就绪")

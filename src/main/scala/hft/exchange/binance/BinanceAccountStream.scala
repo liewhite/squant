@@ -76,7 +76,7 @@ final class BinanceAccountStream(
     val side = if o.S == "BUY" then Side.Long else Side.Short
     val status = o.X match
       case "NEW"              => OrderStatus.Pending
-      case "PARTIALLY_FILLED" => OrderStatus.PartiallyFilled(o.z.asDouble)
+      case "PARTIALLY_FILLED" => OrderStatus.PartiallyFilled(Coin(o.z.asDouble))
       case "FILLED"           => OrderStatus.Filled
       case "CANCELED" | "EXPIRED" | "EXPIRED_IN_MATCH" => OrderStatus.Cancelled
       case "REJECTED"         => OrderStatus.Rejected("rejected by exchange")
@@ -91,15 +91,15 @@ final class BinanceAccountStream(
       side = side,
       status = status,
       price = o.p.asDouble,
-      quantity = o.q.asDouble,
-      filledQuantity = o.z.asDouble,
-      fillSize = o.l.asDouble,
+      quantity = Coin(o.q.asDouble),
+      filledQuantity = Coin(o.z.asDouble),
+      fillSize = Coin(o.l.asDouble),
       timestamp = o.T,
     )
     bus.publish(Event.at(Topics.OrderUpdate, update, msg.E))
     // 本次有成交 -> 同步发布 Fill 事件，乐观更新仓位
     if o.l.asDouble > 0 then
-      val fill = Fill(AccountId.Live, Exchange.Binance, o.s, side, price = o.L.asDouble, size = o.l.asDouble, timestamp = o.T)
+      val fill = Fill(AccountId.Live, Exchange.Binance, o.s, side, price = o.L.asDouble, size = Coin(o.l.asDouble), timestamp = o.T)
       bus.publish(Event.at(Topics.Fill, fill, msg.E))
 
   private def publishAccountUpdate(msg: AccountUpdateMsg): Unit =
@@ -109,6 +109,6 @@ final class BinanceAccountStream(
       )
     }
     msg.a.P.filter(_.ps == "BOTH").foreach { p =>
-      val position = Position(AccountId.Live, Exchange.Binance, p.s, p.pa.asDouble, p.ep.asDouble, p.up.asDouble)
+      val position = Position(AccountId.Live, Exchange.Binance, p.s, Coin(p.pa.asDouble), p.ep.asDouble, p.up.asDouble)
       bus.publish(Event.at(Topics.Position, position, msg.E))
     }

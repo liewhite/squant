@@ -83,7 +83,7 @@ final class BinanceMarketStream(
       case other             => throw IllegalStateException(s"Unexpected public event '$other': $text")
 
   private def publishTrade(msg: AggTradeMsg): Unit =
-    val trade = MarketTrade(Exchange.Binance, msg.s, msg.p.asDouble, msg.q.asDouble, msg.m, msg.T)
+    val trade = MarketTrade(Exchange.Binance, msg.s, msg.p.asDouble, Coin(msg.q.asDouble), msg.m, msg.T)
     bus.publish(Event.at(Topics.Trade, trade, msg.T))
 
   private def publishBookTicker(msg: BookTickerMsg): Unit =
@@ -91,9 +91,9 @@ final class BinanceMarketStream(
       exchange = Exchange.Binance,
       symbol = msg.s,
       bidPrice = msg.b.asDouble,
-      bidQty = msg.B.asDouble,
+      bidQty = Coin(msg.B.asDouble),
       askPrice = msg.a.asDouble,
-      askQty = msg.A.asDouble,
+      askQty = Coin(msg.A.asDouble),
       timestamp = msg.E,
     )
     bus.publish(Event.at(Topics.Bbo, bbo, msg.E))

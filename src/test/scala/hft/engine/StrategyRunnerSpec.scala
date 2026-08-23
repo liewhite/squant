@@ -5,6 +5,7 @@ import hft.event.{AnyEvent, Event, Interest, Subscription, Topics}
 import hft.exchange.SubscriptionKind
 import hft.state.StateManager
 import hft.strategy.{OutcomeEvent, Strategy}
+import hft.TestUnits.given
 
 /** 策略订阅范围的派生: 框架补齐了什么、又据此向交易所订了什么。 */
 class StrategyRunnerSpec extends munit.FunSuite:
@@ -17,11 +18,11 @@ class StrategyRunnerSpec extends munit.FunSuite:
 
   test("补齐所声明标的的私有回报 —— 策略不该有机会漏订成交"):
     val sub = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
-    val fill = Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, 1.0, 0L))
+    val fill = Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, Coin(1.0), 0L))
     val position = Event.local(Topics.Position, Position(AccountId.Live, ex, "BTCUSDT", 1.0, 100.0, 0.0))
     val orderUpdate = Event.local(
       Topics.OrderUpdate,
-      OrderUpdate(AccountId.Live, "1", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Filled, 100.0, 1.0, 1.0, 1.0, 0L),
+      OrderUpdate(AccountId.Live, "1", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Filled, 100.0, Coin(1.0), Coin(1.0), Coin(1.0), 0L),
     )
     assert(sub.accepts(fill), "Fill 必须自动补齐: 漏订会让本地仓位与交易所长期发散")
     assert(sub.accepts(position))
@@ -42,7 +43,7 @@ class StrategyRunnerSpec extends munit.FunSuite:
 
   test("不补齐未声明标的的任何东西"):
     val sub = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
-    val ethFill = Event.local(Topics.Fill, Fill(AccountId.Live, ex, "ETHUSDT", Side.Long, 100.0, 1.0, 0L))
+    val ethFill = Event.local(Topics.Fill, Fill(AccountId.Live, ex, "ETHUSDT", Side.Long, 100.0, Coin(1.0), 0L))
     assert(!sub.accepts(ethFill))
 
   test("无任何声明的策略只收时钟"):
@@ -73,7 +74,7 @@ class StrategyRunnerSpec extends munit.FunSuite:
     // 拉去做持仓对齐、要求 SymbolMeta —— 它根本不交易那个标的。
     val sub = subOf(Set(Interest.Keyed(StrategyRunnerSpec.AlphaSignal, Set(btc))))
     assertEquals(sub.instruments, Set.empty[Instrument])
-    assert(!sub.accepts(Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, 1.0, 0L))))
+    assert(!sub.accepts(Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, Coin(1.0), 0L))))
     assertEquals(SubscriptionKind.from(sub), Set.empty[(Exchange, SubscriptionKind)])
     // 但它自己声明的那条依然收得到
     assert(sub.accepts(Event.local(StrategyRunnerSpec.AlphaSignal, StrategyRunnerSpec.Score(btc, 1.0))))

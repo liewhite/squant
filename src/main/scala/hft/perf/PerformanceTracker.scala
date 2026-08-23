@@ -56,10 +56,10 @@ final class PerformanceTracker(feeRate: Double, publishIntervalMs: Long = 1000) 
   private def applyFill(fill: Fill, now: Timestamp): Unit =
     val key = AccountInstrument(fill.account, Instrument(fill.exchange, fill.symbol))
     val ledger = ledgers.getOrElse(key, Ledger.empty(fill.account, 0.0))
-    val before = ledger.positions.get(fill.symbol).map(_.size).getOrElse(0.0)
-    val fee = fill.price * fill.size * feeRate
+    val before = ledger.positions.get(fill.symbol).map(_.size).getOrElse(Coin.Zero)
+    val fee = fill.size.notional(fill.price) * feeRate
     val next = ledger.applyFill(fill.exchange, fill.symbol, fill.side, fill.price, fill.size, fee)
-    val after = next.positions.get(fill.symbol).map(_.size).getOrElse(0.0)
+    val after = next.positions.get(fill.symbol).map(_.size).getOrElse(Coin.Zero)
     ledgers(key) = next
     dirty += key
 
@@ -67,9 +67,9 @@ final class PerformanceTracker(feeRate: Double, publishIntervalMs: Long = 1000) 
     // 一次往返 = 一次下注有了结果：仓位归零算，**反手也算** ——
     // 反手那一笔已经把原仓位平掉、实现了盈亏。只认"归零"的话，
     // 一个始终反手换向、从不落平的策略 roundTrips 恒为 0，判据的样本量永远不够、永远不晋升。
-    val flat = math.abs(after) <= Position.Epsilon
-    val reversed = before * after < 0
-    val closed = math.abs(before) > Position.Epsilon && (flat || reversed)
+    val flat = after.isZero
+    val reversed = before.signum * after.signum < 0
+    val closed = before.nonZero && (flat || reversed)
     stats(key) = prev.copy(
       fills = prev.fills + 1,
       roundTrips = prev.roundTrips + (if closed then 1 else 0),
@@ -93,7 +93,7 @@ final class PerformanceTracker(feeRate: Double, publishIntervalMs: Long = 1000) 
           fees = st.fees,
           fills = st.fills,
           roundTrips = st.roundTrips,
-          position = ledger.positions.get(key.instrument.symbol).map(_.size).getOrElse(0.0),
+          position = ledger.positions.get(key.instrument.symbol).map(_.size).getOrElse(Coin.Zero),
           since = st.since,
           updatedAt = now,
         ),
@@ -105,5 +105,5 @@ final class PerformanceTracker(feeRate: Double, publishIntervalMs: Long = 1000) 
     ledgers.get(key).map { ledger =>
       val st = stats.getOrElse(key, Stats(0, 0, 0.0, 0L))
       Performance(key.account, key.instrument, ledger.cash, st.fees, st.fills, st.roundTrips,
-        ledger.positions.get(key.instrument.symbol).map(_.size).getOrElse(0.0), st.since, 0L)
+        ledger.positions.get(key.instrument.symbol).map(_.size).getOrElse(Coin.Zero), st.since, 0L)
     }

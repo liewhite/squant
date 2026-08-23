@@ -4,6 +4,7 @@ package hft.backtest
 import java.io.ByteArrayOutputStream
 import java.util.zip.{ZipEntry, ZipOutputStream}
 import hft.event.Topics
+import hft.TestUnits.given
 
 /** CSV (zip) 解析单测：表头探测 + 字段映射 (bookTicker / trades)。 */
 class BinanceCsvSpec extends munit.FunSuite:
@@ -48,7 +49,7 @@ class BinanceCsvSpec extends munit.FunSuite:
     evs.head.as(Topics.Trade) match
       case Some(t) =>
         assertEquals(t.price, 100.5)
-        assertEquals(t.qty, 0.5)
+        assertEquals(t.qty.value, 0.5)
         assertEquals(t.isBuyerMaker, true)
         assertEquals(t.timestamp, 1700000000002L)
       case None => fail(s"expected Trade, got ${evs.head}")

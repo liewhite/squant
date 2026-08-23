@@ -10,6 +10,7 @@ import ox.{Ox, fork, supervised}
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.jdk.CollectionConverters.*
 import hft.state.StateManager
+import hft.TestUnits.given
 
 /** 虚拟柜台撮合与延迟的测试，以及"策略无感知"的端到端集成。 */
 class SimulatedExchangeSpec extends munit.FunSuite:
@@ -19,7 +20,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
 
   /** 测试用极简策略: 收到首个 BBO 即在买一下方 offset 处挂一张 PostOnly 限价买单 (之后不再下单)。
     * 用于端到端验证"策略无感知地下单/成交", 不依赖任何业务策略实现。 */
-  private class OneShotMakerStrategy(ex: Exchange, symbol: Symbol, offsetRatio: Double, orderSize: Quantity) extends Strategy:
+  private class OneShotMakerStrategy(ex: Exchange, symbol: Symbol, offsetRatio: Double, orderSize: Coin) extends Strategy:
     private var placed = false
     override def orderTimeoutMs: Long = 60_000
     override def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument(ex, symbol)) { (b, ctx, _) =>
@@ -40,14 +41,14 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     override def start(eventBus: EventBus)(using Ox): Unit = bus = eventBus
     override def subscribe(kinds: Set[SubscriptionKind]): Unit = ()
     def emitBbo(bid: Price, ask: Price, ts: Timestamp): Unit =
-      bus.publish(Event.at(Topics.Bbo, BBO(Exchange.Binance, sym, bid, 1.0, ask, 1.0, ts), ts))
+      bus.publish(Event.at(Topics.Bbo, BBO(Exchange.Binance, sym, bid, Coin(1.0), ask, Coin(1.0), ts), ts))
 
   /** 只提供 symbol 元数据的桩 REST 客户端 (其余账户接口由柜台覆盖, 不应被调用) */
   private class StubPublicClient extends ExchangeClient:
     override def exchange: Exchange = Exchange.Binance
     override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] = Right(Vector(meta))
     private def unused = Left(ExchangeError.Other("stub: not used"))
-    override def placeOrder(order: Order) = unused
+    override def placeOrder(order: ExchangeOrder) = unused
     override def cancelOrder(symbol: Symbol, ref: OrderRef) = unused
     override def fetchPendingOrders(symbol: Symbol) = unused
     override def setLeverage(symbol: Symbol, leverage: Int) = unused
@@ -67,8 +68,9 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   private def orderStatuses(q: ConcurrentLinkedQueue[AnyEvent]): Vector[OrderStatus] =
     q.asScala.flatMap(_.as(Topics.OrderUpdate)).map(_.status).toVector
 
-  private def limitOrder(side: Side, price: Price, tif: TimeInForce, cid: String): Order =
-    Order("", Exchange.Binance, sym, side, OrderType.Limit(price, tif), 0.002, reduceOnly = false, clientOrderId = cid)
+  /** 柜台扮演交易所，收的是**已换算成交易所格式**的订单 */
+  private def limitOrder(side: Side, price: Price, tif: TimeInForce, cid: String): ExchangeOrder =
+    ExchangeOrder(Exchange.Binance, sym, side, OrderType.Limit(price, tif), Contracts(0.002), reduceOnly = false, clientOrderId = cid)
 
   test("挂单成交判定: BBO 越过买单价 -> 成交于挂单价, 仓位增加"):
     supervised:
@@ -90,8 +92,8 @@ class SimulatedExchangeSpec extends munit.FunSuite:
       val f = fills(q)
       assertEquals(f.map(_.side), Vector(Side.Long))
       assertEquals(f.head.price, 49995.0) // maker 成交价 = 挂单价
-      assertEquals(f.head.size, 0.002)
-      assertEquals(sim.fetchPositions().toOption.get.map(_.size), Vector(0.002))
+      assertEquals(f.head.size.value, 0.002)
+      assertEquals(sim.fetchPositions().toOption.get.map(_.size.value), Vector(0.002))
       sim.shutdown()
 
   test("挂单成交判定: BBO 越过卖单价 -> 成交, 仓位转空"):
@@ -110,7 +112,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
 
       val f = fills(q)
       assertEquals(f.map(_.side), Vector(Side.Short))
-      assertEquals(sim.fetchPositions().toOption.get.map(_.size), Vector(-0.002))
+      assertEquals(sim.fetchPositions().toOption.get.map(_.size.value), Vector(-0.002))
       sim.shutdown()
 
   test("PostOnly 到达时已可成交 -> 拒单 (不吃单, 不成交)"):
@@ -166,7 +168,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
 
       // 仓位在柜台内部已即时更新 (撮合不延迟)
       Thread.sleep(80)
-      assertEquals(sim.fetchPositions().toOption.get.map(_.size), Vector(0.002), "柜台内部应即时成交")
+      assertEquals(sim.fetchPositions().toOption.get.map(_.size.value), Vector(0.002), "柜台内部应即时成交")
       // 但成交回报尚未送达策略侧 (延迟 250ms)
       assert(fills(q).isEmpty, "延迟窗口内策略不应看到成交回报")
 
@@ -199,3 +201,26 @@ class SimulatedExchangeSpec extends munit.FunSuite:
       val pos = sim.fetchPositions().toOption.get
       assert(pos.exists(_.size > 0), s"买单应成交形成多头, 实际仓位=$pos")
       sim.shutdown()
+
+  test("contractSize != 1: 柜台扮演交易所, 收张数、撮合与回报用币本位"):
+    // 真实网关在回报侧把张数还原成币本位, 柜台作为它的替身必须对称 ——
+    // 否则 contractSize != 1 的交易所上, 模拟盘的成交量与实盘差一个倍数。
+    supervised:
+      val ctVal = 0.01
+      val ctMeta = SymbolMeta(Exchange.Binance, sym, tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = ctVal)
+      val market = FakeMarketStream()
+      class CtClient extends StubPublicClient:
+        override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] = Right(Vector(ctMeta))
+      val sim = SimulatedExchange(market, CtClient(), SimConfig(0, 0, 10_000), AccountId.Live)
+      val bus = EventBus()
+      val q = collect(bus)
+      sim.start(bus)
+      market.emitBbo(50000, 50001, 1)
+
+      // 下 3 张 = 3 × 0.01 = 0.03 币
+      sim.placeOrder(ExchangeOrder(Exchange.Binance, sym, Side.Long, OrderType.Limit(49995.0, TimeInForce.PostOnly), Contracts(3.0), reduceOnly = false, "c1"))
+      Thread.sleep(80)
+      market.emitBbo(49990, 49994, 2) // 越价成交
+      Thread.sleep(80)
+
+      assertEqualsDouble(fills(q).head.size.value, 3.0 * ctVal, 1e-12, "回报必须是币本位")

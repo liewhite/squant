@@ -154,18 +154,8 @@ final class Engine private (
         case Right(updates) =>
           if updates.nonEmpty then
             logger.info(s"Fetched ${updates.size} existing pending orders: $exchange $symbol")
-          updates.foreach { update =>
-            // REST 返回的数量是合约张数，转换为币本位
-            val meta = symbolMetas.getOrElse(
-              (exchange, symbol),
-              throw IllegalStateException(s"SymbolMeta not found for $exchange $symbol"),
-            )
-            val converted = update.copy(
-              quantity = meta.qtyToCoin(update.quantity),
-              filledQuantity = meta.qtyToCoin(update.filledQuantity),
-            )
-            bus.publish(Event.local(Topics.OrderUpdate, converted))
-          }
+          // 数量已由适配层在解析时换成币本位 (类型保证)，这里不再转第二次
+          updates.foreach(update => bus.publish(Event.local(Topics.OrderUpdate, update)))
     }
 
 object Engine:
@@ -203,7 +193,7 @@ object Engine:
 
     // 消费者先起、生产者后起: 事件开始流动时下游必须已经在总线上, 否则最早的那批事件没人接。
     // 这也是停机顺序的反面 —— 生产者先停, 它们收尾时补发的最后一批事件仍有人消费。
-    system.spawn(OutcomeProcessor(clients, dryRun, AccountId.Live))
+    system.spawn(OutcomeProcessor(clients, symbolMetas, dryRun, AccountId.Live))
     system.spawn(Clock(clockIntervalMs))
     system.spawn(AccountRefresher(clients.values, accountRefreshMs))
 

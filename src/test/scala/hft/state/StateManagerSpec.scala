@@ -3,6 +3,7 @@ package hft.state
 import hft.domain.*
 import hft.state.{StateManager, SymbolState}
 import hft.event.{Event, Topics}
+import hft.TestUnits.given
 
 class StateManagerSpec extends munit.FunSuite:
   private val t0 = 1_700_000_000_000L
@@ -36,7 +37,7 @@ class StateManagerSpec extends munit.FunSuite:
 
   test("symbol 事件路由到对应 SymbolState"):
     val state = StateManager(List("BTCUSDT", "ETHUSDT"), orderTimeoutMs = 5000)
-    val bbo = BBO(Exchange.Binance, "ETHUSDT", 1600.0, 1.0, 1600.1, 1.0, t0)
+    val bbo = BBO(Exchange.Binance, "ETHUSDT", 1600.0, Coin(1.0), 1600.1, Coin(1.0), t0)
     state.apply(Event.at(Topics.Bbo, bbo, t0))
     assertEquals(state.symbolState("ETHUSDT").flatMap(_.bbo(Exchange.Binance)), Some(bbo))
     assertEquals(state.symbolState("BTCUSDT").flatMap(_.bbo(Exchange.Binance)), None)
@@ -62,7 +63,7 @@ class StateManagerSpec extends munit.FunSuite:
     // 归属校验在 StateManager (按 Instrument 定位 SymbolState)，不在 SymbolState:
     // 路由键由载荷派生，事件到了这里 symbol 必然已注册，找不到就是路由坏了。
     val state = StateManager(Set("BTCUSDT"), orderTimeoutMs = 0L)
-    val other = BBO(Exchange.Binance, "ETHUSDT", 1.0, 1.0, 2.0, 1.0, t0)
+    val other = BBO(Exchange.Binance, "ETHUSDT", 1.0, Coin(1.0), 2.0, Coin(1.0), t0)
     intercept[RuntimeException] {
       state.apply(Event.at(Topics.Bbo, other, t0))
     }
@@ -74,14 +75,14 @@ class StateManagerSpec extends munit.FunSuite:
     val state = StateManager(Set("BTCUSDT"), orderTimeoutMs = 0L)
     val ex = Exchange.Binance
 
-    state.apply(Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, 2.0, t0)))
-    assertEqualsDouble(state.symbolState("BTCUSDT").get.positionSize(ex), 2.0, 1e-12, "Fill 必须落到 SymbolState")
+    state.apply(Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, Coin(2.0), t0)))
+    assertEqualsDouble(state.symbolState("BTCUSDT").get.positionSize(ex).value, 2.0, 1e-12, "Fill 必须落到 SymbolState")
 
     val order = Order("", ex, "BTCUSDT", Side.Long, OrderType.Limit(99.0, TimeInForce.GTC), 1.0, reduceOnly = false, clientOrderId = "c1")
     state.addPendingOrder(order, t0)
     state.apply(Event.local(
       Topics.OrderUpdate,
-      OrderUpdate(AccountId.Live, "EX-9", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Pending, 99.0, 1.0, 0.0, 0.0, t0),
+      OrderUpdate(AccountId.Live, "EX-9", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Pending, 99.0, Coin(1.0), Coin(0.0), Coin(0.0), t0),
     ))
     assertEquals(
       state.symbolState("BTCUSDT").get.pendingOrders.head.order.id,
@@ -92,5 +93,5 @@ class StateManagerSpec extends munit.FunSuite:
   test("行情仍按 Instrument 路由 (无账户维度), 同样要落到 SymbolState"):
     val state = StateManager(Set("BTCUSDT"), orderTimeoutMs = 0L)
     val ex = Exchange.Binance
-    state.apply(Event.at(Topics.Bbo, BBO(ex, "BTCUSDT", 100.0, 1.0, 100.1, 1.0, t0), t0))
+    state.apply(Event.at(Topics.Bbo, BBO(ex, "BTCUSDT", 100.0, Coin(1.0), 100.1, Coin(1.0), t0), t0))
     assertEquals(state.symbolState("BTCUSDT").flatMap(_.bbo(ex)).map(_.bidPrice), Some(100.0))

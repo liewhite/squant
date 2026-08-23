@@ -97,11 +97,34 @@ object AlphaSignal extends Topic[Symbol, Score]("alphaSignal"):
 **影子账户的启动对齐**：它从零开始，没有历史仓位与挂单要恢复，唯一的初值（净值）由柜台
 周期发布。绝不能拿真实交易所的持仓去对齐一个模拟账户 —— 那是别人的仓位。
 
-**单位的边界职责**：进入撮合的订单是**交易所格式**（合约张数，`StrategyRunner` 换算过），
-而账本、仓位、回报一律**币本位** —— 真实网关正是在回报侧 `qtyToCoin` 还原的。虚拟柜台
-必须对称，否则 `contractSize ≠ 1` 的交易所上影子盘的成交量、盈亏、仓位整体差一个
-`contractSize` 倍，与实盘不可比。这个还原收在 `SimState.onOrderArrived` 一处入口。
-（Binance `contractSize = 1`，会掩盖这类症状 —— 只用它测是测不出来的。）
+**单位由类型保证**：`Coin`（币本位）与 `Contracts`（合约张数）是两个 opaque type，
+运行时都是 `double`（零开销），但**不可互换**。
+
+- 框架内一律 `Coin` —— 策略、账本、仓位、回报、撮合、`OrderIntent`。
+- `Contracts` 只出现在 exchange 适配层内部：下单前 `toContracts`、解析回报时 `toCoin`。
+- `ExchangeClient.placeOrder` 只收 `ExchangeOrder`（数量是 `Contracts`），于是"忘了换算
+  就直接下单"在类型上写不出来。
+- 取整分两步：`roundToExchangePrecision` 把数量对齐到交易所精度但**仍是币本位**
+  （回测与实盘因此看到同一个数），`toExchangeOrder` 才换成张数。
+
+这条边界此前靠惯例：OKX 适配层做了 `qtyToCoin`，Binance/Bybit **根本没做** —— 只是它们
+`contractSize = 1` 掩盖着，虚拟柜台漏做同样被掩盖。现在这类混用一律编译失败。
+
+代价是跨概念运算要显式：`qty.notional(price)` 而不是 `qty * price`（数量 × 价格不再是数量）。
+`Coin` 不设 `<: Double` 上界正是为此 —— 有上界时 `Coin + Coin` 会优先匹配 `Double` 的 `+`
+并悄悄退化，等于白设。实测代价很小：三个业务策略加起来只多了 10 处显式解包。
+
+**换算精度**：发单路径的换算全程走 BigDecimal（`roundCoinDown` / `toExchangeContracts`）。
+裸浮点除法会失真到**整整一档** —— `0.3 / 0.1 = 2.9999999999999996`，FLOOR 之后是 2 而不是 3；
+`0.07 / 0.01 = 7.000000000000001`，而 client 的格式化不再取整，交易所会按 lot size 拒单。
+换回张数时用 HALF_UP 而非 FLOOR：尾差两个方向都可能出现。
+
+解析与展示路径（`toContracts` / `toCoin`）保持裸浮点 —— 那里的值本身就是近似的，
+且行情解析是热路径。
+
+**每个适配层只声明一种原生单位约定**：Binance USDⓈ-M 与 Bybit linear 的原生数量就是币本位
+（`contractSize = 1`），WS 与 REST 两条路径统一直接 `Coin`；OKX 原生是张数，两条路径统一
+`toCoin`。同一适配层对"本所原生单位是什么"给两个答案，正是这次要消灭的病。
 
 ### 绩效与晋升调度
 

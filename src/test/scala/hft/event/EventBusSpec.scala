@@ -2,6 +2,7 @@ package hft.event
 
 import hft.domain.*
 import ox.supervised
+import hft.TestUnits.given
 
 /** 总线投递: 按 (topic, key) 精确路由，且与 [[Subscription.accepts]] 判据同源。 */
 class EventBusSpec extends munit.FunSuite:
@@ -10,7 +11,7 @@ class EventBusSpec extends munit.FunSuite:
   private val eth = Instrument(ex, "ETHUSDT")
   private val t0 = 1_700_000_000_000L
 
-  private def bboOf(i: Instrument) = BBO(i.exchange, i.symbol, 100.0, 1.0, 100.1, 1.0, t0)
+  private def bboOf(i: Instrument) = BBO(i.exchange, i.symbol, 100.0, Coin(1.0), 100.1, Coin(1.0), t0)
   private def tradeOf(i: Instrument) = MarketTrade(i.exchange, i.symbol, 1.0, 1.0, isBuyerMaker = false, t0)
 
   test("按 key 定向: 只有订阅了该标的的订阅者收到"):
@@ -62,10 +63,10 @@ class EventBusSpec extends munit.FunSuite:
         Interest.Keyed(Topics.Fill, Set(AccountInstrument(AccountId.Live, btc))),
         Interest.Keyed(Topics.Fill, Set(AccountInstrument(AccountId.Live, btc), AccountInstrument(AccountId.Live, eth))),
       ))
-      val btcFill = Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, 1.0, t0)
+      val btcFill = Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, Coin(1.0), t0)
       bus.publish(Event.local(Topics.Fill, btcFill))
       // 栅栏: 若上一条被投了两次, 这里读到的会是重复的 BTC 而不是 ETH
-      bus.publish(Event.local(Topics.Fill, Fill(AccountId.Live, ex, "ETHUSDT", Side.Long, 100.0, 1.0, t0)))
+      bus.publish(Event.local(Topics.Fill, Fill(AccountId.Live, ex, "ETHUSDT", Side.Long, 100.0, Coin(1.0), t0)))
       assertEquals(sub.events.receive().as(Topics.Fill).map(_.symbol), Some("BTCUSDT"))
       assertEquals(sub.events.receive().as(Topics.Fill).map(_.symbol), Some("ETHUSDT"))
 

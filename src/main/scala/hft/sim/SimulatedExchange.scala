@@ -70,8 +70,13 @@ final class SimulatedExchange(
   // ---- actor 基础设施 ----
   private val mailbox = Channel.unlimited[Command]
   /** 唯一写者 = actor 线程；读者 = REST 查询线程。不可变快照 + @volatile 保证可见性 */
-  @volatile private var state: SimState = SimState.empty(account, Map.empty, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
+  @volatile private var state: SimState = SimState.empty(account, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   @volatile private var strategyBus: EventBus = scala.compiletime.uninitialized
+
+  /** 合约规格：柜台扮演交易所，收到的是张数，要自己换回币本位 */
+  @volatile private var metas: Map[Symbol, SymbolMeta] = Map.empty
+  private def metaOf(symbol: Symbol): SymbolMeta =
+    metas.getOrElse(symbol, sys.error(s"SimulatedExchange: SymbolMeta not found for $symbol"))
 
   private val orderIdSeq = AtomicLong(1)
   private val started = AtomicBoolean(false)
@@ -102,10 +107,9 @@ final class SimulatedExchange(
     if started.compareAndSet(false, true) then
       // 合约规格从自己的 client 取 —— 柜台扮演的是交易所, 交易所本就知道自己的合约规格,
       // 不该让装配方再拉一遍。撮合用它把订单还原成币本位 (见 SimState.onOrderArrived)。
-      val metas = publicClient.fetchAllSymbolMetas() match
-        case Right(ms) => ms.map(m => (m.exchange, m.symbol) -> m).toMap
+      metas = publicClient.fetchAllSymbolMetas() match
+        case Right(ms) => ms.map(m => m.symbol -> m).toMap
         case Left(e)   => sys.error(s"SimulatedExchange 无法加载合约规格: ${e.message}")
-      state = state.copy(symbolMetas = metas)
       // 上游真实行情发布到内部 rawBus；转发线程把行情即时投入 mailbox (撮合用实时行情)
       market.start(rawBus)
       // 只订公共行情：柜台撮合的输入就是行情，别的 topic 与它无关
@@ -143,10 +147,16 @@ final class SimulatedExchange(
 
   // ==================== ExchangeClient: 私有 REST (模拟) ====================
 
-  override def placeOrder(order: Order): Either[ExchangeError, OrderId] =
+  override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
     val orderId = orderIdSeq.getAndIncrement().toString
     // 下单在途延迟后作为命令进入 mailbox
-    after(config.orderToExchangeDelayMs) { mailbox.send(Command.OrderArrived(order, orderId)) }
+    // 柜台扮演交易所：收的是张数，进撮合前换回币本位 —— 与真实网关在回报侧还原对称
+    val coinOrder = Order(
+      id = "", exchange = order.exchange, symbol = order.symbol, side = order.side,
+      orderType = order.orderType, quantity = metaOf(order.symbol).toCoin(order.quantity),
+      reduceOnly = order.reduceOnly, clientOrderId = order.clientOrderId,
+    )
+    after(config.orderToExchangeDelayMs) { mailbox.send(Command.OrderArrived(coinOrder, orderId)) }
     Right(orderId)
 
   override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
@@ -160,7 +170,7 @@ final class SimulatedExchange(
   override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] =
     val s = state
     Right(s.resting.values.filter(_.symbol == symbol).map { o =>
-      OrderUpdate(account, o.orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Pending, o.limitPrice, o.quantity, 0.0, 0.0, nowMs)
+      OrderUpdate(account, o.orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Pending, o.limitPrice, o.quantity, Coin.Zero, Coin.Zero, nowMs)
     }.toVector)
 
   override def setLeverage(symbol: Symbol, leverage: Int): Either[ExchangeError, Unit] = Right(())

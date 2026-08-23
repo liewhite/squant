@@ -19,6 +19,8 @@ import org.slf4j.LoggerFactory
   */
 final class OutcomeProcessor(
     clients: Map[Exchange, ExchangeClient],
+    /** 发往交易所前要把币本位换成合约张数，见 [[OrderConversion.toExchangeOrder]] */
+    symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     dryRun: Boolean,
     /** 本出口负责的账户 (真实交易所出口即 [[AccountId.Live]])。无默认值，理由同 [[Executor]] */
     account: AccountId,
@@ -64,7 +66,7 @@ final class OutcomeProcessor(
       val client = requireClient(order.exchange)
       logger.info(s"Placing order: ${describe(order)} signal=$comment")
       ctx.fork {
-        client.placeOrder(order) match
+        client.placeOrder(OrderConversion.toExchangeOrder(order, symbolMetas)) match
           case Right(orderId) =>
             // 订单确认 (Pending/Filled) 以私有流推送为准，这里只记录
             logger.info(
@@ -117,9 +119,9 @@ final class OutcomeProcessor(
       side = order.side,
       status = OrderStatus.Error(reason),
       price = 0.0,
-      quantity = 0.0,
-      filledQuantity = 0.0,
-      fillSize = 0.0,
+      quantity = Coin.Zero,
+      filledQuantity = Coin.Zero,
+      fillSize = Coin.Zero,
       timestamp = nowMs,
     )
     ctx.publish(Event.local(Topics.OrderUpdate, update))

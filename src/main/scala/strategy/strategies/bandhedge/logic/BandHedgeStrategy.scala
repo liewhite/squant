@@ -37,7 +37,7 @@ final class BandHedgeStrategy(
     /** 均线周期 (根)，供 maBias = sign(px − MA) (默认 MA20) */
     maSmaPeriod: Int = 20,
     barIntervalMs: Long = 3_600_000L,
-    minHedgeQty: Quantity = 0.001,
+    minHedgeQty: Coin = Coin(0.001),
 ) extends Strategy:
 
   private val klines =
@@ -80,8 +80,8 @@ final class BandHedgeStrategy(
       val crossed = (px - center > upBand) || (center - px > downBand)
       if !crossed then Vector.empty
       else
-        val netDelta = greeks.delta + symbolState.positionSize(exchange)
-        val qty = math.abs(netDelta)
+        val netDelta = greeks.delta + symbolState.positionSize(exchange).value // 同为币本位敞口, 解包比较
+        val qty = Coin(math.abs(netDelta))
         if qty < minHedgeQty then Vector.empty
         else
           val side = if netDelta > 0 then Side.Short else Side.Long // 净多 -> 卖, 净空 -> 买
@@ -89,7 +89,7 @@ final class BandHedgeStrategy(
           Vector(
             ctx.place(
               Order("", exchange, symbol, side, OrderType.Market, qty, reduceOnly = false, clientOrderId = ""),
-              f"band_hedge | $side netDelta=$netDelta%.4f qty=$qty%.4f px=$px%.2f atr=$atr%.2f up=$upBand%.2f down=$downBand%.2f macdBias=${hc.macdBias} maBias=${hc.maBias} volR=${hc.volRatio}%.2f",
+              f"band_hedge | $side netDelta=$netDelta%.4f qty=${qty.value}%.4f px=$px%.2f atr=$atr%.2f up=$upBand%.2f down=$downBand%.2f macdBias=${hc.macdBias} maBias=${hc.maBias} volR=${hc.volRatio}%.2f",
             )
           )
     ).getOrElse(Vector.empty)

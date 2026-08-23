@@ -6,6 +6,7 @@ import ox.supervised
 
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
 import scala.jdk.CollectionConverters.*
+import hft.TestUnits.given
 
 /** actor 生命周期：树形停机、收尾、退订、fail-fast。 */
 class ActorSystemSpec extends munit.FunSuite:
@@ -13,7 +14,7 @@ class ActorSystemSpec extends munit.FunSuite:
   private val btc = Instrument(ex, "BTCUSDT")
   private val t0 = 1_700_000_000_000L
 
-  private def bbo(px: Double = 100.0) = BBO(ex, "BTCUSDT", px, 1.0, px + 0.1, 1.0, t0)
+  private def bbo(px: Double = 100.0) = BBO(ex, "BTCUSDT", px, Coin(1.0), px + 0.1, Coin(1.0), t0)
 
   /** 记录收到的事件；可选地在停机时补发一条 */
   private class Recorder(

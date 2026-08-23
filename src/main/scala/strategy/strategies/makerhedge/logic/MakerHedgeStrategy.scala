@@ -40,9 +40,9 @@ final class MakerHedgeStrategy(
     /** greeks 陈旧阈值 (ms): >0 时, greeks 距今超过它则暂停对冲 (防按过期 delta 乱挂); 0=不限 (回测默认) */
     maxGreeksStaleMs: Long = 0L,
     barIntervalMs: Long = 3_600_000L,
-    minHedgeQty: Quantity = 0.001,
-    /** 单笔对冲张数硬上限 (sanity): 超出则不下单 + 告警 (防 delta/gamma 计算 bug 误下巨单)。默认不限 (回测) */
-    maxHedgeQty: Quantity = Double.MaxValue,
+    minHedgeQty: Coin = Coin(0.001),
+    /** 单笔对冲数量硬上限 (币本位) (sanity): 超出则不下单 + 告警 (防 delta/gamma 计算 bug 误下巨单)。默认不限 (回测) */
+    maxHedgeQty: Coin = Coin(Double.MaxValue),
 ) extends Strategy:
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[MakerHedgeStrategy])
   private var warnCnt = 0L
@@ -141,10 +141,10 @@ final class MakerHedgeStrategy(
                 else
                   // gamma 一阶修正: 两次 greeks 间用现价相对基准价刷新 delta (tick 级)
                   val gammaAdj = if gammaAdjust && !greeksRefMid.isNaN then greeks.gamma * (px - greeksRefMid) else 0.0
-                  val netDelta = greeks.delta + gammaAdj + ss.positionSize(exchange)
+                  val netDelta = greeks.delta + gammaAdj + ss.positionSize(exchange).value
                   val qty = math.abs(netDelta)
-                  if qty < minHedgeQty then Vector.empty
-                  else if qty > maxHedgeQty then
+                  if qty < minHedgeQty.value then Vector.empty
+                  else if qty > maxHedgeQty.value then
                     warnThrottled(s"对冲量 $qty 超硬上限 $maxHedgeQty -> 不下单 (疑似 delta/gamma bug, 请查)")
                     Vector.empty
                   else
@@ -159,7 +159,7 @@ final class MakerHedgeStrategy(
                     awaitingAck = true
                     Vector(
                       ctx.place(
-                        Order("", exchange, symbol, side, OrderType.Limit(limitPx, TimeInForce.PostOnly), qty, reduceOnly = false, clientOrderId = ""),
+                        Order("", exchange, symbol, side, OrderType.Limit(limitPx, TimeInForce.PostOnly), Coin(qty), reduceOnly = false, clientOrderId = ""),
                         f"maker_hedge | $side qty=$qty%.4f limit=$limitPx%.2f px=$px%.2f netDelta=$netDelta%.4f maBias=$maBias band=($up%.2f,$down%.2f)",
                       )
                     )

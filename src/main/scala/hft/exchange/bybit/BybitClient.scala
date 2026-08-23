@@ -92,7 +92,9 @@ final class BybitClient(
       }
     loop(None, Vector.empty)
 
-  override def placeOrder(order: Order): Either[ExchangeError, OrderId] =
+
+
+  override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
     val (ordType, pxField) = order.orderType match
       case OrderType.Market => ("Market", "")
       case OrderType.Limit(price, tif) =>
@@ -100,7 +102,7 @@ final class BybitClient(
     val reduceField = if order.reduceOnly then ""","reduceOnly":true""" else ""
     val linkField = if order.clientOrderId.nonEmpty then s""","orderLinkId":"${order.clientOrderId}"""" else ""
     val body =
-      s"""{"category":"linear","symbol":"${order.symbol}","side":"${sideToParam(order.side)}","orderType":"$ordType","qty":"${fmt(order.quantity)}"$pxField$reduceField$linkField}"""
+      s"""{"category":"linear","symbol":"${order.symbol}","side":"${sideToParam(order.side)}","orderType":"$ordType","qty":"${fmt(order.quantity.value)}"$pxField$reduceField$linkField}"""
     signedPost[OrderCreateResp]("/v5/order/create", body).flatMap { resp =>
       ensureOk(resp.retCode, resp.retMsg).flatMap { _ =>
         if resp.result.orderId.nonEmpty then Right(resp.result.orderId)
@@ -126,7 +128,7 @@ final class BybitClient(
       ensureOk(resp.retCode, resp.retMsg).map { _ =>
         resp.result.list.iterator.flatMap { d =>
           fromBybit(d.symbol).map { sym =>
-            val filled = d.cumExecQty.asDouble
+            val filled = Coin(d.cumExecQty.asDouble)
             OrderUpdate(
               account = AccountId.Live,
               orderId = d.orderId,
@@ -136,9 +138,9 @@ final class BybitClient(
               side = sideFromBybit(d.side),
               status = mapOrderStatus(d.orderStatus, filled),
               price = d.price.asDoubleOrZero,
-              quantity = d.qty.asDouble,
+              quantity = Coin(d.qty.asDouble),
               filledQuantity = filled,
-              fillSize = 0.0,
+              fillSize = Coin.Zero,
               timestamp = nowMs,
             )
           }
@@ -174,10 +176,12 @@ final class BybitClient(
         ensureOk(resp.retCode, resp.retMsg).map { _ =>
           resp.result.list.iterator.flatMap { d =>
             fromBybit(d.symbol).map { sym =>
+              // Bybit linear 的原生数量就是币本位 (contractSize = 1)，与 WS 路径一致
+              val absSize = Coin(d.size.asDouble)
               val signedSize = d.side match
-                case "Buy"  => d.size.asDouble
-                case "Sell" => -d.size.asDouble
-                case _      => 0.0 // 空仓 side=""
+                case "Buy"  => absSize
+                case "Sell" => -absSize
+                case _      => Coin.Zero // 空仓 side=""
               Position(
                 account = AccountId.Live,
                 exchange = Exchange.Bybit,

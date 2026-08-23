@@ -1,8 +1,5 @@
 package hft.domain
 
-/** 数量类型 (持仓数量、订单数量) */
-type Quantity = Double
-
 /** 价格类型 */
 type Price = Double
 

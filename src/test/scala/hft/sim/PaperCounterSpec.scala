@@ -8,6 +8,7 @@ import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.jdk.CollectionConverters.*
+import hft.TestUnits.given
 
 /** 虚拟柜台：与实盘并行的影子账户。 */
 class PaperCounterSpec extends munit.FunSuite:
@@ -19,7 +20,7 @@ class PaperCounterSpec extends munit.FunSuite:
   /** contractSize = 1 的常规标的 */
   private val metas1 = Map((ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0))
 
-  private def bbo(bid: Double, ask: Double, ts: Long = 0L) = BBO(ex, sym, bid, 1.0, ask, 1.0, ts)
+  private def bbo(bid: Double, ask: Double, ts: Long = 0L) = BBO(ex, sym, bid, Coin(1.0), ask, Coin(1.0), ts)
 
   private def buyLimit(px: Double, qty: Double, cid: String) =
     OutcomeEvent.PlaceOrders(
@@ -57,7 +58,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val fill = eventually(fills)(_.is(Topics.Fill)).as(Topics.Fill).get
       assertEquals(fill.account, paper, "回报必须标影子账户")
       assertEquals(fill.symbol, sym)
-      assertEqualsDouble(fill.size, 0.5, 1e-12)
+      assertEqualsDouble(fill.size.value, 0.5, 1e-12)
 
   test("不接实盘账户的下单意图"):
     supervised:
@@ -74,7 +75,7 @@ class PaperCounterSpec extends munit.FunSuite:
       bus.publish(Event.at(Topics.Bbo, bbo(97.0, 97.1), 2L))
 
       val fill = eventually(fills)(_.is(Topics.Fill)).as(Topics.Fill).get
-      assertEqualsDouble(fill.size, 0.25, 1e-12, "只该成交影子盘那张单")
+      assertEqualsDouble(fill.size.value, 0.25, 1e-12, "只该成交影子盘那张单")
       assertEquals(fills.asScala.size, 1)
 
   test("净值随成交变化, 按本账户发布"):
@@ -90,25 +91,24 @@ class PaperCounterSpec extends munit.FunSuite:
       assertEquals(first.account, paper)
       assertEqualsDouble(first.equity, 10_000.0, 1e-9, "起始净值 = 初始资金")
 
-  test("contractSize != 1: 回报是币本位, 与真实网关同单位"):
-    // 影子盘与实盘的数字必须可比 —— 这是 PerformanceTracker 存在的理由。
-    // 真实网关在回报侧 qtyToCoin 还原成币本位 (见 OkxAccountStream)，柜台必须对称。
-    // 从前柜台把交易所格式 (合约张数) 原样当成交量, 在 contractSize != 1 的交易所上
-    // 影子的成交量/盈亏/仓位整体差一个 contractSize 倍; Binance contractSize = 1 掩盖了它。
+  test("contractSize != 1 也不影响柜台 —— 下单意图与回报都是币本位"):
+    // 单位换算的职责在 exchange 边界: 下单意图 (OrderIntent) 按类型即是币本位,
+    // 柜台不碰合约张数, 所以 contractSize 取多少都不改变它的成交量。
+    // 从前柜台直接消费"已换算成张数"的订单, 在 contractSize != 1 的交易所上
+    // 影子盘的成交量/盈亏/仓位整体差一个倍数, 而 Binance contractSize = 1 掩盖着它;
+    // 现在这类错配由 Coin / Contracts 两个类型在编译期挡住。
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
-      val ctVal = 0.01
-      val metas = Map((ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = ctVal))
+      val metas = Map((ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = 0.01))
       system.spawn(PaperCounter(paper, ex, instant, metas))
 
-      // 下 3 张合约 = 3 * 0.01 = 0.03 币
-      bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 3.0, "c1"))))
+      bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 0.03, "c1"))))
       bus.publish(Event.at(Topics.Bbo, bbo(98.0, 98.1), 1L))
 
       val fill = eventually(fills)(_.is(Topics.Fill)).as(Topics.Fill).get
-      assertEqualsDouble(fill.size, 3.0 * ctVal, 1e-12, "回报必须是币本位")
+      assertEqualsDouble(fill.size.value, 0.03, 1e-12, "币进币出, contractSize 不参与")
 
   test("拒绝占用实盘账户"):
     intercept[IllegalArgumentException](PaperCounter(AccountId.Live, ex, instant, metas1))
@@ -131,4 +131,4 @@ class PaperCounterSpec extends munit.FunSuite:
       Thread.sleep(120)
       bus.publish(Event.at(Topics.Bbo, bbo(97.0, 97.1), 2L))
       val fill = eventually(fills)(_.is(Topics.Fill)).as(Topics.Fill).get
-      assertEqualsDouble(fill.size, 0.5, 1e-12)
+      assertEqualsDouble(fill.size.value, 0.5, 1e-12)

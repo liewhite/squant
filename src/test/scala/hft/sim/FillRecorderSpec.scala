@@ -6,11 +6,12 @@ import ox.supervised
 
 import java.nio.file.Files
 import scala.jdk.CollectionConverters.*
+import hft.TestUnits.given
 
 class FillRecorderSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private def fill(side: Side, price: Price, size: Quantity, ts: Timestamp): Fill =
+  private def fill(side: Side, price: Price, size: Coin, ts: Timestamp): Fill =
     Fill(AccountId.Live, ex, sym, side, price, size, ts)
 
   // ==================== 纯 record: 累计已实现利润 ====================
@@ -46,7 +47,7 @@ class FillRecorderSpec extends munit.FunSuite:
       bus.publish(Event.at(Topics.Fill, fill(Side.Long, 100.0, 2.0, 1), 1))
       bus.publish(Event.at(Topics.Fill, fill(Side.Short, 120.0, 2.0, 2), 2))
       // 非成交事件应被忽略
-      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100, 1, 101, 1, 3), 3))
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100, Coin(1), 101, Coin(1), 3), 3))
       Thread.sleep(150)
 
     val lines = Files.readAllLines(tmp).asScala.toVector

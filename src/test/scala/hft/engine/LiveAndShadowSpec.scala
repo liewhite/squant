@@ -11,6 +11,7 @@ import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.jdk.CollectionConverters.*
+import hft.TestUnits.given
 
 /** 实盘与影子盘**并行**：同一份策略逻辑、同一份行情，两条出口互不知情。
   *
@@ -27,9 +28,9 @@ class LiveAndShadowSpec extends munit.FunSuite:
   private val instant = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
 
   /** 记录下单的假交易所 —— 代表实盘出口的那一端 */
-  private class RecordingClient(placed: ConcurrentLinkedQueue[Order]) extends ExchangeClient:
+  private class RecordingClient(placed: ConcurrentLinkedQueue[ExchangeOrder]) extends ExchangeClient:
     override def exchange: Exchange = ex
-    override def placeOrder(order: Order): Either[ExchangeError, OrderId] =
+    override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
       placed.add(order); Right(s"live-${placed.size}")
     override def cancelOrder(symbol: Symbol, ref: OrderRef) = Right(())
     override def fetchAllSymbolMetas() = Right(Vector(meta))
@@ -61,13 +62,13 @@ class LiveAndShadowSpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus)
-      val livePlaced = ConcurrentLinkedQueue[Order]()
+      val livePlaced = ConcurrentLinkedQueue[ExchangeOrder]()
       val fills = ConcurrentLinkedQueue[Fill]()
       val fillMailbox = bus.subscribe(Set(Interest.All(Topics.Fill)))
       ox.forkDiscard { while true do fillMailbox.events.receive().as(Topics.Fill).foreach(fills.add) }
 
       // 两条出口：真实交易所 (Live) 与虚拟柜台 (Paper(1))
-      system.spawn(OutcomeProcessor(Map(ex -> RecordingClient(livePlaced)), dryRun = false, AccountId.Live))
+      system.spawn(OutcomeProcessor(Map(ex -> RecordingClient(livePlaced)), metas, dryRun = false, AccountId.Live))
       system.spawn(PaperCounter(paper, ex, instant, metas))
 
       // 同一份策略逻辑, 两个账户各一个实例
@@ -75,14 +76,14 @@ class LiveAndShadowSpec extends munit.FunSuite:
       system.spawn(Executor(OneShotMaker(), metas, paper))
 
       // 一份行情喂给所有人 (行情无账户归属)
-      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, 1.0, 100.1, 1.0, 1L), 1L))
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 1L), 1L))
 
       // 实盘那张单进了真实出口
       eventually(livePlaced.size == 1, s"实盘应下一张单, 实际 ${livePlaced.asScala.toVector}")
       assertEqualsDouble(livePlaced.peek().orderType.asInstanceOf[OrderType.Limit].price, 99.0, 1e-9)
 
       // 影子那张单进了虚拟柜台：行情下穿后成交
-      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 98.0, 1.0, 98.1, 1.0, 2L), 2L))
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 98.0, Coin(1.0), 98.1, Coin(1.0), 2L), 2L))
       eventually(fills.asScala.exists(_.account == paper), "影子盘应成交")
 
       val got = fills.asScala.toVector

@@ -6,6 +6,7 @@ import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.state.StateManager
 import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy, StrategyHandlers}
 import ox.supervised
+import hft.TestUnits.given
 
 /** 撤下一个策略实例时的收尾语义。 */
 class ExecutorLifecycleSpec extends munit.FunSuite:
@@ -35,7 +36,7 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       val intents = bus.subscribe(Set(Interest.All(OrderIntent)))
       val h = system.spawn(Executor(OneShotMaker(), metas, AccountId.Live))
 
-      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, 1.0, 100.1, 1.0, 0L), 0L))
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
       val placed = intents.events.receive().as(OrderIntent).get.outcome match
         case OutcomeEvent.PlaceOrders(orders, _) => orders.head
         case other                               => fail(s"expected PlaceOrders, got $other")
@@ -43,7 +44,7 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       // 交易所确认挂单 (给它一个 orderId) —— 只有已确认的单才撤得掉
       bus.publish(Event.local(
         Topics.OrderUpdate,
-        OrderUpdate(AccountId.Live, "EX-1", Some(placed.clientOrderId), ex, sym, Side.Long, OrderStatus.Pending, 100.0, 0.01, 0.0, 0.0, 0L),
+        OrderUpdate(AccountId.Live, "EX-1", Some(placed.clientOrderId), ex, sym, Side.Long, OrderStatus.Pending, 100.0, Coin(0.01), Coin(0.0), Coin(0.0), 0L),
       ))
 
       system.stop(h)
@@ -58,7 +59,7 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       val intents = bus.subscribe(Set(Interest.All(OrderIntent)))
       val h = system.spawn(Executor(OneShotMaker(), metas, AccountId.Live))
 
-      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, 1.0, 100.1, 1.0, 0L), 0L))
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
       val placed = intents.events.receive().as(OrderIntent).get.outcome match
         case OutcomeEvent.PlaceOrders(orders, _) => orders.head
         case other                               => fail(s"expected PlaceOrders, got $other")

@@ -57,11 +57,13 @@ final class BinanceClient(
         .toVector
     }
 
-  override def placeOrder(order: Order): Either[ExchangeError, OrderId] =
+
+
+  override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
     val base = Map(
       "symbol" -> order.symbol,
       "side" -> sideParam(order.side),
-      "quantity" -> fmt(order.quantity),
+      "quantity" -> fmt(order.quantity.value),
       "newClientOrderId" -> order.clientOrderId,
     ) ++ (if order.reduceOnly then Map("reduceOnly" -> "true") else Map.empty)
     val params = order.orderType match
@@ -85,7 +87,8 @@ final class BinanceClient(
     signedRequest[List[OpenOrder]](Method.GET, "/fapi/v1/openOrders", Map("symbol" -> symbol)).map {
       orders =>
         orders.iterator.map { o =>
-          val filled = o.executedQty.asDouble
+          // Binance USDⓈ-M 的原生数量就是**币本位** (contractSize = 1)，与 WS 路径一致
+          val filled = Coin(o.executedQty.asDouble)
           OrderUpdate(
             account = AccountId.Live,
             orderId = o.orderId.toString,
@@ -93,11 +96,11 @@ final class BinanceClient(
             exchange = Exchange.Binance,
             symbol = o.symbol,
             side = if o.side == "BUY" then Side.Long else Side.Short,
-            status = if filled > 0 then OrderStatus.PartiallyFilled(filled) else OrderStatus.Pending,
+            status = if filled.nonZero then OrderStatus.PartiallyFilled(filled) else OrderStatus.Pending,
             price = o.price.asDouble,
-            quantity = o.origQty.asDouble,
+            quantity = Coin(o.origQty.asDouble),
             filledQuantity = filled,
-            fillSize = 0.0,
+            fillSize = Coin.Zero,
             timestamp = o.time,
           )
         }.toVector
@@ -127,7 +130,7 @@ final class BinanceClient(
             account = AccountId.Live,
             exchange = Exchange.Binance,
             symbol = p.symbol,
-            size = p.positionAmt.asDouble,
+            size = Coin(p.positionAmt.asDouble),
             entryPrice = p.entryPrice.asDouble,
             unrealizedPnl = p.unRealizedProfit.asDouble,
           )

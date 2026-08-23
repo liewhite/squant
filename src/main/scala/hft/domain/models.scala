@@ -97,7 +97,7 @@ enum OrderStatus:
   case Created
   /** 交易所已收到，等待成交 */
   case Pending
-  case PartiallyFilled(filled: Quantity)
+  case PartiallyFilled(filled: Coin)
   case Filled
   case Cancelled
   case Rejected(reason: String)
@@ -119,7 +119,7 @@ final case class Order(
     symbol: Symbol,
     side: Side,
     orderType: OrderType,
-    quantity: Quantity,
+    quantity: Coin,
     reduceOnly: Boolean,
     clientOrderId: String,
 )
@@ -136,11 +136,11 @@ final case class OrderUpdate(
     /** 订单价格 (限价单) */
     price: Price,
     /** 订单总数量 (币本位) */
-    quantity: Quantity,
+    quantity: Coin,
     /** 累计成交量 */
-    filledQuantity: Quantity,
+    filledQuantity: Coin,
     /** 本次成交量 (用于乐观更新 position) */
-    fillSize: Quantity,
+    fillSize: Coin,
     timestamp: Timestamp,
 )
 
@@ -151,7 +151,7 @@ final case class MarketTrade(
     exchange: Exchange,
     symbol: Symbol,
     price: Price,
-    qty: Quantity,
+    qty: Coin,
     isBuyerMaker: Boolean,
     timestamp: Timestamp,
 )
@@ -163,7 +163,7 @@ final case class Fill(
     symbol: Symbol,
     side: Side,
     price: Price,
-    size: Quantity,
+    size: Coin,
     timestamp: Timestamp,
 )
 
@@ -172,24 +172,24 @@ final case class Position(
     account: AccountId,
     exchange: Exchange,
     symbol: Symbol,
-    size: Quantity,
+    size: Coin,
     entryPrice: Price,
     unrealizedPnl: Double,
 ):
   /** 判断是否空仓 (epsilon 比较避免浮点精度问题) */
-  def isEmpty: Boolean = math.abs(size) < Position.Epsilon
+  def isEmpty: Boolean = size.isZero
 
   /** 持仓方向，空仓返回 None */
   def side: Option[Side] =
     if isEmpty then None
-    else if size > 0 then Some(Side.Long)
+    else if size > Coin.Zero then Some(Side.Long)
     else Some(Side.Short)
 
 object Position:
   val Epsilon: Double = 1e-10
 
   def empty(account: AccountId, exchange: Exchange, symbol: Symbol): Position =
-    Position(account, exchange, symbol, 0.0, 0.0, 0.0)
+    Position(account, exchange, symbol, Coin.Zero, 0.0, 0.0)
 
 /** 资产余额 */
 final case class Balance(
@@ -205,9 +205,9 @@ final case class BBO(
     exchange: Exchange,
     symbol: Symbol,
     bidPrice: Price,
-    bidQty: Quantity,
+    bidQty: Coin,
     askPrice: Price,
-    askQty: Quantity,
+    askQty: Coin,
     timestamp: Timestamp,
 ):
   def spread: Price = askPrice - bidPrice
@@ -301,26 +301,61 @@ final case class SymbolMeta(
   def isValid: Boolean = tickSize > 0 && sizeStep > 0 && contractSize > 0
 
   /** 币本位数量 -> 下单数量 (张) */
-  def coinToQty(coinAmount: Quantity): Quantity = coinAmount / contractSize
+  /** 币本位 -> 合约张数（裸浮点）。用于**解析与展示** —— 那里的值本身就是近似的，
+    * 且行情解析是热路径。要发往交易所的数量请用 [[toExchangeContracts]]，它精确。 */
+  def toContracts(amount: Coin): Contracts = Contracts(amount.value / contractSize)
+
+  /** 精确的张数（BigDecimal 域）—— 取整与发单都靠它。
+    *
+    * 裸浮点除法会失真到**整整一档**：`0.3 / 0.1 = 2.9999999999999996`，FLOOR 之后是 2 而不是 3。
+    * Scala 的 `BigDecimal(Double)` 经 `Double.toString` 构造，故 `BigDecimal(0.3)` 是精确的 0.3。
+    */
+  private def exactContracts(amount: Coin): BigDecimal =
+    BigDecimal(amount.value) / BigDecimal(contractSize)
 
   /** 下单数量 (张) -> 币本位数量 */
-  def qtyToCoin(qty: Quantity): Quantity = qty * contractSize
+  /** 合约张数 -> 币本位。**回报解析时用**：进了框架的数量一律币本位 */
+  def toCoin(qty: Contracts): Coin = Coin(qty.value * contractSize)
 
   /** 价格取整到合法精度 (四舍五入到 tickSize) */
   def roundPrice(price: Price): Price =
     SymbolMeta.roundToStep(price, tickSize, BigDecimal.RoundingMode.HALF_UP)
 
   /** 数量向下取整到合法精度 */
-  def roundSizeDown(size: Quantity): Quantity =
-    SymbolMeta.roundToStep(size, sizeStep, BigDecimal.RoundingMode.FLOOR)
+  def roundSizeDown(size: Contracts): Contracts =
+    Contracts(SymbolMeta.roundToStep(size.value, sizeStep, BigDecimal.RoundingMode.FLOOR))
+
+  /** 已对齐过的币本位数量 -> 发往交易所的张数。
+    *
+    * **不能用裸 double 除法**：`x * contractSize / contractSize ≠ x`。实测
+    * `0.07 / 0.01 = 7.000000000000001`、`0.3 / 0.1 = 2.9999999999999996`，
+    * 而各 client 的格式化只做 `stripTrailingZeros`、不再取整 —— 那串尾巴会被交易所按
+    * lot size 判为非法数量而拒单。
+    *
+    * 用 `HALF_UP` 而不是 `FLOOR`：尾差可能偏大也可能偏小（见上面第二个例子），
+    * FLOOR 会把 `2.9999999999999996` 砍成 2，整整少一档。
+    */
+  def toExchangeContracts(aligned: Coin): Contracts =
+    val step = BigDecimal(sizeStep)
+    Contracts(((exactContracts(aligned) / step).setScale(0, BigDecimal.RoundingMode.HALF_UP) * step).toDouble)
+
+  /** 把币本位数量对齐到交易所能接受的精度，**结果仍是币本位**。
+    *
+    * 换算 -> 取整 -> 换回来。这样"按交易所精度取整"这件事不必把张数泄漏进框架：
+    * 策略与撮合看到的始终是币，只是它是一个交易所收得下的币数。
+    */
+  def roundCoinDown(amount: Coin): Coin =
+    val step = BigDecimal(sizeStep)
+    val flooredContracts = (exactContracts(amount) / step).setScale(0, BigDecimal.RoundingMode.FLOOR) * step
+    Coin((flooredContracts * BigDecimal(contractSize)).toDouble)
 
   /** 格式化价格为 API 请求字符串 */
   def formatPrice(price: Price): String =
     BigDecimal(roundPrice(price)).underlying.stripTrailingZeros.toPlainString
 
-  /** 格式化数量为 API 请求字符串 */
-  def formatSize(size: Quantity): String =
-    BigDecimal(roundSizeDown(size)).underlying.stripTrailingZeros.toPlainString
+  /** 格式化数量为 API 请求字符串 —— 参数是**张数**，这是发往交易所的最后一步 */
+  def formatSize(size: Contracts): String =
+    BigDecimal(roundSizeDown(size).value).underlying.stripTrailingZeros.toPlainString
 
 object SymbolMeta:
   /** 用 BigDecimal 精确计算，按 step 取整 */

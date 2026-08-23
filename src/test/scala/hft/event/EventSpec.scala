@@ -1,6 +1,7 @@
 package hft.event
 
 import hft.domain.*
+import hft.TestUnits.given
 
 /** 事件体系的基本契约: key 由载荷派生、按 topic 还原类型、订阅判据。 */
 class EventSpec extends munit.FunSuite:
@@ -10,7 +11,7 @@ class EventSpec extends munit.FunSuite:
   private val t0 = 1_700_000_000_000L
 
   private def bbo(symbol: String = sym, exchange: Exchange = ex) =
-    BBO(exchange, symbol, 100.0, 1.0, 100.1, 1.0, t0)
+    BBO(exchange, symbol, 100.0, Coin(1.0), 100.1, Coin(1.0), t0)
 
   test("key 由载荷派生，不可能与载荷不一致"):
     val ev = Event.at(Topics.Bbo, bbo(), t0)

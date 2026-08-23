@@ -6,6 +6,7 @@ import hft.event.{AnyEvent, Event, Topics}
 import hft.engine.StrategyRunner
 import hft.strategy.{OrderIntent, OutcomeEvent}
 import hft.state.{StateManager}
+import hft.TestUnits.given
 
 /** MakerHedgeStrategy 机制单测：越带挂被动 PostOnly 限价 (价/向正确)、下单到确认间不重复、5s 未成交撤单重挂、成交后中心重置。 */
 class MakerHedgeStrategySpec extends munit.FunSuite:
@@ -110,7 +111,7 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
     feed(runner, Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, 0.0, 0.1, -0.5, 1.0, 8 * hour), 8 * hour, 8 * hour)) // 设 greeksRefMid≈101
     // 现价 104: gammaAdj=0.1×(104-101)=0.3, 净delta≈0.3 -> 卖 0.3
     val q = placed(feed(runner, bbo(104.0, 8 * hour + 1))).quantity
-    assert(math.abs(q - 0.1 * (104.0 - 101.0)) < 1e-9, s"qty=$q")
+    assert(math.abs(q.value - 0.1 * (104.0 - 101.0)) < 1e-9, s"qty=${q.value}")
 
   test("requote 判据用交易所时钟, 不受投递延迟影响"):
     // restingAt 取自订单回报的**交易所**时间戳; 若 requote 拿本地处理时刻去比,
@@ -121,7 +122,7 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
     feed(runner, bbo(104.0, 8 * hour))                                      // 下单
     feed(runner, ordUpd(OrderStatus.Pending, Side.Short, 105.04, 8 * hour))  // 确认, restingAt = 8h
     val exTs = 8 * hour + 2000  // 交易所时钟只过了 2s (< requoteMs 5s)
-    val lateDelivery = Event.stamped(Topics.Bbo, BBO(ex, sym, 104.0, 1.0, 104.0, 1.0, exTs), exTs, exTs + 6000)
+    val lateDelivery = Event.stamped(Topics.Bbo, BBO(ex, sym, 104.0, Coin(1.0), 104.0, Coin(1.0), exTs), exTs, exTs + 6000)
     assertEquals(
       runner.onEvent(lateDelivery, exTs + 6000).flatMap(_.as(OrderIntent)).map(_.outcome),
       Vector.empty,

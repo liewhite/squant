@@ -104,7 +104,16 @@ final class OkxClient(
       }
     }
 
-  override def placeOrder(order: Order): Either[ExchangeError, OrderId] =
+
+  /** 合约规格缓存：把交易所回报里的**张数**换回框架统一的币本位。
+    * 惰性拉取一次 —— 只有走到需要换算的 REST 路径时才会用到。 */
+  private lazy val symbolMetas: Map[Symbol, SymbolMeta] =
+    fetchAllSymbolMetas().fold(e => sys.error(s"加载合约规格失败: ${e.message}"), _.map(m => m.symbol -> m).toMap)
+
+  private def metaOf(symbol: Symbol): SymbolMeta =
+    symbolMetas.getOrElse(symbol, sys.error(s"SymbolMeta not found: $exchange $symbol"))
+
+  override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
     // order.quantity 已由 StrategyRunner 转为合约张数并取整
     val instId = toOkx(order.symbol, quote)
     val (ordType, pxField) = order.orderType match
@@ -113,7 +122,7 @@ final class OkxClient(
     val reduceField = if order.reduceOnly then ""","reduceOnly":true""" else ""
     val clOrdField = if order.clientOrderId.nonEmpty then s""","clOrdId":"${order.clientOrderId}"""" else ""
     val body =
-      s"""{"instId":"$instId","tdMode":"cross","side":"${sideParam(order.side)}","ordType":"$ordType","sz":"${fmt(order.quantity)}"$pxField$reduceField$clOrdField}"""
+      s"""{"instId":"$instId","tdMode":"cross","side":"${sideParam(order.side)}","ordType":"$ordType","sz":"${fmt(order.quantity.value)}"$pxField$reduceField$clOrdField}"""
     signedRequest[PlaceOrderResp](Method.POST, "/api/v5/trade/order", body).flatMap { resp =>
       resp.data.headOption match
         case Some(d) if d.sCode != "0" =>
@@ -144,7 +153,7 @@ final class OkxClient(
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator.flatMap { d =>
           fromOkx(d.instId).map { sym =>
-            val filled = d.accFillSz.asDouble
+            val filled = metaOf(sym).toCoin(Contracts(d.accFillSz.asDouble))
             OrderUpdate(
               account = AccountId.Live,
               orderId = d.ordId,
@@ -154,9 +163,9 @@ final class OkxClient(
               side = sideFromOkx(d.side),
               status = mapOrderState(d.state, filled),
               price = d.px.asDoubleOrZero,
-              quantity = d.sz.asDouble, // 张数，由 Engine 转换为币
-              filledQuantity = filled,  // 张数，由 Engine 转换为币
-              fillSize = 0.0,
+              quantity = metaOf(sym).toCoin(Contracts(d.sz.asDouble)),
+              filledQuantity = filled,
+              fillSize = Coin.Zero,
               timestamp = nowMs,
             )
           }

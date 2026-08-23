@@ -49,7 +49,7 @@ final class PaperCounter(
   require(account != AccountId.Live, s"虚拟柜台不能占用实盘账户: $account")
 
   private val logger = LoggerFactory.getLogger(classOf[PaperCounter])
-  private var state: SimState = SimState.empty(account, symbolMetas, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
+  private var state: SimState = SimState.empty(account, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   private var ctx: ActorContext = scala.compiletime.uninitialized
   private var orderIdSeq: Long = 0L
   private var lastEquityAt: Timestamp = 0L

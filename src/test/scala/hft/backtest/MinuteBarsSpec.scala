@@ -1,12 +1,13 @@
 package hft.backtest
 
-import hft.domain.{Exchange, MarketTrade}
+import hft.domain.{Coin, Exchange, MarketTrade}
 import hft.event.{AnyEvent, Event, Topics}
+import hft.TestUnits.given
 
 class MinuteBarsSpec extends munit.FunSuite:
 
   private def trade(ts: Long, px: Double, qty: Double): AnyEvent =
-    Event.stamped(Topics.Trade, MarketTrade(Exchange.Binance, "ETHUSDT", px, qty, isBuyerMaker = false, ts), ts, ts)
+    Event.stamped(Topics.Trade, MarketTrade(Exchange.Binance, "ETHUSDT", px, Coin(qty), isBuyerMaker = false, ts), ts, ts)
 
   private def sourceOf(evs: AnyEvent*): MarketDataSource =
     new MarketDataSource:
