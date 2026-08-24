@@ -8,7 +8,6 @@ import strategy.strategies.makerhedge.logic.{AsymHedgeBand, MakerHedgeStrategy}
 import org.slf4j.LoggerFactory
 import ox.supervised
 import sttp.client4.DefaultSyncBackend
-import hft.state.{StateManager}
 
 /** 永续 delta 对冲实盘启动器 (OKX, 引擎集成版)。与 [[PerpHedgeEngineLauncher]] (Bybit) 同构, 仅交易所实现不同:
   * BBO 走引擎的 [[OkxMarketStream]] (不二次订阅), 永续持仓/订单回报走 [[OkxAccountStream]], 期权净 greeks 由

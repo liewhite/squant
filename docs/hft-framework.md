@@ -188,6 +188,30 @@ def handlers = StrategyHandlers.empty
 一条纪律：`ctx.place` 只**构造**，副作用（pending 登记）由框架对处理器**真正返回**的意图
 施加。若在构造时就登记，策略把结果丢弃或中途抛异常就会留下永远不会发出的幽灵挂单。
 
+### 框架与策略的分界
+
+策略接触到的框架面，只有这些：
+
+| 给策略的 | 是什么 |
+|---|---|
+| `Strategy` / `StrategyHandlers` / `StrategyContext` | 实现契约与能力面 |
+| `StateView` / `SymbolView` | **只读**状态视图 |
+| `Topics` / `AnyEvent` | 订阅与产出事件 |
+| `domain` / `indicator` / `option` | 纯数据与纯计算 |
+
+**能力靠类型划界，不靠约定**。策略够不着的东西：
+
+- `StateManager.apply`（事件应用）与 `addPendingOrder`（挂单登记）—— 这两件事框架在固定
+  位置做，策略插一脚的后果是"同一条事件重复计入仓位"和"登记一条无主挂单"，都没有外在症状。
+- `SymbolState` 的可变集合 —— 从前它们是 `public val mutable.Map`，策略能 `positions.clear()`
+  或往 `bbos` 里塞假行情。现在 `SymbolView` 上根本没有这些成员。
+- `AccountOutcome` 的构造器（`private[hft]`）—— 策略拼不出下单意图，因此绕不过
+  `ctx.place` 的 clientOrderId 生成 / pending 登记 / 精度换算，也冒充不了别的账户。
+- 账户值本身 —— `ctx` 能用它构造下单意图，读不到它是哪个账户，所以策略里写不出依赖
+  "我是实盘还是影子"的分支。
+
+依赖方向单向：`hft.*` 对具体策略零引用，策略只依赖抽象。
+
 ### 订阅是数据，不是谓词
 
 `Interest` / `Subscription` 是可枚举、可哈希的数据结构，因为同一份声明有三个下游：

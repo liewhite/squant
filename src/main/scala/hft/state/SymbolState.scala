@@ -17,7 +17,7 @@ final case class PendingOrder(
   *
   * 可变状态，仅在所属 Executor 的虚拟线程内访问，无需同步。
   */
-final class SymbolState(val symbol: Symbol):
+final class SymbolState(val symbol: Symbol) extends SymbolView:
   private val logger = LoggerFactory.getLogger(classOf[SymbolState])
 
   val fundingRates: mutable.Map[Exchange, FundingRate] = mutable.Map.empty

@@ -9,7 +9,7 @@ import scala.collection.mutable
   *
   * 可变状态，仅在所属 Executor 的虚拟线程内访问，无需同步。
   */
-final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long):
+final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long) extends StateView:
   private val states: Map[Symbol, SymbolState] =
     symbols.map(s => s -> SymbolState(s)).toMap
   private val balances: mutable.Map[Exchange, Double] = mutable.Map.empty

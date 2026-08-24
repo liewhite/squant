@@ -3,7 +3,6 @@ package strategy.strategies.bandhedge.logic
 import strategy.utils.hedge.{HedgeBand, HedgeCtx}
 
 import hft.domain.*
-import hft.exchange.SubscriptionKind
 import hft.indicator.{Atr, KlineSeries, Macd, RealizedVol, Sma}
 import hft.event.{AnyEvent, Topics}
 import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}

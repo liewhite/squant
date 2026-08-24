@@ -3,13 +3,12 @@ package strategy.strategies.macdgrid.logic
 import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
 
 import hft.domain.*
-import hft.exchange.SubscriptionKind
 import hft.indicator.{Atr, KlineSeries, Macd, Sma}
 import hft.event.{AnyEvent, Topics}
 import strategy.strategies.macdgrid.logic.MacdGridLogic.{Decision, OrderSpec, Params}
 
 import scala.collection.mutable
-import hft.state.{PendingOrder, SymbolState}
+import hft.state.{PendingOrder, SymbolView}
 
 /** MACD 网格策略 (trade-native)。决策逻辑见 [[MacdGridLogic]] (纯函数)。
   *
@@ -100,7 +99,7 @@ final class MacdGridStrategy(
     * 时序说明: 撤单异步 (等 Cancelled 确认), 市价平即时。撤单确认前, 若旧 resting 加仓限价单恰被成交价穿越成交,
     * 会多开一份逆 DEA 方向的单; 但下一拍 posUnits 仍与 DEA 冲突 -> 再次 flatten, 最终收敛 (至多多一次 taker 往返)。
     * 加仓单非 reduceOnly、平仓单 reduceOnly, 不会出现"平仓反向开仓"。 */
-  private def flattenAll(ss: hft.state.SymbolState, posCoin: Coin, dea: Double, price: Price, ctx: StrategyContext): Vector[AnyEvent] =
+  private def flattenAll(ss: SymbolView, posCoin: Coin, dea: Double, price: Price, ctx: StrategyContext): Vector[AnyEvent] =
     val cancels = ss.pendingOrders.flatMap(cancelConfirmed(_, ctx)).toVector
     val close =
       if posCoin.abs >= minOrderQty then
@@ -117,7 +116,7 @@ final class MacdGridStrategy(
 
   /** 把加仓单 / 止盈单两个槽对齐到期望 (仅缺失才补挂, 价偏移/不再期望才撤)。
     * 静态单 (加仓单、网格态止盈单) 仅锚价移动才撤换; **追价止盈单 (被动平仓) 按 ChaseIntervalMs 节奏撤单追挂**。 */
-  private def placeGrid(ss: hft.state.SymbolState, d: Decision, posUnits: Int, price: Price, now: Long, ctx: StrategyContext): Vector[AnyEvent] =
+  private def placeGrid(ss: SymbolView, d: Decision, posUnits: Int, price: Price, now: Long, ctx: StrategyContext): Vector[AnyEvent] =
     // 现有挂单按槽分类: reduceOnly=止盈槽, 否则=加仓槽 (每槽留首张)
     var addPending: Option[PendingOrder] = None
     var closePending: Option[PendingOrder] = None

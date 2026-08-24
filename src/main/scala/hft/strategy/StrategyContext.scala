@@ -2,7 +2,7 @@ package hft.strategy
 
 import hft.domain.*
 import hft.event.{AnyEvent, Event, Topic}
-import hft.state.StateManager
+import hft.state.StateView
 
 /** 策略在处理一条事件时能做的事。
   *
@@ -21,8 +21,12 @@ import hft.state.StateManager
   *            回测才能"同一输入必得同一结果"。
   */
 final class StrategyContext private[hft] (
-    /** 本策略订阅范围内的聚合状态 */
-    val state: StateManager,
+    /** 本策略订阅范围内的聚合状态 —— **只读视图**。
+      *
+      * 给的是 [[StateView]] 而不是实现: 事件应用与挂单登记由框架在固定位置做，
+      * 策略插一脚的后果分别是"同一条事件重复计入仓位"与"登记一条无主挂单"，
+      * 两者都没有外在症状。够不着，就不必靠记性。 */
+    val state: StateView,
     private val account: AccountId,
     private val now: Timestamp,
 ):

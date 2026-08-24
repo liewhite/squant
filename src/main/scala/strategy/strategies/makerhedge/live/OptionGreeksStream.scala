@@ -6,7 +6,6 @@ import hft.exchange.AccountStream
 import hft.event.{Event, EventBus, Topics}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
-import hft.state.{StateManager}
 
 /** 把**期权账户净 greeks** 作为 [[AccountStream]] 注入实盘引擎的 事件总线 (与时钟/账户流同一条 bus)：
   * 周期性经 [[OptionsExchange]] 查期权净 (delta,gamma) -> 发 [[Topics.Greeks]] 事件。引擎里的对冲策略经
