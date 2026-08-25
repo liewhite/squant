@@ -1,6 +1,6 @@
 package hft.exchange
 
-import hft.domain.Exchange
+import hft.domain.{Exchange, SubscriptionKind}
 import hft.event.{AnyEvent, EventBus}
 import ox.Ox
 

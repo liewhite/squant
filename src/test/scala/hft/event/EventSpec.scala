@@ -22,7 +22,7 @@ class EventSpec extends munit.FunSuite:
   test("as: 命中 topic 才还原载荷，且带静态类型"):
     val ev: AnyEvent = Event.at(Topics.Bbo, bbo(), t0)
     val got: Option[BBO] = ev.as(Topics.Bbo)
-    assertEquals(got.map(_.bidPrice), Some(100.0))
+    assertEquals(got.map(_.bidPrice.value), Some(100.0))
     assertEquals(ev.as(Topics.Trade), None)
     assert(ev.is(Topics.Bbo))
     assert(!ev.is(Topics.Trade))

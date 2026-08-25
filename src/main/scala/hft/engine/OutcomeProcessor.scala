@@ -2,7 +2,7 @@ package hft.engine
 
 import hft.actor.{Actor, ActorContext}
 import hft.domain.*
-import hft.exchange.ExchangeClient
+import hft.exchange.TradingClient
 import hft.event.{AnyEvent, Event, Interest, Topics}
 import hft.strategy.{OrderIntent, OutcomeEvent}
 import org.slf4j.LoggerFactory
@@ -11,6 +11,9 @@ import org.slf4j.LoggerFactory
   *
   * 每个 REST 调用 fork 独立虚拟线程执行，互不阻塞。
   *
+  * "不真下单"不是这里的开关，而是换一个客户端实现 ([[hft.exchange.DryRunClient]]) ——
+  * 它以 4xx 拒单形态返回，正好落在下面第一条通道上，本类因此一个分支都不需要。
+  *
   * 错误处理 (fail-fast)：
   *   - 交易所明确拒绝 (HTTP 4xx，订单确定未成立) 是正常业务结果，
   *     以 OrderUpdate(Error/Rejected) 事件回流策略
@@ -18,10 +21,9 @@ import org.slf4j.LoggerFactory
   *     直接抛错终止引擎 (重启后由启动对齐恢复一致)
   */
 final class OutcomeProcessor(
-    clients: Map[Exchange, ExchangeClient],
+    clients: Map[Exchange, TradingClient],
     /** 发往交易所前要把币本位换成合约张数，见 [[OrderConversion.toExchangeOrder]] */
     symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
-    dryRun: Boolean,
     /** 本出口负责的账户 (真实交易所出口即 [[AccountId.Live]])。无默认值，理由同 [[Executor]] */
     account: AccountId,
 ) extends Actor:
@@ -43,8 +45,7 @@ final class OutcomeProcessor(
 
   override def onStart(context: ActorContext): Unit =
     ctx = context
-    if dryRun then logger.warn("OutcomeProcessor started in DRY-RUN mode (orders will NOT be placed)")
-    else logger.info("OutcomeProcessor started")
+    logger.info("OutcomeProcessor started")
 
   override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
     event.as(OrderIntent).foreach(intent => handle(intent.outcome))
@@ -58,11 +59,6 @@ final class OutcomeProcessor(
       cancelOrder(exchange, symbol, ref)
 
   private def placeOrder(order: Order, comment: String): Unit =
-    if dryRun then
-      logger.warn(s"[DRY-RUN] order NOT placed: ${describe(order)} signal=$comment")
-      // dry-run 等价于确定性的"未下单"，以 Error 事件回流清理 pending
-      publishOrderError(order, "dry-run: order not placed")
-    else
       val client = requireClient(order.exchange)
       logger.info(s"Placing order: ${describe(order)} signal=$comment")
       ctx.fork {
@@ -87,8 +83,6 @@ final class OutcomeProcessor(
       ()
 
   private def cancelOrder(exchange: Exchange, symbol: Symbol, ref: OrderRef): Unit =
-    if dryRun then logger.warn(s"[DRY-RUN] CancelOrder NOT sent: $exchange $symbol ${ref.raw}")
-    else
       val client = requireClient(exchange)
       logger.info(s"Cancelling order: $exchange $symbol ${ref.raw}")
       ctx.fork {
@@ -105,7 +99,7 @@ final class OutcomeProcessor(
       ()
 
   /** 策略引用了未配置的交易所是装配错误，立即终止 */
-  private def requireClient(exchange: Exchange): ExchangeClient =
+  private def requireClient(exchange: Exchange): TradingClient =
     clients.getOrElse(exchange, throw IllegalStateException(s"No client configured for exchange $exchange"))
 
   /** 确定性的下单失败以 OrderUpdate(AccountId.Live, Error) 回流，驱动 pending order 清理 */
@@ -118,7 +112,7 @@ final class OutcomeProcessor(
       symbol = order.symbol,
       side = order.side,
       status = OrderStatus.Error(reason),
-      price = 0.0,
+      price = Price.Zero,
       quantity = Coin.Zero,
       filledQuantity = Coin.Zero,
       fillSize = Coin.Zero,

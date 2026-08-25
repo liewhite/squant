@@ -94,4 +94,4 @@ class StateManagerSpec extends munit.FunSuite:
     val state = StateManager(Set("BTCUSDT"), orderTimeoutMs = 0L)
     val ex = Exchange.Binance
     state.apply(Event.at(Topics.Bbo, BBO(ex, "BTCUSDT", 100.0, Coin(1.0), 100.1, Coin(1.0), t0), t0))
-    assertEquals(state.symbolState("BTCUSDT").flatMap(_.bbo(ex)).map(_.bidPrice), Some(100.0))
+    assertEquals(state.symbolState("BTCUSDT").flatMap(_.bbo(ex)).map(_.bidPrice.value), Some(100.0))

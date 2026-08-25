@@ -29,7 +29,6 @@ final class BinanceAccountStream(
     backend: WebSocketSyncBackend,
     wsBaseUrl: String = BinanceClient.WsBaseUrl,
 ) extends AccountStream:
-  require(client.hasCredentials, "BinanceAccountStream requires credentials")
   private val logger = LoggerFactory.getLogger(classOf[BinanceAccountStream])
 
   override def exchange: Exchange = Exchange.Binance
@@ -90,7 +89,7 @@ final class BinanceAccountStream(
       symbol = o.s,
       side = side,
       status = status,
-      price = o.p.asDouble,
+      price = o.p.asPrice,
       quantity = Coin(o.q.asDouble),
       filledQuantity = Coin(o.z.asDouble),
       fillSize = Coin(o.l.asDouble),
@@ -99,7 +98,7 @@ final class BinanceAccountStream(
     bus.publish(Event.at(Topics.OrderUpdate, update, msg.E))
     // 本次有成交 -> 同步发布 Fill 事件，乐观更新仓位
     if o.l.asDouble > 0 then
-      val fill = Fill(AccountId.Live, Exchange.Binance, o.s, side, price = o.L.asDouble, size = Coin(o.l.asDouble), timestamp = o.T)
+      val fill = Fill(AccountId.Live, Exchange.Binance, o.s, side, price = o.L.asPrice, size = Coin(o.l.asDouble), timestamp = o.T)
       bus.publish(Event.at(Topics.Fill, fill, msg.E))
 
   private def publishAccountUpdate(msg: AccountUpdateMsg): Unit =
@@ -109,6 +108,6 @@ final class BinanceAccountStream(
       )
     }
     msg.a.P.filter(_.ps == "BOTH").foreach { p =>
-      val position = Position(AccountId.Live, Exchange.Binance, p.s, Coin(p.pa.asDouble), p.ep.asDouble, p.up.asDouble)
+      val position = Position(AccountId.Live, Exchange.Binance, p.s, Coin(p.pa.asDouble), p.ep.asPrice, p.up.asDouble)
       bus.publish(Event.at(Topics.Position, position, msg.E))
     }

@@ -2,7 +2,7 @@ package hft.exchange.bybit
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{MarketDataStream, SubscriptionKind, WsLoop}
+import hft.exchange.{MarketDataStream, WsLoop}
 import hft.event.{Event, EventBus, Topics}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
@@ -96,9 +96,9 @@ final class BybitMarketStream(
     val bbo = BBO(
       exchange = Exchange.Bybit,
       symbol = sym,
-      bidPrice = bid.head.asDouble,
+      bidPrice = bid.head.asPrice,
       bidQty = Coin(bid(1).asDouble), // 已是币本位
-      askPrice = ask.head.asDouble,
+      askPrice = ask.head.asPrice,
       askQty = Coin(ask(1).asDouble),
       timestamp = ts,
     )
@@ -107,9 +107,9 @@ final class BybitMarketStream(
   /** tickers 一帧 (snapshot 或 delta) 携带 mark/index/funding，仅发布本帧实际出现 (非空) 的字段 */
   private def publishTicker(sym: Symbol, d: TickerData, ts: Long): Unit =
     if d.markPrice.nonEmpty then
-      bus.publish(Event.at(Topics.MarkPrice, MarkPrice(Exchange.Bybit, sym, d.markPrice.asDouble, ts), ts))
+      bus.publish(Event.at(Topics.MarkPrice, MarkPrice(Exchange.Bybit, sym, d.markPrice.asPrice, ts), ts))
     if d.indexPrice.nonEmpty then
-      bus.publish(Event.at(Topics.IndexPrice, IndexPrice(Exchange.Bybit, sym, d.indexPrice.asDouble, ts), ts))
+      bus.publish(Event.at(Topics.IndexPrice, IndexPrice(Exchange.Bybit, sym, d.indexPrice.asPrice, ts), ts))
     if d.fundingRate.nonEmpty then
       val fr = FundingRate(
         exchange = Exchange.Bybit,
@@ -122,7 +122,7 @@ final class BybitMarketStream(
 
   private def publishTrade(sym: Symbol, d: PublicTradeData): Unit =
     // Bybit S = taker 方向: S=Sell -> 买方是挂单方 (isBuyerMaker=true)
-    val trade = MarketTrade(Exchange.Bybit, sym, d.p.asDouble, Coin(d.v.asDouble), isBuyerMaker = d.S == "Sell", d.T)
+    val trade = MarketTrade(Exchange.Bybit, sym, d.p.asPrice, Coin(d.v.asDouble), isBuyerMaker = d.S == "Sell", d.T)
     bus.publish(Event.at(Topics.Trade, trade, d.T))
 
   /** 心跳发送线程：定期入队 ping 帧，维持连接 (服务端回 pong 同时刷新 WsLoop 空闲计时) */

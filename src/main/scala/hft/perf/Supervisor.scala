@@ -199,25 +199,33 @@ final class Supervisor(
     if size.nonZero then
       val side = if size > Coin.Zero then Side.Short else Side.Long
       val clientOrderId = instrument.exchange.newClientOrderId
-      val order = OrderConversion.roundToExchangePrecision(
-        Order(
-          id = "",
-          exchange = instrument.exchange,
-          symbol = instrument.symbol,
-          side = side,
-          orderType = OrderType.Market,
-          quantity = size.abs,
-          reduceOnly = true,
-          clientOrderId = clientOrderId,
-        ),
-        symbolMetas,
+      val raw = Order(
+        id = "",
+        exchange = instrument.exchange,
+        symbol = instrument.symbol,
+        side = side,
+        orderType = OrderType.Market,
+        quantity = size.abs,
+        reduceOnly = true,
+        clientOrderId = clientOrderId,
       )
-      flattening(clientOrderId) = (instrument, now)
-      logger.warn(s"flattening live position: $instrument size=$size -> $side ${size.abs.value}")
-      ctx.publish(Event.local(
-        OrderIntent,
-        AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), s"demote flatten $instrument")),
-      ))
+      OrderConversion.alignToExchange(raw, symbolMetas) match
+        case Right(order) =>
+          flattening(clientOrderId) = (instrument, now)
+          logger.warn(s"flattening live position: $instrument size=$size -> $side ${size.abs.value}")
+          ctx.publish(Event.local(
+            OrderIntent,
+            AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), s"demote flatten $instrument")),
+          ))
+        case Left(reason) =>
+          // 敞口小到交易所收不下 —— 再怎么重试也发不出单, 报清楚"为什么平不掉"而不是
+          // 让 checkResidual 一遍遍重复那句泛泛的"仍有敞口"。这是要人来处理的终局。
+          residual -= instrument
+          lastResidualWarn -= instrument
+          logger.error(
+            s"!!! $instrument 残留敞口 $size 低于交易所最小下单量, 无法用订单平掉, 已停止重试: $reason. " +
+              "需人工处理 (手工并单平掉, 或忽略这笔尘埃仓位)"
+          )
 
 object Supervisor:
   /** 平仓单多久没见终态就开始告警 —— 之后每个时钟节拍重复报 */

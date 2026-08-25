@@ -12,8 +12,8 @@ object PositionSizing:
     * dir=0 或非法价/非法权益 -> 0。按权益折算 (而非固定名义), 使敞口/权益比例恒定、不随盈亏漂移、无杠杆失控。
     * 调用方在**方向切换时**取此值并冻结, 持仓期间不随价格变动重算 (避免无谓换手)。 */
   def targetQty(dir: Int, leverage: Double, equity: Double, price: Price): Coin =
-    if dir == 0 || price <= 0.0 || equity <= 0.0 then Coin.Zero
-    else Coin(dir * leverage * equity / price)
+    if dir == 0 || price.value <= 0.0 || equity <= 0.0 then Coin.Zero
+    else Coin(dir * leverage * equity / price.value)
 
   /** 由 (目标仓, 当前仓, 最小下单量) 推出该下的市价单。|gap|<minQty -> None (已对齐, 不动)。 */
   def orderFor(targetPos: Coin, pos: Coin, minQty: Coin): Option[(Side, Coin)] =

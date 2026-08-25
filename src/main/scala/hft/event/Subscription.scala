@@ -1,6 +1,6 @@
 package hft.event
 
-import hft.domain.{AccountInstrument, Exchange, Instrument}
+import hft.domain.{AccountInstrument, Exchange, Instrument, SubscriptionKind}
 
 /** 一个订阅者的完整订阅范围：若干 [[Interest]] 的聚合，以及"这条事件归不归它"的判据。
   *
@@ -29,6 +29,26 @@ final case class Subscription(interests: Set[Interest]):
     case Interest.Keyed(t, keys) if Topics.instrumentPrivate.exists(_ eq t) =>
       keys.collect { case ai: AccountInstrument => ai.instrument }
     case _ => Set.empty[Instrument]
+  }
+
+  /** 要向各交易所订阅的公共行情流。
+    *
+    * 与 [[instruments]] 同源同判据：都从本订阅范围直接派生，不存在第二份声明。
+    * 每个 [[MarketTopic]] 自己回答"我对应哪条流"（[[MarketTopic.streamKind]]），
+    * 所以新增行情源不需要在别处登记，用户自定义的行情源同样成立。
+    *
+    * 公共行情用 [[Interest.All]] 声明会直接报错：全量订阅没有标的集合，
+    * 框架无从知道该向交易所订哪些流 —— 静默订不到远比启动即失败糟糕。
+    */
+  def marketStreams: Set[(Exchange, SubscriptionKind)] = interests.flatMap {
+    case Interest.Keyed(t: MarketTopic[?], keys) =>
+      keys.collect { case i: Instrument => (i.exchange, t.streamKind(i.symbol)) }
+    case Interest.All(t: MarketTopic[?]) =>
+      sys.error(
+        s"公共行情 topic '$t' 只能用 Interest.Keyed 声明: Interest.All 没有标的集合, " +
+          "框架无从知道该向交易所订阅哪些流"
+      )
+    case _ => Set.empty[(Exchange, SubscriptionKind)]
   }
 
   /** 涉及的全部交易所：交易标的所属的，加上账户级声明直接指名的 */

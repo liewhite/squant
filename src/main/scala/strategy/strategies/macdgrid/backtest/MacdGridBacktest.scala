@@ -32,7 +32,7 @@ import java.time.{LocalDate, ZoneOffset}
   val label = s"macdgrid_${start}_${end}"
 
   val backend = DefaultSyncBackend()
-  val publicClient = hft.exchange.binance.BinanceClient(backend, credentials = None)
+  val publicClient = hft.exchange.binance.BinanceClient.public(backend)
   val symbolMetas = publicClient
     .fetchAllSymbolMetas()
     .fold(e => sys.error(s"fetch symbol metas failed: ${e.message}"), _.map(m => (m.exchange, m.symbol) -> m).toMap)

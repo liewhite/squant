@@ -2,7 +2,6 @@ package hft.engine
 
 import hft.domain.*
 import hft.event.{AnyEvent, Event, Interest, Subscription, Topics}
-import hft.exchange.SubscriptionKind
 import hft.state.StateManager
 import hft.strategy.{OutcomeEvent, Strategy}
 import hft.TestUnits.given
@@ -57,7 +56,7 @@ class StrategyRunnerSpec extends munit.FunSuite:
       Interest.Keyed(Topics.Trade, Set(Instrument(Exchange.Okx, "ETHUSDT"))),
     ))
     assertEquals(
-      SubscriptionKind.from(sub),
+      sub.marketStreams,
       Set[(Exchange, SubscriptionKind)](
         (ex, SubscriptionKind.BBO("BTCUSDT")),
         (Exchange.Okx, SubscriptionKind.Trade("ETHUSDT")),
@@ -66,7 +65,7 @@ class StrategyRunnerSpec extends munit.FunSuite:
 
   test("补齐的私有回报不会被误当成要订阅的行情流"):
     // Position/OrderUpdate/Fill 由账户流推送，不该出现在向交易所下的行情订阅里
-    val kinds = SubscriptionKind.from(subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc)))))
+    val kinds = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc)))).marketStreams
     assertEquals(kinds, Set[(Exchange, SubscriptionKind)]((ex, SubscriptionKind.BBO("BTCUSDT"))))
 
   test("自定义的按标的路由 topic 表示关注, 不表示交易 —— 不触发补齐"):
@@ -75,17 +74,30 @@ class StrategyRunnerSpec extends munit.FunSuite:
     val sub = subOf(Set(Interest.Keyed(StrategyRunnerSpec.AlphaSignal, Set(btc))))
     assertEquals(sub.instruments, Set.empty[Instrument])
     assert(!sub.accepts(Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, Coin(1.0), 0L))))
-    assertEquals(SubscriptionKind.from(sub), Set.empty[(Exchange, SubscriptionKind)])
+    assertEquals(sub.marketStreams, Set.empty[(Exchange, SubscriptionKind)])
     // 但它自己声明的那条依然收得到
     assert(sub.accepts(Event.local(StrategyRunnerSpec.AlphaSignal, StrategyRunnerSpec.Score(btc, 1.0))))
 
   test("对公共行情 topic 用 Interest.All -> 无从派生订阅, 立即报错"):
     val e = intercept[RuntimeException] {
-      SubscriptionKind.from(Subscription(Set(Interest.All(Topics.Bbo))))
+      Subscription(Set(Interest.All(Topics.Bbo))).marketStreams
     }
     assert(e.getMessage.contains("Interest.Keyed"), e.getMessage)
 
+  test("用户自定义的行情 topic 同样能派生出订阅流 (旧的内置映射表覆盖不到这种)"):
+    // MarketTopic 把"我对应哪条流"做成抽象成员, 于是自定义行情源声明时就必须回答;
+    // 从前那张 topic->流 的表只列了框架内置的五个, 自定义的会被认作交易标的却永远订不到数据。
+    val sub = subOf(Set(Interest.Keyed(StrategyRunnerSpec.CustomFeed, Set(btc))))
+    assertEquals(sub.instruments, Set(btc), "继承 MarketTopic 即被认作交易标的")
+    assertEquals(sub.marketStreams, Set[(Exchange, SubscriptionKind)]((ex, SubscriptionKind.Trade("BTCUSDT"))))
+
 object StrategyRunnerSpec:
   final case class Score(instrument: Instrument, value: Double)
+
+  /** 一个"用户自定义"的行情源 —— 继承 MarketTopic 就必须回答 streamKind, 否则编译不过 */
+  object CustomFeed extends hft.event.MarketTopic[Score]("customFeed"):
+    def keyOf(p: Score): Instrument = p.instrument
+    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.Trade(symbol)
+
   object AlphaSignal extends hft.event.Topic[Instrument, Score]("alphaSignal"):
     def keyOf(p: Score): Instrument = p.instrument

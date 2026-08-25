@@ -3,7 +3,7 @@ package hft.engine
 import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
-import hft.exchange.ExchangeClient
+import hft.exchange.TradingClient
 import hft.sim.{PaperCounter, SimConfig}
 import hft.state.StateManager
 import hft.strategy.{OrderIntent, OutcomeEvent, Strategy, StrategyHandlers}
@@ -24,11 +24,11 @@ class LiveAndShadowSpec extends munit.FunSuite:
   private val inst = Instrument(ex, sym)
   private val meta = SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
   private val metas = Map((ex, sym) -> meta)
-  private val paper = AccountId.Paper(1)
+  private val paper: AccountId.Paper = AccountId.Paper(1)
   private val instant = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
 
   /** 记录下单的假交易所 —— 代表实盘出口的那一端 */
-  private class RecordingClient(placed: ConcurrentLinkedQueue[ExchangeOrder]) extends ExchangeClient:
+  private class RecordingClient(placed: ConcurrentLinkedQueue[ExchangeOrder]) extends TradingClient:
     override def exchange: Exchange = ex
     override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
       placed.add(order); Right(s"live-${placed.size}")
@@ -68,7 +68,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
       ox.forkDiscard { while true do fillMailbox.events.receive().as(Topics.Fill).foreach(fills.add) }
 
       // 两条出口：真实交易所 (Live) 与虚拟柜台 (Paper(1))
-      system.spawn(OutcomeProcessor(Map(ex -> RecordingClient(livePlaced)), metas, dryRun = false, AccountId.Live))
+      system.spawn(OutcomeProcessor(Map(ex -> RecordingClient(livePlaced)), metas, AccountId.Live))
       system.spawn(PaperCounter(paper, ex, instant))
 
       // 同一份策略逻辑, 两个账户各一个实例
@@ -80,7 +80,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
 
       // 实盘那张单进了真实出口
       eventually(livePlaced.size == 1, s"实盘应下一张单, 实际 ${livePlaced.asScala.toVector}")
-      assertEqualsDouble(livePlaced.peek().orderType.asInstanceOf[OrderType.Limit].price, 99.0, 1e-9)
+      assertEqualsDouble(livePlaced.peek().orderType.asInstanceOf[OrderType.Limit].price.value, 99.0, 1e-9)
 
       // 影子那张单进了虚拟柜台：行情下穿后成交
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 98.0, Coin(1.0), 98.1, Coin(1.0), 2L), 2L))

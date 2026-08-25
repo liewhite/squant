@@ -27,8 +27,8 @@ final case class RestingOrder(
   /** 价格优先级排序键 (越激进、越该先成交者越小)：买单出价越高越激进 -> -limitPrice；
     * 卖单要价越低越激进 -> +limitPrice。与 [[seq]] 组成 (价格, 时间) 优先级。 */
   def pricePriority: Double = side match
-    case Side.Long  => -limitPrice
-    case Side.Short => limitPrice
+    case Side.Long  => -limitPrice.value
+    case Side.Short => limitPrice.value
 
 /** 虚拟柜台的全部状态 (账本 + 挂单簿 + 最新行情)，不可变。
   *
@@ -45,19 +45,19 @@ final case class SimState(
     ledger: Ledger,
     resting: Map[OrderId, RestingOrder],
     lastBbo: Map[Symbol, BBO],
-    lastMark: Map[Symbol, Double],
-    lastTrade: Map[Symbol, Double] = Map.empty,
+    lastMark: Map[Symbol, Price],
+    lastTrade: Map[Symbol, Price] = Map.empty,
     makerFeeRate: Double = 0.0,
     takerFeeRate: Double = 0.0,
     restingSeq: Long = 0L,
 ):
   /** 估值价格：标记价 > BBO 中间价 > 最新成交价 (trade-only 行情用最新成交价估值) */
-  def markOf(symbol: Symbol): Double =
+  def markOf(symbol: Symbol): Price =
     lastMark
       .get(symbol)
       .orElse(lastBbo.get(symbol).map(_.midPrice))
       .orElse(lastTrade.get(symbol))
-      .getOrElse(0.0)
+      .getOrElse(Price.Zero)
 
   // ==================== 上游行情到达 (实时, 用于撮合) ====================
 
@@ -130,7 +130,7 @@ final case class SimState(
           case Some(bbo) =>
             fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, Matcher.touchPrice(order.side, bbo), order.quantity, now, Liquidity.Taker, order.reduceOnly)
           case None =>
-            (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected("no market data for market order"), 0.0, now)))
+            (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected("no market data for market order"), Price.Zero, now)))
       case OrderType.Limit(limit, tif) =>
         // 到达即可成交时的对手价 (None = 不可成交)。用 taker 判定 (价格重合即成交, 乐观侧),
         // 与 resting 的严格穿越判定刻意不同 —— 见 [[Matcher]] 的"悲观间隙"说明。

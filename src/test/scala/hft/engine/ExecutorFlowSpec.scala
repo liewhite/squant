@@ -56,7 +56,7 @@ class ExecutorFlowSpec extends munit.FunSuite:
           assertEquals(orders.size, 1)
           val order = orders.head
           assert(order.clientOrderId.nonEmpty, "Executor 应生成 clientOrderId")
-          assertEquals(order.quantity.value, 0.001) // 0.0015 向下取整到 step
+          assertEquals(order.quantity.value, 0.002) // 0.0015 就近取整到 step (恰好半档 -> 进一)
           assertEquals(order.orderType, OrderType.Limit(62761.3, TimeInForce.GTC)) // 价格取整到 tick
         case other => fail(s"unexpected signal: $other")
 

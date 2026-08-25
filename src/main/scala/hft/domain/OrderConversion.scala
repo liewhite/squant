@@ -19,7 +19,7 @@ final case class ExchangeOrder(
 /** 订单在"框架内"与"交易所侧"之间的换算。
   *
   * 分成两步是有原因的：
-  *   - [[roundToExchangePrecision]] 在策略产出后立刻做，把数量对齐到交易所收得下的精度，
+  *   - [[alignToExchange]] 在策略产出后立刻做，把数量对齐到交易所收得下的精度（收不下就明说），
   *     **但结果仍是币本位**。回测撮合与实盘因此看到同一个数，不必为了取整而把张数
   *     泄漏进框架。
   *   - [[toExchangeOrder]] 是发往真实交易所的最后一步，只有 exchange 适配层需要。
@@ -35,13 +35,28 @@ object OrderConversion:
       sys.error(s"SymbolMeta not found for ${order.exchange} ${order.symbol}, cannot convert order"),
     )
 
-  /** 把数量与价格对齐到交易所精度，**数量仍是币本位** */
-  def roundToExchangePrecision(order: Order, symbolMetas: Map[(Exchange, Symbol), SymbolMeta]): Order =
+  /** 把数量与价格对齐到交易所精度，**数量仍是币本位**。
+    *
+    * 返回 `Left` 表示对齐之后交易所**收不下**这一单（低于最小下单量，含被取整成 0 的情形）。
+    * 用 Either 而不是直接返回 Order，是为了让每个发单方在编译期就被迫回答"收不下怎么办"
+    * —— 从前这个判定压根不存在：`minOrderSize` 三家交易所都解析了却从没被用过，
+    * 低于一档的量被向下取整成 0 之后照样发出去，换回一个拒单和一次白跑的往返。
+    *
+    * Left 里给的是**拼好的说明**而不是错误码：两个调用方（策略发单、监督者平仓）都要把它写进
+    * 日志，各自再查一遍 meta 拼一遍消息只会写出两种说法。
+    */
+  def alignToExchange(order: Order, symbolMetas: Map[(Exchange, Symbol), SymbolMeta]): Either[String, Order] =
     val meta = metaOf(order, symbolMetas)
     val orderType = order.orderType match
       case OrderType.Market            => OrderType.Market
       case OrderType.Limit(price, tif) => OrderType.Limit(meta.roundPrice(price), tif)
-    order.copy(quantity = meta.roundCoinDown(order.quantity), orderType = orderType)
+    val aligned = order.copy(quantity = meta.roundCoin(order.quantity), orderType = orderType)
+    if meta.meetsMinOrderSize(aligned.quantity) then Right(aligned)
+    else
+      Left(
+        s"${order.exchange} ${order.symbol} 数量 ${order.quantity.value} 对齐后为 ${aligned.quantity.value} " +
+          s"(${meta.toExchangeContracts(aligned.quantity).value} 张), 低于最小下单量 ${meta.minOrderSize} 张"
+      )
 
   /** 换算成交易所格式（币本位 -> 合约张数）—— 发往真实交易所前的最后一步 */
   def toExchangeOrder(order: Order, symbolMetas: Map[(Exchange, Symbol), SymbolMeta]): ExchangeOrder =

@@ -14,7 +14,7 @@ import hft.TestUnits.given
 class PaperCounterSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private val paper = AccountId.Paper(1)
+  private val paper: AccountId.Paper = AccountId.Paper(1)
   /** 无延迟配置：断言不必等时钟 (延迟本身另有用例) */
   private val instant = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
   /** contractSize = 1 的常规标的 */
@@ -110,8 +110,10 @@ class PaperCounterSpec extends munit.FunSuite:
       val fill = eventually(fills)(_.is(Topics.Fill)).as(Topics.Fill).get
       assertEqualsDouble(fill.size.value, 0.03, 1e-12, "币进币出, contractSize 不参与")
 
-  test("拒绝占用实盘账户"):
-    intercept[IllegalArgumentException](PaperCounter(AccountId.Live, ex, instant))
+  test("虚拟柜台占用实盘账户 —— 编译期就写不出来 (不再靠运行时 require)"):
+    // AccountId.Paper 在 Scala 3 里本身就是一个类型 (带参数的 enum case 会生成类),
+    // 所以约束落在签名上而不是构造函数体里的一句 require。
+    assert(compileErrors("PaperCounter(AccountId.Live, ex, instant)").nonEmpty)
 
   test("下单在途与回报回传都有延迟 —— 否则影子盘系统性偏乐观"):
     supervised:

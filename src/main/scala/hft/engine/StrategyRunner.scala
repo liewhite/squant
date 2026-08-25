@@ -4,6 +4,7 @@ import hft.domain.*
 import hft.event.{AnyEvent, Event, Handlers, Interest, Subscription, Topics}
 import hft.state.StateManager
 import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy, StrategyContext}
+import org.slf4j.LoggerFactory
 
 /** 策略执行的**纯逻辑核心**：把一个事件喂给策略、维护策略独享状态、产出"已按交易所精度转换"的信号。
   *
@@ -24,6 +25,8 @@ final class StrategyRunner(
     val account: AccountId,
     clientOrderIdGen: Exchange => String = _.newClientOrderId,
 ):
+  private val logger = LoggerFactory.getLogger(classOf[StrategyRunner])
+
   /** 策略声明的处理器，账户已绑定 */
   // 只取一次：handlers 是 def，业务策略在里面捕获自身可变状态构造闭包，两次调用得到两个实例
   private val handlers: Handlers[StrategyContext] = strategy.handlers.bind(account)
@@ -53,10 +56,18 @@ final class StrategyRunner(
   private def prepareIntent(produced: AnyEvent, now: Timestamp): AnyEvent =
     produced.as(OrderIntent) match
       case Some(AccountOutcome(acct, OutcomeEvent.PlaceOrders(orders, comment))) =>
-        val prepared = orders.map { order =>
+        // 登记 pending 放在对齐**之后**：交易所收不下的单根本不会发出去，
+        // 先登记就会留下一条永远等不到回报的幽灵挂单 —— 而框架的超时检测会把它当成
+        // "结果不确定"而终止进程。
+        val prepared = orders.flatMap { order =>
           val withId = order.copy(clientOrderId = clientOrderIdGen(order.exchange))
-          state.addPendingOrder(withId, now) // 币本位登记，策略端统一看到币的数量
-          OrderConversion.roundToExchangePrecision(withId, symbolMetas)
+          OrderConversion.alignToExchange(withId, symbolMetas) match
+            case Right(aligned) =>
+              state.addPendingOrder(withId, now) // 币本位登记，策略端统一看到币的数量
+              Some(aligned)
+            case Left(reason) =>
+              logger.warn(s"下单意图被丢弃 (交易所收不下): $reason")
+              None
         }
         Event.stamped(OrderIntent, AccountOutcome(acct, OutcomeEvent.PlaceOrders(prepared, comment)), now, now)
       case _ => produced

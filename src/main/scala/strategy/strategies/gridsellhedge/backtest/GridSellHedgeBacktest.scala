@@ -73,7 +73,7 @@ import java.time.LocalDate
       .events()
     while it.hasNext do
       it.next().as(Topics.Trade).filter(_.symbol == symbol).foreach { t =>
-        sim.onPrice(t.price, t.timestamp)
+        sim.onPrice(t.price.value, t.timestamp)
         n += 1
       }
   finally backend.close()

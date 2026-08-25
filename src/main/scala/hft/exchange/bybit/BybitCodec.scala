@@ -184,6 +184,8 @@ private[bybit] object BybitCodec:
 
   /** API 返回的数字字符串。非法即抛错终止——静默归零会造成无法察觉的状态错误 */
   extension (s: String)
+    /** 解析成价格 —— 交易所报文是 Price 进入框架的唯一入口 */
+    def asPrice: Price = Price(s.asDouble)
     def asDouble: Double =
       s.toDoubleOption.getOrElse(throw IllegalStateException(s"Invalid number from Bybit API: '$s'"))
 

@@ -38,9 +38,8 @@ final class BybitAccountStream(
     backend: WebSocketSyncBackend,
     wsUrl: String = BybitClient.WsPrivateUrl,
 ) extends AccountStream:
-  require(client.hasCredentials, "BybitAccountStream requires credentials")
   private val logger = LoggerFactory.getLogger(classOf[BybitAccountStream])
-  private val credentials = client.wsCredentials.getOrElse(sys.error("BybitAccountStream requires credentials"))
+  private val credentials = client.wsCredentials
 
   override def exchange: Exchange = Exchange.Bybit
 
@@ -93,7 +92,7 @@ final class BybitAccountStream(
       exchange = Exchange.Bybit,
       symbol = sym,
       side = sideFromBybit(d.side),
-      price = d.execPrice.asDouble,
+      price = d.execPrice.asPrice,
       size = Coin(d.execQty.asDouble),
       timestamp = d.execTime.toLongOption.getOrElse(nowMs),
     )
@@ -111,7 +110,7 @@ final class BybitAccountStream(
       symbol = sym,
       side = sideFromBybit(d.side),
       status = mapOrderStatus(d.orderStatus, filled),
-      price = d.price.asDoubleOrZero,
+      price = Price(d.price.asDoubleOrZero),
       quantity = Coin(d.qty.asDouble),
       filledQuantity = filled,
       fillSize = Coin.Zero,

@@ -61,4 +61,11 @@ abstract class Topic[K, P](val name: String):
   * 用类型而不是一张登记表来区分：用户自定义的行情源继承本类即被视为交易标的，
   * 而普通的 `Topic[Instrument, P]` 不会 —— 判定不依赖"记得把它加进某个 Set"。
   */
-abstract class MarketTopic[P](name: String) extends Topic[hft.domain.Instrument, P](name)
+abstract class MarketTopic[P](name: String) extends Topic[hft.domain.Instrument, P](name):
+  /** 本行情族对应的交易所订阅流 —— **声明一个行情 topic 就必须回答这个问题**。
+    *
+    * 做成抽象成员而不是别处的一张映射表：表会漏（新增 topic 忘了登记不会编译失败，
+    * 只是从此静默订不到数据），而且表只覆盖得了框架内置的那几个，覆盖不了用户自定义的
+    * 行情源。抽象成员则由编译器保证每一个 `MarketTopic` 都回答了。
+    */
+  def streamKind(symbol: hft.domain.Symbol): hft.domain.SubscriptionKind

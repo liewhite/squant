@@ -46,9 +46,9 @@ object BinanceCsv:
     val bbo = BBO(
       exchange = Exchange.Binance,
       symbol = symbol,
-      bidPrice = line.substring(c0 + 1, c1).toDouble,
+      bidPrice = Price(line.substring(c0 + 1, c1).toDouble),
       bidQty = Coin(line.substring(c1 + 1, c2).toDouble),
-      askPrice = line.substring(c2 + 1, c3).toDouble,
+      askPrice = Price(line.substring(c2 + 1, c3).toDouble),
       askQty = Coin(line.substring(c3 + 1, c4).toDouble),
       timestamp = line.substring(c5 + 1).trim.toLong, // event_time, 对齐实盘 WS 推送语义
     )
@@ -65,7 +65,7 @@ object BinanceCsv:
     val trade = MarketTrade(
       exchange = Exchange.Binance,
       symbol = symbol,
-      price = line.substring(c0 + 1, c1).toDouble,
+      price = Price(line.substring(c0 + 1, c1).toDouble),
       qty = Coin(line.substring(c1 + 1, c2).toDouble),
       isBuyerMaker = line.substring(c4 + 1).trim.equalsIgnoreCase("true"),
       timestamp = line.substring(c3 + 1, c4).toLong,

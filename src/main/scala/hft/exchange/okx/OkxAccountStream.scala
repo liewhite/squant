@@ -43,9 +43,8 @@ final class OkxAccountStream(
     backend: WebSocketSyncBackend,
     wsUrl: String = OkxClient.WsPrivateUrl,
 ) extends AccountStream:
-  require(client.hasCredentials, "OkxAccountStream requires credentials")
   private val logger = LoggerFactory.getLogger(classOf[OkxAccountStream])
-  private val credentials = client.wsCredentials.getOrElse(sys.error("OkxAccountStream requires credentials"))
+  private val credentials = client.wsCredentials
 
   override def exchange: Exchange = Exchange.Okx
 
@@ -132,7 +131,7 @@ final class OkxAccountStream(
         exchange = Exchange.Okx,
         symbol = sym,
         size = meta.toCoin(Contracts(d.pos.asDouble)),
-        entryPrice = d.avgPx.asDoubleOrZero,
+        entryPrice = Price(d.avgPx.asDoubleOrZero),
         unrealizedPnl = d.upl.asDoubleOrZero,
       )
       bus.publish(Event.local(Topics.Position, position))
@@ -158,7 +157,7 @@ final class OkxAccountStream(
     val filledQty = meta.toCoin(Contracts(d.accFillSz.asDouble))
     // Fill 先于 OrderUpdate (确保乐观更新 position 后再处理订单终态)
     if fillSz.nonZero then
-      val fill = Fill(AccountId.Live, Exchange.Okx, sym, side, price = d.fillPx.asDouble, size = fillSz, timestamp = nowMs)
+      val fill = Fill(AccountId.Live, Exchange.Okx, sym, side, price = d.fillPx.asPrice, size = fillSz, timestamp = nowMs)
       bus.publish(Event.local(Topics.Fill, fill))
     val update = OrderUpdate(
       account = AccountId.Live,
@@ -168,7 +167,7 @@ final class OkxAccountStream(
       symbol = sym,
       side = side,
       status = mapOrderState(d.state, filledQty),
-      price = d.px.asDoubleOrZero,
+      price = Price(d.px.asDoubleOrZero),
       quantity = meta.toCoin(Contracts(d.sz.asDouble)),
       filledQuantity = filledQty,
       fillSize = fillSz,

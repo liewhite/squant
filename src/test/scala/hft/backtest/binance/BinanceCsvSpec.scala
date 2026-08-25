@@ -28,9 +28,9 @@ class BinanceCsvSpec extends munit.FunSuite:
     evs.head.as(Topics.Bbo) match
       case Some(b) =>
         assertEquals(b.symbol, "BTCUSDT")
-        assertEquals(b.bidPrice, 100.0)
+        assertEquals(b.bidPrice.value, 100.0)
         assertEquals(b.bidQty.value, 1.0)
-        assertEquals(b.askPrice, 100.1)
+        assertEquals(b.askPrice.value, 100.1)
         assertEquals(b.askQty.value, 2.0)
         assertEquals(b.timestamp, 1700000000001L) // event_time, 非 transaction_time
       case None => fail(s"expected Bbo, got ${evs.head}")
@@ -50,7 +50,7 @@ class BinanceCsvSpec extends munit.FunSuite:
     assertEquals(evs.size, 2)
     evs.head.as(Topics.Trade) match
       case Some(t) =>
-        assertEquals(t.price, 100.5)
+        assertEquals(t.price.value, 100.5)
         assertEquals(t.qty.value, 0.5)
         assertEquals(t.isBuyerMaker, true)
         assertEquals(t.timestamp, 1700000000002L)

@@ -39,13 +39,13 @@ import sttp.client4.DefaultSyncBackend
 
   supervised:
     val backend = DefaultSyncBackend()
-    val perp = BybitClient(backend, credentials) // 永续 (linear) 下单/查仓
+    val perp = BybitClient.trading(backend, credentials.get) // 永续 (linear) 下单/查仓
     val opt = BybitOptionsClient(backend, credentials, testnet = conf.testnet)
     val market = BybitMarketStream(backend)
     // 一个 accountStream = 期权 greeks 注入流 (先, 同步发 ccy 余额兜底) + Bybit 永续账户流 (持仓/订单回报)
     val account = CompositeAccountStream(Exchange.Bybit, Seq(OptionGreeksStream(opt, Exchange.Bybit, t.ccy, t.greeksPollMs), BybitAccountStream(perp, backend)))
 
-    val engine = Engine.start(gateways = Vector(ExchangeGateway(perp, market, Some(account)))) // 实盘 (dryRun 默认 false)
+    val engine = Engine.start(gateways = Vector(ExchangeGateway.trading(perp, market, Some(account)))) // 实盘
 
     // greeks 陈旧阈值 = 4× 轮询间隔 (连续几次拉取失败即暂停对冲, 不按过期 delta 乱挂)
     val strategy = MakerHedgeStrategy(Exchange.Bybit, t.symbol, t.ccy, AsymHedgeBand.byMa(t.tightAtr, t.looseAtr),

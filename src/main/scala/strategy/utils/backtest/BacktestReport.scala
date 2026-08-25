@@ -135,14 +135,14 @@ final class BacktestRecorder(
   /** 放进 `BacktestEngine(observers = Seq(...))` 的观察函数。 */
   val observe: AnyEvent => Unit = ev =>
     ev.as(Topics.Trade).filter(t => t.exchange == exchange && t.symbol == symbol).foreach { t =>
-      lastPx = t.price
-      if t.timestamp >= startMs && firstPxInPeriod == 0.0 then firstPxInPeriod = t.price
+      lastPx = t.price.value
+      if t.timestamp >= startMs && firstPxInPeriod == 0.0 then firstPxInPeriod = t.price.value
     }
     ev.as(Topics.Fill).filter(f => f.exchange == exchange && f.symbol == symbol).foreach { f =>
       runPos += (if f.side == Side.Long then f.size.value else -f.size.value)
       if f.timestamp >= startMs then
         nFills += 1
-        fillBuf += ((f.timestamp, f.side, f.price, f.size.value))
+        fillBuf += ((f.timestamp, f.side, f.price.value, f.size.value))
     }
     ev.as(Topics.AccountInfo).foreach { info =>
       if ev.exchangeTs >= startMs && info.equity > 0 then

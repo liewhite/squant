@@ -189,7 +189,7 @@ object Position:
   val Epsilon: Double = 1e-10
 
   def empty(account: AccountId, exchange: Exchange, symbol: Symbol): Position =
-    Position(account, exchange, symbol, Coin.Zero, 0.0, 0.0)
+    Position(account, exchange, symbol, Coin.Zero, Price.Zero, 0.0)
 
 /** 资产余额 */
 final case class Balance(
@@ -293,7 +293,11 @@ final case class SymbolMeta(
     tickSize: Double,
     /** 数量最小变动单位 */
     sizeStep: Double,
-    /** 最小下单数量 */
+    /** 最小下单数量 —— 与 [[sizeStep]] **同域**：交易所原生数量单位（张）。
+      *
+      * OKX 的 `minSz`/`lotSz` 本就是张数；Binance/Bybit 的 `contractSize = 1`，币与张数值相等，
+      * 看不出区别。所以判定必须在张数域做（见 [[meetsMinOrderSize]]），
+      * 拿币本位数量直接和它比，在 OKX 上会差整整一个 contractSize。 */
     minOrderSize: Double,
     /** 合约乘数: 每张合约对应的币本位数量 (Binance 为 1.0) */
     contractSize: Double,
@@ -319,11 +323,12 @@ final case class SymbolMeta(
 
   /** 价格取整到合法精度 (四舍五入到 tickSize) */
   def roundPrice(price: Price): Price =
-    SymbolMeta.roundToStep(price, tickSize, BigDecimal.RoundingMode.HALF_UP)
+    Price(SymbolMeta.roundToStep(price.value, tickSize, BigDecimal.RoundingMode.HALF_UP))
 
-  /** 数量向下取整到合法精度 */
-  def roundSizeDown(size: Contracts): Contracts =
-    Contracts(SymbolMeta.roundToStep(size.value, sizeStep, BigDecimal.RoundingMode.FLOOR))
+  /** 数量取整到合法精度（就近）。理由同 [[roundCoin]] —— 这已是发往交易所的最后一步，
+    * 再 FLOOR 一次会把 [[toExchangeContracts]] 刚对齐好的数量又削掉一档。 */
+  def roundSize(size: Contracts): Contracts =
+    Contracts(SymbolMeta.roundToStep(size.value, sizeStep, BigDecimal.RoundingMode.HALF_UP))
 
   /** 已对齐过的币本位数量 -> 发往交易所的张数。
     *
@@ -343,19 +348,43 @@ final case class SymbolMeta(
     *
     * 换算 -> 取整 -> 换回来。这样"按交易所精度取整"这件事不必把张数泄漏进框架：
     * 策略与撮合看到的始终是币，只是它是一个交易所收得下的币数。
+    *
+    * ## 为什么是就近取整而不是向下
+    *
+    * 交易所是**十进制记账**的：1000 笔 0.1 的成交，它那边持仓精确等于 100。而我们的账本是
+    * 浮点求和，会漂成 `99.99999999999860`。这个差不是"我们比交易所少 1.4e-12"，是**我们算错了**
+    * —— 对齐到 step 网格恰恰是把真值恢复回来，取整后的数字才是那个真实的决策。
+    *
+    * 向下取整会把这个漂移**放大成整整一档**：`99.99999999999860` FLOOR 到 `99.999`，
+    * 平仓就留下 `0.000999` 的残仓 —— 它比 [[Position.Epsilon]] 大七个数量级（判不出"已归零"），
+    * 又小于最小下单量（再也发不出单），于是永远平不掉、[[hft.perf.Supervisor]] 永远告警。
+    * BigDecimal 只能保证除法不引入新误差，救不了本身就带累加误差的输入；
+    * 取整方向才是这里的决定因素。
+    *
+    * 多取一档的代价则小得多：reduceOnly 由撮合层与交易所双重截断（见
+    * [[hft.sim.SimState.onOrderArrived]]），开仓方向也只是多一个 step 的敞口。
     */
-  def roundCoinDown(amount: Coin): Coin =
+  def roundCoin(amount: Coin): Coin =
     val step = BigDecimal(sizeStep)
-    val flooredContracts = (exactContracts(amount) / step).setScale(0, BigDecimal.RoundingMode.FLOOR) * step
-    Coin((flooredContracts * BigDecimal(contractSize)).toDouble)
+    val aligned = (exactContracts(amount) / step).setScale(0, BigDecimal.RoundingMode.HALF_UP) * step
+    Coin((aligned * BigDecimal(contractSize)).toDouble)
+
+  /** 这个币本位数量对齐后交易所收不收 —— 在**张数域**判定，与 [[minOrderSize]] 同域。
+    *
+    * 数量为 0 也归入此类：从前低于一档的量被向下取整成 0 之后照样发出去，
+    * 换来一个交易所的拒单和一次白跑的往返。
+    */
+  def meetsMinOrderSize(amount: Coin): Boolean =
+    val contracts = toExchangeContracts(amount).value
+    contracts > 0.0 && contracts >= minOrderSize
 
   /** 格式化价格为 API 请求字符串 */
   def formatPrice(price: Price): String =
-    BigDecimal(roundPrice(price)).underlying.stripTrailingZeros.toPlainString
+    BigDecimal(roundPrice(price).value).underlying.stripTrailingZeros.toPlainString
 
   /** 格式化数量为 API 请求字符串 —— 参数是**张数**，这是发往交易所的最后一步 */
   def formatSize(size: Contracts): String =
-    BigDecimal(roundSizeDown(size).value).underlying.stripTrailingZeros.toPlainString
+    BigDecimal(roundSize(size).value).underlying.stripTrailingZeros.toPlainString
 
 object SymbolMeta:
   /** 用 BigDecimal 精确计算，按 step 取整 */

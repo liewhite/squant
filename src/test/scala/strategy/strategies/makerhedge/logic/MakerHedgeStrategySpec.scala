@@ -50,7 +50,7 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
     o.orderType match
       case OrderType.Limit(px, tif) =>
         assertEquals(tif, TimeInForce.PostOnly)
-        assert(math.abs(px - 104.0 * 1.01) < 1e-6, s"limit px=$px") // 卖挂高 1%
+        assert(math.abs(px.value - 104.0 * 1.01) < 1e-6, s"limit px=$px") // 卖挂高 1%
       case other => fail(s"expected Limit, got $other")
 
   test("下单到确认之间不重复下单 (awaitingAck)"):

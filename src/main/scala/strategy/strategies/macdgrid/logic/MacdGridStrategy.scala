@@ -50,11 +50,11 @@ final class MacdGridStrategy(
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
     .market(Topics.Trade, Instrument(exchange, symbol)) { (t, ctx, _) =>
-      k.update(t.timestamp, t.price, t.qty.value)
+      k.update(t.timestamp, t.price.value, t.qty.value)
       reconcile(t.price, t.timestamp, ctx)
     }
     .own(Topics.Fill) { (f, _, _) =>
-      anchorPrice = f.price // 成交后锚价更新, 下一拍按新成交价重挂
+      anchorPrice = f.price.value // 成交后锚价更新, 下一拍按新成交价重挂
       Vector.empty
     }
 
@@ -73,13 +73,13 @@ final class MacdGridStrategy(
         cancelling.filterInPlace(id => ss.pendingOrders.exists(_.order.id == id)) // 清理已消失的撤单追踪
         // 锚价只在"重建挂单时"刷新: 无任何挂单 (冷启动/两单都已离场) -> 锚到现价; 成交时 onEvent 已锚到成交价。
         // 期间锚价固定, 故挂单价稳定 resting、不逐笔追价 (否则单子永远在现价±1ATR 漂移, 永不成交)。
-        if ss.pendingOrders.isEmpty then anchorPrice = price
+        if ss.pendingOrders.isEmpty then anchorPrice = price.value
         val posCoin = ss.positionSize(exchange)
         val flat = posCoin.abs < minOrderQty
         if flat then
           // 空仓: 按当时权益刷新"一份"大小 (持仓期冻结)
           val equity = ctx.state.equity(exchange).filter(_ > 0.0).getOrElse(referenceEquity)
-          unitQty = math.max(minOrderQty.value, leverage * equity / params.maxUnits / price)
+          unitQty = math.max(minOrderQty.value, leverage * equity / params.maxUnits / price.value)
         // 真实持仓 (≥minOrderQty) 至少记为 ±1 份: 避免不足一份的残仓/dust 被四舍五入成 0,
         // 导致 DEA 反向时不平仓 (flatten 需 posUnits≠0)、也不挂止盈, 残仓长期挂账。
         val posUnits =
@@ -87,9 +87,9 @@ final class MacdGridStrategy(
           else
             val u = (posCoin.value / unitQty).round.toInt
             if u == 0 then posCoin.signum else u
-        val level = if anchorPrice > 0.0 then anchorPrice else price
+        val level = if anchorPrice > 0.0 then anchorPrice else price.value
 
-        val decision = MacdGridLogic.decide(dea, bar, price, level, ma20, atr, posUnits, unitQty, params)
+        val decision = MacdGridLogic.decide(dea, bar, price.value, level, ma20, atr, posUnits, unitQty, params)
         if decision.flatten then flattenAll(ss, posCoin, dea, price, ctx)
         else placeGrid(ss, decision, posUnits, price, now, ctx)
       case _ => Vector.empty
@@ -142,7 +142,7 @@ final class MacdGridStrategy(
     (desired, present) match
       case (Some(spec), None) if spec.qty >= minOrderQty.value =>
         actions += ctx.place(
-          Order("", exchange, symbol, spec.side, OrderType.Limit(spec.price, TimeInForce.GTC), Coin(spec.qty), spec.reduceOnly, ""),
+          Order("", exchange, symbol, spec.side, OrderType.Limit(Price(spec.price), TimeInForce.GTC), Coin(spec.qty), spec.reduceOnly, ""),
           f"macdgrid:$tag${if spec.trail then ":trail" else ""} ${spec.side} px=${spec.price}%.2f qty=${spec.qty}%.4f units=$posUnits mark=$price%.2f",
         )
       case (Some(spec), Some(p)) if spec.trail =>
@@ -159,7 +159,7 @@ final class MacdGridStrategy(
   /** resting 限价单价相对期望价是否已偏移 (锚价移动后触发撤换)。 */
   private def priceDrifted(p: PendingOrder, desired: Double): Boolean =
     p.order.orderType match
-      case OrderType.Limit(restPx, _) => math.abs(restPx - desired) > desired * MacdGridStrategy.PriceDriftRel
+      case OrderType.Limit(restPx, _) => math.abs(restPx.value - desired) > desired * MacdGridStrategy.PriceDriftRel
       case _                          => true
 
   private def cancelConfirmed(p: PendingOrder, ctx: StrategyContext): Option[AnyEvent] =

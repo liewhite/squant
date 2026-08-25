@@ -1,5 +1,7 @@
 package hft.exchange.binance
 
+import hft.domain.Price
+
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import com.github.plokhotnyuk.jsoniter_scala.macros.*
 
@@ -134,5 +136,7 @@ private[binance] object BinanceCodec:
     * (字段缺失时 codec 默认值为 "0"，解析为 0.0，语义即零值)
     */
   extension (s: String)
+    /** 解析成价格 —— 交易所报文是 Price 进入框架的唯一入口 */
+    def asPrice: Price = Price(s.asDouble)
     def asDouble: Double =
       s.toDoubleOption.getOrElse(throw IllegalStateException(s"Invalid number from Binance API: '$s'"))

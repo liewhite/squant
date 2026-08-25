@@ -1,5 +1,7 @@
 package strategy.utils
 
+import hft.TestUnits.given
+
 import hft.domain.{Coin, Side}
 import strategy.utils.PositionSizing.{targetQty, orderFor}
 

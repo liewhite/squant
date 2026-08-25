@@ -61,14 +61,14 @@ class SimStateSpec extends munit.FunSuite:
     assert(fills(quiet).isEmpty, "簿上单被动排队, 不成交")
     // 同一盘口下, 一张新单此刻到达同一价位 -> 主动吃单成交
     val (_, arriving) = s3.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.GTC, "taker"), "2", 2)
-    assertEquals(fills(arriving).map(_.price), Vector(49995.0))
+    assertEquals(fills(arriving).map(_.price.value), Vector(49995.0))
 
   test("resting 买单被卖价严格穿越 -> 成交于挂单价, 出簿, 仓位增加"):
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
     val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1", 1)
     val (s3, evs) = s2.onMarket(ex, marketEv(bbo(49990, 49994, ts = 2)), 2) // ask 49994 < 49995, 穿越
     val f = fills(evs)
-    assertEquals(f.map(_.price), Vector(49995.0)) // maker 价
+    assertEquals(f.map(_.price.value), Vector(49995.0)) // maker 价
     assertEquals(s3.resting.size, 0)
     assertEquals(s3.ledger.positions(sym).size.value, 0.002)
 
@@ -86,7 +86,7 @@ class SimStateSpec extends munit.FunSuite:
   test("GTC 到达即可成交 -> taker 成交于对手价"):
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
     val (s2, evs) = s1.onOrderArrived(ex, limit(Side.Long, 50005, TimeInForce.GTC, "b1"), "1", 1)
-    assertEquals(fills(evs).map(_.price), Vector(50001.0)) // 吃卖价
+    assertEquals(fills(evs).map(_.price.value), Vector(50001.0)) // 吃卖价
     assert(s2.resting.isEmpty)
 
   test("IOC 不可成交 -> 整单取消, 不进簿"):

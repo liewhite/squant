@@ -9,7 +9,7 @@ class LedgerSpec extends munit.FunSuite:
   private val sym = "BTCUSDT"
   private def empty = Ledger.empty(AccountId.Live, 10_000.0)
   private def sizeOf(l: Ledger): Double = l.positions.get(sym).map(_.size.value).getOrElse(0.0)
-  private def entryOf(l: Ledger): Double = l.positions.get(sym).map(_.entryPrice).getOrElse(0.0)
+  private def entryOf(l: Ledger): Double = l.positions.get(sym).map(_.entryPrice.value).getOrElse(0.0)
 
   test("新开多头: 记录均价, 现金不变"):
     val l = empty.applyFill(ex, sym, Side.Long, price = 100.0, qty = 2.0)
@@ -58,7 +58,7 @@ class LedgerSpec extends munit.FunSuite:
 
   test("equity / notional 用未实现盈亏估值"):
     val l = empty.applyFill(ex, sym, Side.Long, 100.0, Coin(2.0))
-    val markOf = (_: Symbol) => 150.0
+    val markOf = (_: Symbol) => Price(150.0)
     assertEquals(l.equity(markOf), 10_000.0 + (150.0 - 100.0) * 2.0) // 10100
     assertEquals(l.notional(markOf), 2.0 * 150.0) // 300
     assertEquals(l.openPositions(markOf).head.unrealizedPnl, 100.0)
@@ -96,5 +96,5 @@ class LedgerSpec extends munit.FunSuite:
 
   test("Matcher.touchPrice: 买单吃卖价, 卖单吃买价"):
     val bbo = BBO(ex, sym, 100.0, Coin(1), 101.0, Coin(1), 0)
-    assertEquals(Matcher.touchPrice(Side.Long, bbo), 101.0)
-    assertEquals(Matcher.touchPrice(Side.Short, bbo), 100.0)
+    assertEquals(Matcher.touchPrice(Side.Long, bbo).value, 101.0)
+    assertEquals(Matcher.touchPrice(Side.Short, bbo).value, 100.0)

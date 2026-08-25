@@ -26,19 +26,24 @@ object Topics:
 
   object Bbo extends MarketTopic[BBO]("bbo"):
     def keyOf(p: BBO): Instrument = instrumentOf(p.exchange, p.symbol)
+    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.BBO(symbol)
 
   /** 公共成交印记 (市场匿名成交)：策略信号与模拟撮合的价格来源，非本账户成交 */
   object Trade extends MarketTopic[MarketTrade]("trade"):
     def keyOf(p: MarketTrade): Instrument = instrumentOf(p.exchange, p.symbol)
+    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.Trade(symbol)
 
   object MarkPrice extends MarketTopic[hft.domain.MarkPrice]("markPrice"):
     def keyOf(p: hft.domain.MarkPrice): Instrument = instrumentOf(p.exchange, p.symbol)
+    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.MarkPrice(symbol)
 
   object IndexPrice extends MarketTopic[hft.domain.IndexPrice]("indexPrice"):
     def keyOf(p: hft.domain.IndexPrice): Instrument = instrumentOf(p.exchange, p.symbol)
+    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.IndexPrice(symbol)
 
   object FundingRate extends MarketTopic[hft.domain.FundingRate]("fundingRate"):
     def keyOf(p: hft.domain.FundingRate): Instrument = instrumentOf(p.exchange, p.symbol)
+    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.FundingRate(symbol)
 
   // ==================== 账户私有回报 (按标的) ====================
 

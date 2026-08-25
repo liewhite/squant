@@ -2,7 +2,7 @@ package hft.exchange.okx
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{MarketDataStream, SubscriptionKind, WsLoop}
+import hft.exchange.{MarketDataStream, WsLoop}
 import hft.event.{Event, EventBus, Topics}
 import org.slf4j.LoggerFactory
 import ox.Ox
@@ -93,9 +93,9 @@ final class OkxMarketStream(
     val bbo = BBO(
       exchange = Exchange.Okx,
       symbol = sym,
-      bidPrice = bid.head.asDouble,
+      bidPrice = bid.head.asPrice,
       bidQty = meta.toCoin(Contracts(bid(1).asDouble)),
-      askPrice = ask.head.asDouble,
+      askPrice = ask.head.asPrice,
       askQty = meta.toCoin(Contracts(ask(1).asDouble)),
       timestamp = ts,
     )
@@ -103,18 +103,18 @@ final class OkxMarketStream(
 
   private def publishMark(d: MarkPriceData): Unit =
     val ts = d.ts.toLong
-    bus.publish(Event.at(Topics.MarkPrice, MarkPrice(Exchange.Okx, requireSymbol(d.instId), d.markPx.asDouble, ts), ts))
+    bus.publish(Event.at(Topics.MarkPrice, MarkPrice(Exchange.Okx, requireSymbol(d.instId), d.markPx.asPrice, ts), ts))
 
   private def publishIndex(d: IndexTickerData): Unit =
     val sym = fromOkxIndex(d.instId).getOrElse(throw IllegalStateException(s"Unknown OKX index instId: '${d.instId}'"))
     val ts = d.ts.toLong
-    bus.publish(Event.at(Topics.IndexPrice, IndexPrice(Exchange.Okx, sym, d.idxPx.asDouble, ts), ts))
+    bus.publish(Event.at(Topics.IndexPrice, IndexPrice(Exchange.Okx, sym, d.idxPx.asPrice, ts), ts))
 
   private def publishTrade(d: TradeData): Unit =
     val ts = d.ts.toLong
     // OKX side = taker 方向: side=sell -> 买方是挂单方 (isBuyerMaker=true)
     val sym = requireSymbol(d.instId)
-    val trade = MarketTrade(Exchange.Okx, sym, d.px.asDouble, metas.getOrElse(sym, throw IllegalStateException(s"No SymbolMeta for OKX trade symbol: $sym")).toCoin(Contracts(d.sz.asDouble)), d.side == "sell", ts)
+    val trade = MarketTrade(Exchange.Okx, sym, d.px.asPrice, metas.getOrElse(sym, throw IllegalStateException(s"No SymbolMeta for OKX trade symbol: $sym")).toCoin(Contracts(d.sz.asDouble)), d.side == "sell", ts)
     bus.publish(Event.at(Topics.Trade, trade, ts))
 
   private def publishFunding(d: FundingRateData): Unit =

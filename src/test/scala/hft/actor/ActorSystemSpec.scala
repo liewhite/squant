@@ -99,7 +99,7 @@ class ActorSystemSpec extends munit.FunSuite:
         override def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
         override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
           gate.await() // 第一条卡住, 后续几条在邮箱里积压
-          event.as(Topics.Bbo).foreach(b => processed.add(b.bidPrice))
+          event.as(Topics.Bbo).foreach(b => processed.add(b.bidPrice.value))
           Vector.empty
 
       val h = system.spawn(Slow())
@@ -179,4 +179,4 @@ class ActorSystemSpec extends munit.FunSuite:
       val downstream = bus.subscribe(Set(Interest.All(Topics.Fill)))
       system.spawn(Relay())
       bus.publish(Event.at(Topics.Bbo, bbo(123.0), t0))
-      assertEquals(downstream.events.receive().as(Topics.Fill).map(_.price), Some(123.0))
+      assertEquals(downstream.events.receive().as(Topics.Fill).map(_.price.value), Some(123.0))

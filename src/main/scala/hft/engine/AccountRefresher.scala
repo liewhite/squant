@@ -3,7 +3,7 @@ package hft.engine
 import hft.actor.{Actor, ActorContext}
 import hft.domain.*
 import hft.event.{Event, Topics}
-import hft.exchange.ExchangeClient
+import hft.exchange.TradingClient
 import org.slf4j.LoggerFactory
 
 /** 账户净值的周期刷新。
@@ -12,37 +12,32 @@ import org.slf4j.LoggerFactory
   * 拿它决策，所以它的**新鲜度本身是正确性问题**：注意读到的净值最多滞后一个刷新周期，
   * 临界阈值应自留余量。
   *
-  * 未配置凭证的交易所在首次拉取后退出轮询 —— 没有账户就没有净值要刷新，这是确定安全的例外。
+  * 只轮询有私有面的交易所（[[TradingClient]]）：没配凭证的交易所根本没有净值可刷，
+  * 而"有没有凭证"是装配期就定死的事实，不该在每一轮轮询里重新发现一次。
   */
-final class AccountRefresher(clients: Iterable[ExchangeClient], intervalMs: Long) extends Actor:
+final class AccountRefresher(clients: Iterable[TradingClient], intervalMs: Long) extends Actor:
   private val logger = LoggerFactory.getLogger(classOf[AccountRefresher])
 
   override def name: String = "account-refresher"
 
   override def onStart(ctx: ActorContext): Unit =
     ctx.fork {
-      var polled = clients.toVector
+      val polled = clients.toVector
       while polled.nonEmpty && !ctx.sleepUnlessStopped(intervalMs) do
-        polled = polled.filter(client => AccountRefresher.publishAccountInfo(client, ctx.publish, logger))
+        polled.foreach(client => AccountRefresher.publishAccountInfo(client, ctx.publish))
     }
 
 object AccountRefresher:
-  /** 拉一次账户信息并发布。返回 false 表示该交易所未配置凭证 (无需再轮询)；其余失败致命。
+  /** 拉一次账户信息并发布。任何失败都致命 —— "没凭证"已经由类型排除在外。
     *
     * 时间戳由 [[Event.local]] 在**响应到手之后**盖 —— 盖在发起请求之前会把整段 REST 往返
     * 算进事件年龄，把"对端慢"误诊成"本机处理不过来"。
     */
   private[engine] def publishAccountInfo(
-      client: ExchangeClient,
+      client: TradingClient,
       publish: Event[AccountExchange, AccountInfo] => Unit,
-      logger: org.slf4j.Logger,
-  ): Boolean =
+  ): Unit =
     client.fetchAccountInfo() match
-      case Right(info) =>
-        publish(Event.local(Topics.AccountInfo, info))
-        true
-      case Left(ExchangeError.Auth(_)) =>
-        logger.info(s"No credentials for ${client.exchange}, skipping account info")
-        false
+      case Right(info) => publish(Event.local(Topics.AccountInfo, info))
       case Left(e) =>
         throw IllegalStateException(s"Failed to fetch account info from ${client.exchange}: ${e.message}")

@@ -97,7 +97,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       val it = tradeSource(backend, s, e).events()
       while it.hasNext do
         it.next().as(Topics.Trade).foreach { t =>
-          if t.timestamp - lastTs >= 3_600_000L then { lastTs = t.timestamp; samples += t.price }
+          if t.timestamp - lastTs >= 3_600_000L then { lastTs = t.timestamp; samples += t.price.value }
         }
       RealizedVol.annualizedFromPrices(samples.toVector, BlackScholes.HoursPerYear)
     finally backend.close()
@@ -123,8 +123,8 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       val curve = ArrayBuffer.empty[(Long, Double, Double)]
       val fillRecs = ArrayBuffer.empty[(Long, Side, Double, Double)]
       val obs: AnyEvent => Unit = ev =>
-        ev.as(Topics.Bbo).foreach { b => lastMid = b.midPrice; lastTs = b.timestamp }
-        ev.as(Topics.Fill).foreach(f => fillRecs += ((f.timestamp, f.side, f.price, f.size.value)))
+        ev.as(Topics.Bbo).foreach { b => lastMid = b.midPrice.value; lastTs = b.timestamp }
+        ev.as(Topics.Fill).foreach(f => fillRecs += ((f.timestamp, f.side, f.price.value, f.size.value)))
         ev.as(Topics.AccountInfo).foreach { info =>
           if lastTs > 0 && ev.exchangeTs - curveLastTs >= 3_600_000L then
             curveLastTs = ev.exchangeTs

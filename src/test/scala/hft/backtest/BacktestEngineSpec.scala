@@ -2,7 +2,6 @@ package hft.backtest
 
 import hft.domain.*
 import hft.engine.StrategyRunner
-import hft.exchange.SubscriptionKind
 import hft.event.{AnyEvent, Event, Interest, Topics}
 import hft.sim.SimConfig
 import hft.strategy.{OutcomeEvent, Strategy, StrategyHandlers}

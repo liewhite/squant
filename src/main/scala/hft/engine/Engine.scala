@@ -2,9 +2,9 @@ package hft.engine
 
 import hft.domain.*
 import hft.state.{StateManager, SymbolState}
-import hft.exchange.{AccountStream, ExchangeClient, MarketDataStream, SubscriptionKind}
+import hft.exchange.{AccountStream, ExchangeClient, MarketDataStream, TradingClient}
 import hft.actor.{ActorHandle, ActorSystem}
-import hft.event.{Event, EventBus, Interest, Subscription, Topics}
+import hft.event.{Event, EventBus, Interest, MarketTopic, Subscription, Topics}
 import hft.strategy.Strategy
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
@@ -18,11 +18,27 @@ import ox.channels.Source
   * 此时 client / marketData / accountStream 可指向同一个 SimulatedExchange，
   * 策略对真实还是模拟无感知。
   */
-final case class ExchangeGateway(
+final case class ExchangeGateway private (
     client: ExchangeClient,
     marketData: MarketDataStream,
-    accountStream: Option[AccountStream] = None,
+    /** 私有面 —— 只有带凭证的网关才有。`None` 就是"这个交易所我们只读"，
+      * 不再靠运行时问 `hasCredentials`、也不再靠 `Left(Auth)` 在调用链上传递这个事实。 */
+    trading: Option[TradingClient],
+    accountStream: Option[AccountStream],
 )
+
+object ExchangeGateway:
+  /** 只读网关：无凭证的研究 / 全市场扫描模式。私有端点在类型上就够不着。 */
+  def readOnly(client: ExchangeClient, marketData: MarketDataStream): ExchangeGateway =
+    ExchangeGateway(client, marketData, trading = None, accountStream = None)
+
+  /** 交易网关：拿得出 [[TradingClient]] 即证明凭证已具备。 */
+  def trading(
+      client: TradingClient,
+      marketData: MarketDataStream,
+      accountStream: Option[AccountStream] = None,
+  ): ExchangeGateway =
+    ExchangeGateway(client, marketData, trading = Some(client), accountStream)
 
 /** 引擎：装配并管理所有组件的生命周期。
   *
@@ -42,6 +58,7 @@ final case class ExchangeGateway(
   */
 final class Engine private (
     clients: Map[Exchange, ExchangeClient],
+    tradingClients: Map[Exchange, TradingClient],
     marketStreams: Map[Exchange, MarketDataStream],
     symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     bus: EventBus,
@@ -62,6 +79,21 @@ final class Engine private (
     */
   def subscribe(interests: Set[Interest]): EventBus.Mailbox = bus.subscribe(interests)
 
+  /** 把一个 [[hft.actor.Actor]] 挂进引擎的生命周期树 —— 全市场扫描器、绩效跟踪、监督者
+    * 这类常驻组件。
+    *
+    * 与 [[addStrategy]] 的区别：不绑账户、不占标的、不做启动对齐。框架说"引擎里所有有生命
+    * 周期的东西都是 Actor"，此前却只有策略进得来，别的组件只能绕开引擎自建 ActorSystem ——
+    * 那样它们就不在引擎的停机链上了。
+    */
+  def spawn(actor: hft.actor.Actor): ActorHandle = system.spawn(actor)
+
+  /** 停一个组件（连同它的整棵子树），并释放它可能占用的 (账户, 标的)。返回时收尾已跑完。 */
+  def stop(handle: ActorHandle): Unit = synchronized {
+    system.stop(handle)
+    claims.release(handle)
+  }
+
   def addStrategy(strategy: Strategy, account: AccountId): ActorHandle = addStrategies(Vector(strategy), account).head
 
   /** 撤下一个策略实例：先撤掉它挂在交易所的单 (见 [[Executor.onStop]])，再退订、摘除，
@@ -69,10 +101,7 @@ final class Engine private (
     *
     * 返回时收尾已经跑完。**不平仓** —— 仓位归谁管是策略之外的决定。
     */
-  def removeStrategy(handle: ActorHandle): Unit = synchronized {
-    system.stop(handle)
-    claims.release(handle)
-  }
+  def removeStrategy(handle: ActorHandle): Unit = stop(handle)
 
   /** 批量添加策略。
     *
@@ -104,35 +133,68 @@ final class Engine private (
     // 影子账户从零开始 —— 没有历史仓位与挂单要恢复，唯一的初值 (净值) 由它自己的
     // 虚拟柜台周期发布 (见 hft.sim.PaperCounter)。拿真实交易所的持仓去对齐一个模拟
     // 账户是错的：那是别人的仓位。
-    if account == AccountId.Live then
-      publishInitialPositions(instruments)
-      combined.exchanges.foreach(exchange =>
-        AccountRefresher.publishAccountInfo(requireClient(exchange), bus.publish, logger)
-      )
-      publishExistingPendingOrders(instruments)
+    // 用穷举 match 而不是 `== Live`：将来多一种账户类型时这里会编译报错逼人来决定它要不要对齐，
+    // 相等判断则会把它默默归进"影子盘"那一侧。
+    account match
+      case AccountId.Live =>
+        publishInitialPositions(instruments)
+        combined.exchanges.foreach(exchange =>
+          AccountRefresher.publishAccountInfo(requireTrading(exchange), bus.publish)
+        )
+        publishExistingPendingOrders(instruments)
+      case _: AccountId.Paper => () // 影子账户无历史可对齐
 
     // 5. 订阅行情
-    SubscriptionKind.from(combined).groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
-      marketStreams
-        .getOrElse(exchange, throw IllegalStateException(s"No market data stream configured for exchange $exchange"))
-        .subscribe(kinds)
-    }
+    subscribeStreams(combined)
 
     logger.info(s"${strategies.size} strategies added on $account")
     ids
   }
 
-  private def requireClient(exchange: Exchange): ExchangeClient =
-    clients.getOrElse(exchange, throw IllegalStateException(s"No client configured for exchange $exchange"))
+  /** 订阅公共行情但**不交易**这些标的 —— 全市场扫描器一类的观察者用。
+    *
+    * 与 [[addStrategies]] 的区别：不占 [[InstrumentClaims]]、不做启动对齐、不补私有回报。
+    * "声明了某标的的行情 = 交易该标的"这条等价是对**策略**成立的（见
+    * [[hft.event.Subscription.instruments]]），框架据此补私有回报、做仓位对齐。但扫描器要看
+    * 全市场几百个标的、一个都不交易：走 addStrategies 会把它们全部独占登记，
+    * 之后任何针对这些标的的交易策略都起不来 —— 那正是扫描器存在的目的。
+    *
+    * 观察者自己以 `Interest.All(topic)` 订总线收事件即可（[[hft.event.Interest.All]] 不产生
+    * 标的归属）；本方法只补上"让数据真的从交易所流过来"这一步 —— 否则它订了个空。
+    *
+    * 可重复调用：交易所侧订阅是幂等的增量操作。
+    */
+  def watchMarket(instruments: Set[Instrument], topics: Set[MarketTopic[?]]): Unit = synchronized {
+    require(instruments.nonEmpty, "watchMarket 需要至少一个标的")
+    require(topics.nonEmpty, "watchMarket 需要至少一个行情 topic")
+    subscribeStreams(Subscription(topics.map(t => Interest.Keyed(t, instruments))))
+    logger.info(s"watching ${instruments.size} instruments for ${topics.map(_.name).mkString(",")} (不交易, 不占标的)")
+  }
 
-  /** 启动对齐必须成功 (fail-fast)，唯一的例外是未配置凭证：
-    * 无账户即无仓位/挂单需要对齐，跳过是确定安全的 (公开数据演示/研究模式)
+  /** 把订阅范围派生成交易所行情流并订上 —— addStrategies 与 watchMarket 的唯一公共出口 */
+  private def subscribeStreams(subscription: Subscription): Unit =
+    subscription.marketStreams.groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
+      marketStreams
+        .getOrElse(exchange, throw IllegalStateException(s"No market data stream configured for exchange $exchange"))
+        .subscribe(kinds)
+    }
+
+  /** 该交易所的私有面。缺失即"这个交易所没配凭证"，是装配错误，立即终止。 */
+  private def requireTrading(exchange: Exchange): TradingClient =
+    tradingClients.getOrElse(
+      exchange,
+      throw IllegalStateException(s"No trading client configured for exchange $exchange (只读网关不能下单/对齐)"),
+    )
+
+  /** 启动对齐必须成功 (fail-fast)。
+    *
+    * 从前这里有一条 `case Left(Auth) => 跳过` 的例外，用来放过"没配凭证"的研究模式 ——
+    * 那是把一个**装配期就已确定的事实**伪装成运行时错误。现在只读网关根本没有私有面，
+    * 压根不会走到这里，于是任何失败都是真失败，不必再分辨。
     */
   private def publishInitialPositions(instruments: Set[Instrument]): Unit =
     instruments.groupMap(_.exchange)(_.symbol).foreach { (exchange, symbols) =>
-      requireClient(exchange).fetchPositions() match
-        case Left(ExchangeError.Auth(_)) =>
-          logger.info(s"No credentials for $exchange, skipping position alignment")
+      requireTrading(exchange).fetchPositions() match
         case Left(e) =>
           throw IllegalStateException(s"Failed to fetch initial positions from $exchange: ${e.message}")
         case Right(positions) =>
@@ -146,9 +208,7 @@ final class Engine private (
 
   private def publishExistingPendingOrders(instruments: Set[Instrument]): Unit =
     instruments.foreach { case Instrument(exchange, symbol) =>
-      requireClient(exchange).fetchPendingOrders(symbol) match
-        case Left(ExchangeError.Auth(_)) =>
-          logger.info(s"No credentials for $exchange, skipping pending order alignment")
+      requireTrading(exchange).fetchPendingOrders(symbol) match
         case Left(e) =>
           throw IllegalStateException(s"Failed to fetch pending orders from $exchange $symbol: ${e.message}")
         case Right(updates) =>
@@ -169,11 +229,11 @@ object Engine:
     */
   def start(
       gateways: Seq[ExchangeGateway],
-      dryRun: Boolean = false,
       clockIntervalMs: Long = 1000,
       accountRefreshMs: Long = 10_000,
   )(using Ox): Engine =
     val clients = gateways.map(g => g.client.exchange -> g.client).toMap
+    val tradingClients = gateways.flatMap(g => g.trading.map(t => t.exchange -> t)).toMap
     val marketStreams = gateways.map(g => g.marketData.exchange -> g.marketData).toMap
     val accountStreams = gateways.flatMap(g => g.accountStream.map(a => a.exchange -> a)).toMap
 
@@ -193,9 +253,9 @@ object Engine:
 
     // 消费者先起、生产者后起: 事件开始流动时下游必须已经在总线上, 否则最早的那批事件没人接。
     // 这也是停机顺序的反面 —— 生产者先停, 它们收尾时补发的最后一批事件仍有人消费。
-    system.spawn(OutcomeProcessor(clients, symbolMetas, dryRun, AccountId.Live))
+    system.spawn(OutcomeProcessor(tradingClients, symbolMetas, AccountId.Live))
     system.spawn(Clock(clockIntervalMs))
-    system.spawn(AccountRefresher(clients.values, accountRefreshMs))
+    system.spawn(AccountRefresher(tradingClients.values, accountRefreshMs))
 
     // 先启动账户流 (订阅总线、建立私有连接)，再启动公共行情流——
     // 虚拟柜台同时扮演两者时，start 幂等，两次调用只生效一次
@@ -203,4 +263,4 @@ object Engine:
     marketStreams.values.foreach(_.start(bus))
 
     logger.info("Engine started")
-    Engine(clients, marketStreams, symbolMetas, bus, system)
+    Engine(clients, tradingClients, marketStreams, symbolMetas, bus, system)

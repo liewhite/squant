@@ -59,15 +59,15 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
           val now = ev.exchangeTs
           val s = t.price
           if !inited then
-            strike = s // ATM = 首笔成交价
-            callStrike = s * (1.0 + config.strangleWidthPct)
-            putStrike = s * (1.0 - config.strangleWidthPct)
-            entryPremium = straddleValue(s, now)
+            strike = s.value // ATM = 首笔成交价
+            callStrike = s.value * (1.0 + config.strangleWidthPct)
+            putStrike = s.value * (1.0 - config.strangleWidthPct)
+            entryPremium = straddleValue(s.value, now)
             inited = true
 
           if shouldEmit(now, lastEmit) then
             lastEmit = now
-            val greeksEv = Event.stamped(Topics.Greeks, greeksAt(s, now), ev.exchangeTs, ev.localTs)
+            val greeksEv = Event.stamped(Topics.Greeks, greeksAt(s.value, now), ev.exchangeTs, ev.localTs)
             if balanceEmitted then Iterator(ev, greeksEv)
             else
               balanceEmitted = true

@@ -1,7 +1,7 @@
 package hft.sim
 
 import hft.domain.*
-import hft.exchange.{AccountStream, ExchangeClient, MarketDataStream, SubscriptionKind}
+import hft.exchange.{AccountStream, ExchangeClient, MarketDataStream, TradingClient}
 import hft.event.{AnyEvent, EventBus, Interest, Topics}
 import org.slf4j.LoggerFactory
 import ox.{Ox, fork}
@@ -53,7 +53,7 @@ final class SimulatedExchange(
       * 与实盘并行跑影子盘时是 `Paper(n)`，两边的回报靠这个维度分开。
       * 无默认值，理由同 [[hft.engine.Executor]] */
     account: AccountId,
-) extends ExchangeClient,
+) extends TradingClient,
       MarketDataStream,
       AccountStream:
   require(market.exchange == publicClient.exchange, "market and publicClient must be the same exchange")

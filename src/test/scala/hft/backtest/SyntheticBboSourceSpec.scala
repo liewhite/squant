@@ -24,8 +24,8 @@ class SyntheticBboSourceSpec extends munit.FunSuite:
     assert(out(0).is(Topics.Trade) && out(1).is(Topics.Bbo))
     assert(out(2).is(Topics.Trade) && out(3).is(Topics.Bbo))
     val bbo = out(1).as(Topics.Bbo).get
-    assertEquals(bbo.bidPrice, 100.0)
-    assertEquals(bbo.askPrice, 100.0) // 零价差
+    assertEquals(bbo.bidPrice.value, 100.0)
+    assertEquals(bbo.askPrice.value, 100.0) // 零价差
     assertEquals(out(1).exchangeTs, 1L) // 与来源 trade 同刻, 不破坏升序
 
   test("非 trade 事件原样透传"):

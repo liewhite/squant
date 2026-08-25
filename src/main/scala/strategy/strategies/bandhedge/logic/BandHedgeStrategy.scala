@@ -54,7 +54,7 @@ final class BandHedgeStrategy(
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
     .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, _) =>
-      val px = b.midPrice
+      val px = b.midPrice.value
       klines.update(b.timestamp, px)
       if center.isNaN then center = px
       hedge(px, ctx)
@@ -62,10 +62,10 @@ final class BandHedgeStrategy(
     // greeks 的路由键只到交易所，币种在载荷里，故 ccy 仍需自行判断
     .account(Topics.Greeks) { (g, ctx, _) =>
       if g.ccy != ccy then Vector.empty
-      else ctx.state.symbolState(symbol).flatMap(_.bbo(exchange)).map(b => hedge(b.midPrice, ctx)).getOrElse(Vector.empty)
+      else ctx.state.symbolState(symbol).flatMap(_.bbo(exchange)).map(b => hedge(b.midPrice.value, ctx)).getOrElse(Vector.empty)
     }
 
-  private def hedge(px: Price, ctx: StrategyContext): Vector[AnyEvent] =
+  private def hedge(px: Double, ctx: StrategyContext): Vector[AnyEvent] =
     (for
       symbolState <- ctx.state.symbolState(symbol)
       greeks <- ctx.state.greeks(exchange, ccy) // greeks 与 cashBal 均到达才动作

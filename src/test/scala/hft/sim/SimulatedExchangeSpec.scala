@@ -2,7 +2,7 @@ package hft.sim
 
 import hft.domain.*
 import hft.engine.{Engine, ExchangeGateway}
-import hft.exchange.{ExchangeClient, MarketDataStream, SubscriptionKind}
+import hft.exchange.{ExchangeClient, MarketDataStream}
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.strategy.{OutcomeEvent, Strategy, StrategyHandlers}
 import ox.{Ox, fork, supervised}
@@ -43,17 +43,12 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     def emitBbo(bid: Price, ask: Price, ts: Timestamp): Unit =
       bus.publish(Event.at(Topics.Bbo, BBO(Exchange.Binance, sym, bid, Coin(1.0), ask, Coin(1.0), ts), ts))
 
-  /** 只提供 symbol 元数据的桩 REST 客户端 (其余账户接口由柜台覆盖, 不应被调用) */
+  /** 只提供 symbol 元数据的桩 REST 客户端。
+    * 拆出 TradingClient 之后它只需实现这一个方法 —— 从前还要把六个私有端点各桩一个
+    * "不该被调用"的返回值出来，那本身就是"公共客户端被迫假装自己能交易"的症状。 */
   private class StubPublicClient extends ExchangeClient:
     override def exchange: Exchange = Exchange.Binance
     override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] = Right(Vector(meta))
-    private def unused = Left(ExchangeError.Other("stub: not used"))
-    override def placeOrder(order: ExchangeOrder) = unused
-    override def cancelOrder(symbol: Symbol, ref: OrderRef) = unused
-    override def fetchPendingOrders(symbol: Symbol) = unused
-    override def setLeverage(symbol: Symbol, leverage: Int) = unused
-    override def fetchAccountInfo() = unused
-    override def fetchPositions() = unused
 
   /** 订阅总线并把事件收集到队列；返回收集器 (须在产生事件前调用) */
   private def collect(bus: EventBus)(using Ox): ConcurrentLinkedQueue[AnyEvent] =
@@ -91,7 +86,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
 
       val f = fills(q)
       assertEquals(f.map(_.side), Vector(Side.Long))
-      assertEquals(f.head.price, 49995.0) // maker 成交价 = 挂单价
+      assertEquals(f.head.price.value, 49995.0) // maker 成交价 = 挂单价
       assertEquals(f.head.size.value, 0.002)
       assertEquals(sim.fetchPositions().toOption.get.map(_.size.value), Vector(0.002))
       sim.shutdown()
@@ -182,8 +177,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
       val sim = SimulatedExchange(market, StubPublicClient(), SimConfig(exchangeToStrategyDelayMs = 10, orderToExchangeDelayMs = 10, initialBalanceUsdt = 10_000), AccountId.Live)
       // clock/account 刷新间隔调大, 避免测试期周期任务干扰
       val engine = Engine.start(
-        gateways = Vector(ExchangeGateway(client = sim, marketData = sim, accountStream = Some(sim))),
-        dryRun = false,
+        gateways = Vector(ExchangeGateway.trading(client = sim, marketData = sim, accountStream = Some(sim))),
         clockIntervalMs = 100_000,
         accountRefreshMs = 100_000,
       )

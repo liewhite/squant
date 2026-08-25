@@ -79,14 +79,14 @@ final class MakerHedgeStrategy(
         case OrderStatus.Pending | OrderStatus.PartiallyFilled(_) =>
           restingId = Some(u.orderId); restingAt = u.timestamp; awaitingAck = false
         case OrderStatus.Filled =>
-          center = u.price; restingId = None; awaitingAck = false // 对冲成交 -> 中心重置
+          center = u.price.value; restingId = None; awaitingAck = false // 对冲成交 -> 中心重置
         case OrderStatus.Cancelled | OrderStatus.Rejected(_) | OrderStatus.Error(_) =>
           restingId = None; awaitingAck = false
         case OrderStatus.Created => () // 本地态, 等确认
       Vector.empty
     }
     .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, _) =>
-      val px = b.midPrice
+      val px = b.midPrice.value
       klines.update(b.timestamp, px)
       if center.isNaN then center = px
       // 用**交易所时钟** b.timestamp 而非处理时刻：requote 判据里的 restingAt 取自订单回报的
@@ -98,12 +98,12 @@ final class MakerHedgeStrategy(
       if g.ccy != ccy then Vector.empty
       else
         ctx.state.symbolState(symbol).flatMap(_.bbo(exchange)).map { b =>
-          greeksRefMid = b.midPrice // 记录本次 greeks 对应的现价, 供 gamma 修正
-          manage(b.midPrice, b.timestamp, ctx) // 同上: 交易所时钟域
+          greeksRefMid = b.midPrice.value // 记录本次 greeks 对应的现价, 供 gamma 修正
+          manage(b.midPrice.value, b.timestamp, ctx) // 同上: 交易所时钟域
         }.getOrElse(Vector.empty)
     }
 
-  private def manage(px: Price, now: Timestamp, ctx: StrategyContext): Vector[AnyEvent] =
+  private def manage(px: Double, now: Timestamp, ctx: StrategyContext): Vector[AnyEvent] =
     if awaitingAck then Vector.empty
     else
       restingId match
@@ -151,10 +151,10 @@ final class MakerHedgeStrategy(
                     // BBO 外 offset 挂被动单: 卖挂 bestAsk·(1+off)、买挂 bestBid·(1−off); 盘口缺失则回退中间价 (降级, 告警)
                     val bbo = ss.bbo(exchange)
                     if bbo.isEmpty then warnThrottled(f"盘口 BBO 缺失 -> maker 挂价回退中间价 $px%.2f (检查 BBO 订阅是否在推)")
-                    val refPx = side match
-                      case Side.Short => bbo.fold(px)(_.askPrice)
-                      case Side.Long  => bbo.fold(px)(_.bidPrice)
-                    val limitPx = if side == Side.Short then refPx * (1.0 + offsetPct) else refPx * (1.0 - offsetPct)
+                    val refPx: Price = side match
+                      case Side.Short => bbo.fold(Price(px))(_.askPrice)
+                      case Side.Long  => bbo.fold(Price(px))(_.bidPrice)
+                    val limitPx = if side == Side.Short then refPx.scaled(1.0 + offsetPct) else refPx.scaled(1.0 - offsetPct)
                     awaitingAck = true
                     Vector(
                       ctx.place(

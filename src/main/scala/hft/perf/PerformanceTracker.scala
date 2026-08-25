@@ -73,7 +73,7 @@ final class PerformanceTracker(feeRate: Double, publishIntervalMs: Long = 1000) 
     stats(key) = prev.copy(
       fills = prev.fills + 1,
       roundTrips = prev.roundTrips + (if closed then 1 else 0),
-      fees = prev.fees + fee,
+      fees = prev.fees + fee.value,
     )
 
   private def publishAll(now: Timestamp): Unit =

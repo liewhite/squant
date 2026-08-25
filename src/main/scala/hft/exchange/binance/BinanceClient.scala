@@ -2,7 +2,7 @@ package hft.exchange.binance
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.ExchangeClient
+import hft.exchange.{ExchangeClient, TradingClient}
 import sttp.client4.*
 import sttp.model.{Method, Uri}
 
@@ -17,23 +17,29 @@ import BinanceCodec.given
 final case class BinanceCredentials(apiKey: String, apiSecret: String)
 
 object BinanceClient:
+  /** 只读客户端（无凭证）：只有公共端点，私有面在**类型上**够不着。 */
+  def public(backend: SyncBackend, restBase: String = RestBaseUrl): ExchangeClient =
+    new BinancePublicClient(backend, restBase)
+
+  /** 交易客户端（带凭证）：凭证是构造参数而不是 `Option`，
+    * 于是签名路径里没有"万一没有凭证"这个分支要处理。 */
+  def trading(backend: SyncBackend, credentials: BinanceCredentials, restBase: String = RestBaseUrl): BinanceClient =
+    new BinanceClient(backend, credentials, restBase)
   val RestBaseUrl = "https://fapi.binance.com"
   /** WS 基地址，路由端点 (/public/ws, /market/ws, /private/ws) 由 Connector 拼接 */
   val WsBaseUrl = "wss://fstream.binance.com"
 
-/** Binance USDⓈ-M 合约 REST 客户端。
+/** Binance USDⓈ-M 合约的**公共** REST 客户端 —— 无凭证即可用。
   *
   * 所有请求经 sttp 同步 backend 阻塞执行 (运行在虚拟线程上)。
+  * 私有端点在 [[BinanceClient]] 上，那里凭证是构造参数。
   */
-final class BinanceClient(
-    backend: SyncBackend,
-    credentials: Option[BinanceCredentials],
-    restBase: String = BinanceClient.RestBaseUrl,
+class BinancePublicClient protected[binance] (
+    protected val backend: SyncBackend,
+    protected val restBase: String,
 ) extends ExchangeClient:
 
   override def exchange: Exchange = Exchange.Binance
-
-  def hasCredentials: Boolean = credentials.isDefined
 
   // ==================== ExchangeClient ====================
 
@@ -57,6 +63,92 @@ final class BinanceClient(
         .toVector
     }
 
+  protected def publicGet[T: JsonValueCodec](path: String, params: Map[String, String]): Either[ExchangeError, T] =
+    request(Method.GET, s"$restBase$path${queryString(params)}", apiKey = None).flatMap(parse[T])
+
+  protected def request(method: Method, url: String, apiKey: Option[String]): Either[ExchangeError, String] =
+    try
+      val base = basicRequest
+        .method(method, Uri.unsafeParse(url))
+        // 显式短超时: 必须小于策略的 orderTimeoutMs，让"超时"与"请求丢失"语义对齐
+        .readTimeout(3.seconds)
+        .response(asStringAlways)
+      val response = apiKey.fold(base)(k => base.header("X-MBX-APIKEY", k)).send(backend)
+      if response.code.isSuccess then Right(response.body)
+      else Left(ExchangeError.Http(response.code.code, response.body))
+    catch
+      // 作用域取消 (可能被 sttp 包裹) 必须重抛，不能误判为网络错误
+      case e: Exception if isInterrupt(e) => throw e
+      case e: Exception                   => Left(ExchangeError.Network(s"$method $url: ${e.getMessage}"))
+
+  /** 异常 cause 链中是否包含线程中断 (ox 作用域取消的信号) */
+  protected def isInterrupt(t: Throwable): Boolean =
+    Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(10).exists {
+      case _: InterruptedException | _: java.io.InterruptedIOException => true
+      case _                                                           => false
+    }
+
+  protected def parse[T: JsonValueCodec](body: String): Either[ExchangeError, T] =
+    try Right(readFromString[T](body))
+    catch case e: Exception => Left(ExchangeError.Parse(s"${e.getMessage}; body=$body"))
+
+  protected def queryString(params: Map[String, String]): String =
+    if params.isEmpty then "" else params.map((k, v) => s"$k=$v").mkString("?", "&", "")
+
+  protected def fmt(d: Double): String =
+    BigDecimal(d).underlying.stripTrailingZeros.toPlainString
+
+final class BinanceClient private[binance] (
+    backend: SyncBackend,
+    protected val credentials: BinanceCredentials,
+    restBase: String,
+) extends BinancePublicClient(backend, restBase),
+      TradingClient:
+
+  private def signedRequest[T: JsonValueCodec](
+      method: Method,
+      path: String,
+      params: Map[String, String],
+  ): Either[ExchangeError, T] =
+    signedRaw(method, path, params).flatMap(parse[T])
+
+  private def signedRaw(
+      method: Method,
+      path: String,
+      params: Map[String, String],
+  ): Either[ExchangeError, String] =
+    locally {
+      val c = credentials
+      val query = (params + ("timestamp" -> nowMs.toString) + ("recvWindow" -> "5000"))
+        .map((k, v) => s"$k=$v")
+        .mkString("&")
+      val signature = hmacSha256Hex(c.apiSecret, query)
+      request(method, s"$restBase$path?$query&signature=$signature", Some(c.apiKey))
+    }
+
+
+  private def sideParam(side: Side): String = side match
+    case Side.Long  => "BUY"
+    case Side.Short => "SELL"
+
+  private def tifParam(tif: TimeInForce): String = tif match
+    case TimeInForce.GTC      => "GTC"
+    case TimeInForce.IOC      => "IOC"
+    case TimeInForce.FOK      => "FOK"
+    case TimeInForce.PostOnly => "GTX"
+
+  private def hmacSha256Hex(secret: String, data: String): String =
+    val mac = Mac.getInstance("HmacSHA256")
+    mac.init(SecretKeySpec(secret.getBytes(UTF_8), "HmacSHA256"))
+    mac.doFinal(data.getBytes(UTF_8)).map("%02x".format(_)).mkString
+
+/** Binance USDⓈ-M 合约的**交易** REST 客户端。
+  *
+  * 凭证是构造参数而非 `Option` —— 拿到本类型即证明凭证具备，签名路径因此没有
+  * "万一没配密钥"的分支，`ExchangeError.Auth` 也回归它本来的含义：交易所真的拒绝了鉴权。
+  */
+
+
 
 
   override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
@@ -69,7 +161,7 @@ final class BinanceClient(
     val params = order.orderType match
       case OrderType.Market => base + ("type" -> "MARKET")
       case OrderType.Limit(price, tif) =>
-        base + ("type" -> "LIMIT") + ("price" -> fmt(price)) + ("timeInForce" -> tifParam(tif))
+        base + ("type" -> "LIMIT") + ("price" -> fmt(price.value)) + ("timeInForce" -> tifParam(tif))
     signedRequest[NewOrderResp](Method.POST, "/fapi/v1/order", params).map(_.orderId.toString)
 
   override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
@@ -97,7 +189,7 @@ final class BinanceClient(
             symbol = o.symbol,
             side = if o.side == "BUY" then Side.Long else Side.Short,
             status = if filled.nonZero then OrderStatus.PartiallyFilled(filled) else OrderStatus.Pending,
-            price = o.price.asDouble,
+            price = o.price.asPrice,
             quantity = Coin(o.origQty.asDouble),
             filledQuantity = filled,
             fillSize = Coin.Zero,
@@ -131,7 +223,7 @@ final class BinanceClient(
             exchange = Exchange.Binance,
             symbol = p.symbol,
             size = Coin(p.positionAmt.asDouble),
-            entryPrice = p.entryPrice.asDouble,
+            entryPrice = p.entryPrice.asPrice,
             unrealizedPnl = p.unRealizedProfit.asDouble,
           )
         }
@@ -142,87 +234,17 @@ final class BinanceClient(
 
   /** 创建 user data stream 的 listenKey (仅需 API key，无需签名) */
   def createListenKey(): Either[ExchangeError, String] =
-    withCredentials { c =>
+    locally {
+      val c = credentials
       request(Method.POST, s"$restBase/fapi/v1/listenKey", Some(c.apiKey)).flatMap(parse[ListenKeyResp])
     }.map(_.listenKey)
 
   /** 延长当前 listenKey 有效期 (Binance 要求每 60 分钟内至少一次) */
   def keepAliveListenKey(): Either[ExchangeError, Unit] =
-    withCredentials { c =>
+    locally {
+      val c = credentials
       request(Method.PUT, s"$restBase/fapi/v1/listenKey", Some(c.apiKey))
     }.map(_ => ())
 
   // ==================== 请求基础设施 ====================
 
-  private def publicGet[T: JsonValueCodec](path: String, params: Map[String, String]): Either[ExchangeError, T] =
-    request(Method.GET, s"$restBase$path${queryString(params)}", apiKey = None).flatMap(parse[T])
-
-  private def signedRequest[T: JsonValueCodec](
-      method: Method,
-      path: String,
-      params: Map[String, String],
-  ): Either[ExchangeError, T] =
-    signedRaw(method, path, params).flatMap(parse[T])
-
-  private def signedRaw(
-      method: Method,
-      path: String,
-      params: Map[String, String],
-  ): Either[ExchangeError, String] =
-    withCredentials { c =>
-      val query = (params + ("timestamp" -> nowMs.toString) + ("recvWindow" -> "5000"))
-        .map((k, v) => s"$k=$v")
-        .mkString("&")
-      val signature = hmacSha256Hex(c.apiSecret, query)
-      request(method, s"$restBase$path?$query&signature=$signature", Some(c.apiKey))
-    }
-
-  private def withCredentials[T](f: BinanceCredentials => Either[ExchangeError, T]): Either[ExchangeError, T] =
-    credentials.toRight(ExchangeError.Auth("Binance credentials required")).flatMap(f)
-
-  private def request(method: Method, url: String, apiKey: Option[String]): Either[ExchangeError, String] =
-    try
-      val base = basicRequest
-        .method(method, Uri.unsafeParse(url))
-        // 显式短超时: 必须小于策略的 orderTimeoutMs，让"超时"与"请求丢失"语义对齐
-        .readTimeout(3.seconds)
-        .response(asStringAlways)
-      val response = apiKey.fold(base)(k => base.header("X-MBX-APIKEY", k)).send(backend)
-      if response.code.isSuccess then Right(response.body)
-      else Left(ExchangeError.Http(response.code.code, response.body))
-    catch
-      // 作用域取消 (可能被 sttp 包裹) 必须重抛，不能误判为网络错误
-      case e: Exception if isInterrupt(e) => throw e
-      case e: Exception                   => Left(ExchangeError.Network(s"$method $url: ${e.getMessage}"))
-
-  /** 异常 cause 链中是否包含线程中断 (ox 作用域取消的信号) */
-  private def isInterrupt(t: Throwable): Boolean =
-    Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(10).exists {
-      case _: InterruptedException | _: java.io.InterruptedIOException => true
-      case _                                                           => false
-    }
-
-  private def parse[T: JsonValueCodec](body: String): Either[ExchangeError, T] =
-    try Right(readFromString[T](body))
-    catch case e: Exception => Left(ExchangeError.Parse(s"${e.getMessage}; body=$body"))
-
-  private def queryString(params: Map[String, String]): String =
-    if params.isEmpty then "" else params.map((k, v) => s"$k=$v").mkString("?", "&", "")
-
-  private def fmt(d: Double): String =
-    BigDecimal(d).underlying.stripTrailingZeros.toPlainString
-
-  private def sideParam(side: Side): String = side match
-    case Side.Long  => "BUY"
-    case Side.Short => "SELL"
-
-  private def tifParam(tif: TimeInForce): String = tif match
-    case TimeInForce.GTC      => "GTC"
-    case TimeInForce.IOC      => "IOC"
-    case TimeInForce.FOK      => "FOK"
-    case TimeInForce.PostOnly => "GTX"
-
-  private def hmacSha256Hex(secret: String, data: String): String =
-    val mac = Mac.getInstance("HmacSHA256")
-    mac.init(SecretKeySpec(secret.getBytes(UTF_8), "HmacSHA256"))
-    mac.doFinal(data.getBytes(UTF_8)).map("%02x".format(_)).mkString

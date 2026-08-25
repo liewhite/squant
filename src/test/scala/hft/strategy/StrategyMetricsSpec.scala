@@ -1,5 +1,6 @@
 package hft.strategy
 
+import hft.TestUnits.given
 import hft.actor.ActorSystem
 import hft.domain.*
 import hft.engine.Executor
@@ -31,7 +32,7 @@ class StrategyMetricsSpec extends munit.FunSuite:
     def orderTimeoutMs: Long = 0L
     def handlers: StrategyHandlers = StrategyHandlers.empty
       .market(Topics.Bbo, inst) { (b, ctx, _) =>
-        val bps = (b.askPrice - b.bidPrice) / b.midPrice * 10_000
+        val bps = (b.askPrice - b.bidPrice).value / b.midPrice.value * 10_000
         Vector(ctx.emit(SpreadMetric, Spread(inst, bps)))
       }
 

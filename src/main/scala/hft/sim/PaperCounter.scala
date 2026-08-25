@@ -44,14 +44,14 @@ private[sim] object CounterCommands extends Topic[AccountId, CounterCommand]("pa
   * 正是校准这个偏差的数据。
   */
 final class PaperCounter(
-    val account: AccountId,
+    /** 本柜台服务的影子账户。类型就是 [[AccountId.Paper]] —— 虚拟柜台占用实盘账户是**写不出来**的，
+      * 不必再拿运行时 require 去挡（Scala 3 里带参数的 enum case 本身就是一个类型）。 */
+    val account: AccountId.Paper,
     exchange: Exchange,
     config: SimConfig,
     /** 净值刷新间隔：与实盘的 [[hft.engine.AccountRefresher]] 对齐，让两边的净值同频 */
     equityRefreshMs: Long = 1000,
 ) extends Actor:
-  require(account != AccountId.Live, s"虚拟柜台不能占用实盘账户: $account")
-
   private val logger = LoggerFactory.getLogger(classOf[PaperCounter])
   private var state: SimState = SimState.empty(account, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   private var ctx: ActorContext = scala.compiletime.uninitialized

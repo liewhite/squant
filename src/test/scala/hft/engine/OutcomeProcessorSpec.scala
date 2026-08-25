@@ -1,7 +1,7 @@
 package hft.engine
 
 import hft.domain.*
-import hft.exchange.ExchangeClient
+import hft.exchange.{DryRunClient, TradingClient}
 import hft.actor.ActorSystem
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent}
@@ -18,7 +18,7 @@ class OutcomeProcessorSpec extends munit.FunSuite:
 
 
   /** 只实现 placeOrder 的 stub，其余方法不应被触达 */
-  private class StubClient(placeResult: Either[ExchangeError, OrderId]) extends ExchangeClient:
+  private class StubClient(placeResult: Either[ExchangeError, OrderId]) extends TradingClient:
     override def exchange: Exchange = Exchange.Binance
     override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] = placeResult
     override def fetchAllSymbolMetas() = fail("unexpected call")
@@ -43,12 +43,15 @@ class OutcomeProcessorSpec extends munit.FunSuite:
     val ev = incomes.receive()
     ev.as(Topics.OrderUpdate).getOrElse(fail(s"unexpected event: $ev"))
 
-  test("dry-run: 信号以 OrderUpdate(AccountId.Live, Error) 回流清理 pending"):
+  test("dry-run (DryRunClient): 信号以 OrderUpdate(AccountId.Live, Error) 回流清理 pending"):
+    // dry-run 不再是下单出口的开关, 而是换一个客户端实现 —— 它以 4xx 拒单返回,
+    // 走的正是既有的"确定性失败"通道, 所以这里的期望与真实拒单那条用例完全一致。
     supervised:
       val bus = EventBus()
       val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
+      val clients = Map[Exchange, TradingClient](Exchange.Binance -> DryRunClient(StubClient(Right("ignored"))))
 
-      ActorSystem(bus).spawn(OutcomeProcessor(Map.empty, metasFor, dryRun = true, AccountId.Live))
+      ActorSystem(bus).spawn(OutcomeProcessor(clients, metasFor, AccountId.Live))
       bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), "test"))))
 
       val update = receivedError(incomes.events)
@@ -59,9 +62,9 @@ class OutcomeProcessorSpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
-      val clients = Map[Exchange, ExchangeClient](Exchange.Binance -> StubClient(Left(ExchangeError.Http(400, """{"code":-2019,"msg":"Margin is insufficient."}"""))))
+      val clients = Map[Exchange, TradingClient](Exchange.Binance -> StubClient(Left(ExchangeError.Http(400, """{"code":-2019,"msg":"Margin is insufficient."}"""))))
 
-      ActorSystem(bus).spawn(OutcomeProcessor(clients, metasFor, dryRun = false, AccountId.Live))
+      ActorSystem(bus).spawn(OutcomeProcessor(clients, metasFor, AccountId.Live))
       bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), "test"))))
 
       val update = receivedError(incomes.events)
@@ -73,9 +76,9 @@ class OutcomeProcessorSpec extends munit.FunSuite:
       supervised:
         val bus = EventBus()
         val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
-        val clients = Map[Exchange, ExchangeClient](Exchange.Binance -> StubClient(Left(ExchangeError.Network("connection reset"))))
+        val clients = Map[Exchange, TradingClient](Exchange.Binance -> StubClient(Left(ExchangeError.Network("connection reset"))))
 
-        ActorSystem(bus).spawn(OutcomeProcessor(clients, metasFor, dryRun = false, AccountId.Live))
+        ActorSystem(bus).spawn(OutcomeProcessor(clients, metasFor, AccountId.Live))
         bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), "test"))))
         incomes.events.receive() // 阻塞至下单 fork 失败取消作用域
     }
@@ -86,7 +89,7 @@ class OutcomeProcessorSpec extends munit.FunSuite:
         val bus = EventBus()
         val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
 
-        ActorSystem(bus).spawn(OutcomeProcessor(Map.empty, metasFor, dryRun = false, AccountId.Live))
+        ActorSystem(bus).spawn(OutcomeProcessor(Map.empty, metasFor, AccountId.Live))
         bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), "test"))))
         incomes.events.receive()
     }
