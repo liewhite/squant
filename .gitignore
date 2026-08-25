@@ -14,3 +14,10 @@ data-cache/
 # 实盘配置 (含明文 API 密钥) —— 只提交 *.example.json 模板, 真实配置勿入库
 conf/*.json
 !conf/*.example.json
+
+# Metals 自动生成 (文件头写着 DO NOT EDIT)：内容随各人装的 Metals/bloop 版本变，
+# 入库只会带来无意义的版本号来回改动。Metals 连上时会自己重新生成，plain sbt 不需要它。
+project/metals.sbt
+
+# macOS Finder 产物
+.DS_Store
