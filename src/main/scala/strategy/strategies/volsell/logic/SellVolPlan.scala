@@ -93,8 +93,8 @@ object SellVolPlan:
     val from = ZonedDateTime.ofInstant(Instant.ofEpochMilli(fromMs), zone)
     from.`with`(TemporalAdjusters.previous(DayOfWeek.FRIDAY)).`with`(LocalTime.of(decisionHour, 0)).toInstant.toEpochMilli
 
-  /** 按交易所 qtyStep 向下取整并校验 minQty: 返回合规下单量, 低于最小量返回 None。step<=0 时只校验 minQty。 */
+  /** 按交易所 qtyStep 向下取整并校验 minQty: 返回合规下单量, 低于最小量返回 None。step<=0 时只校验 minQty。
+    * 判据在 [[OptionQty.alignDown]] —— 与 IV 定量卖方策略共用一份, 两处各写会在同一交易所上给出
+    * 不同答案而没有任何编译错误。 */
   def quantizeQty(qty: Double, qtyStep: Double, minQty: Double): Option[Double] =
-    val q = if qtyStep > 0 then math.floor(qty / qtyStep + 1e-9) * qtyStep else qty
-    val rounded = if qtyStep > 0 then math.round(q / qtyStep) * qtyStep else q // 消除浮点尾差
-    if rounded >= minQty && rounded > 0 then Some(rounded) else None
+    OptionQty.alignDown(qty, qtyStep, minQty)

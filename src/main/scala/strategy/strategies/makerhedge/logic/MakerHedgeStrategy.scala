@@ -1,5 +1,5 @@
 package strategy.strategies.makerhedge.logic
-import strategy.utils.hedge.{HedgeBand, HedgeCtx}
+import strategy.utils.hedge.{HedgeBand, HedgeCtx, MakerQuoteLeg}
 
 import hft.domain.*
 import hft.indicator.{Atr, KlineSeries, Macd, RealizedVol, Sma}
@@ -58,9 +58,8 @@ final class MakerHedgeStrategy(
       override protected def smaPeriod: Int = maSmaPeriod
 
   private var center: Double = Double.NaN
-  private var restingId: Option[OrderId] = None // 当前挂单的撮合 orderId (来自回流)
-  private var restingAt: Timestamp = 0L
-  private var awaitingAck: Boolean = false // 已下单、等待 Pending 回流确认
+  /** 被动挂单腿 (挂/撤/防重的机制与敞口轴对冲策略共用一份, 见 [[MakerQuoteLeg]]) */
+  private val leg = MakerQuoteLeg(offsetPct, requoteMs)
   private var greeksRefMid: Double = Double.NaN // 上次 greeks 更新时的中间价 (gamma 修正基准)
 
   /** 启动预热: 用历史 (high, low, close) 喂 K 线 (h/l/c 当三笔 tick), 使 ATR/均线在开机即就绪,
@@ -75,14 +74,7 @@ final class MakerHedgeStrategy(
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
     .own(Topics.OrderUpdate) { (u, _, _) =>
-      u.status match
-        case OrderStatus.Pending | OrderStatus.PartiallyFilled(_) =>
-          restingId = Some(u.orderId); restingAt = u.timestamp; awaitingAck = false
-        case OrderStatus.Filled =>
-          center = u.price.value; restingId = None; awaitingAck = false // 对冲成交 -> 中心重置
-        case OrderStatus.Cancelled | OrderStatus.Rejected(_) | OrderStatus.Error(_) =>
-          restingId = None; awaitingAck = false
-        case OrderStatus.Created => () // 本地态, 等确认
+      leg.onOrderUpdate(u).foreach(px => center = px.value) // 对冲成交 -> 中心重置到成交价
       Vector.empty
     }
     .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, _) =>
@@ -104,15 +96,12 @@ final class MakerHedgeStrategy(
     }
 
   private def manage(px: Double, now: Timestamp, ctx: StrategyContext): Vector[AnyEvent] =
-    if awaitingAck then Vector.empty
-    else
-      restingId match
-        case Some(id) =>
-          if now - restingAt > requoteMs then
-            restingId = None // 撤后下一 tick 重挂 (按新价)
-            Vector(ctx.cancel(exchange, symbol, OrderRef.ByExchangeId(id)))
-          else Vector.empty
-        case None =>
+    leg.step(now) match
+      case MakerQuoteLeg.Step.Blocked      => Vector.empty
+      case MakerQuoteLeg.Step.Requote(ref, retry) =>
+        if retry then warnThrottled(s"撤单确认超 ${requoteMs}ms 未到, 重发撤单 $ref (期间不挂新单, 对冲暂停)")
+        Vector(ctx.cancel(exchange, symbol, ref))
+      case MakerQuoteLeg.Step.Ready =>
           ctx.state.greeks(exchange, ccy) match
             case None =>
               warnThrottled("greeks/ccy 余额未就绪 -> 未对冲 (检查期权 greeks 流是否在推、ccy 余额是否注入)")
@@ -151,11 +140,7 @@ final class MakerHedgeStrategy(
                     // BBO 外 offset 挂被动单: 卖挂 bestAsk·(1+off)、买挂 bestBid·(1−off); 盘口缺失则回退中间价 (降级, 告警)
                     val bbo = ss.bbo(exchange)
                     if bbo.isEmpty then warnThrottled(f"盘口 BBO 缺失 -> maker 挂价回退中间价 $px%.2f (检查 BBO 订阅是否在推)")
-                    val refPx: Price = side match
-                      case Side.Short => bbo.fold(Price(px))(_.askPrice)
-                      case Side.Long  => bbo.fold(Price(px))(_.bidPrice)
-                    val limitPx = if side == Side.Short then refPx.scaled(1.0 + offsetPct) else refPx.scaled(1.0 - offsetPct)
-                    awaitingAck = true
+                    val limitPx = leg.place(side, bbo, Price(px))
                     Vector(
                       ctx.place(
                         Order("", exchange, symbol, side, OrderType.Limit(limitPx, TimeInForce.PostOnly), Coin(qty), reduceOnly = false, clientOrderId = ""),

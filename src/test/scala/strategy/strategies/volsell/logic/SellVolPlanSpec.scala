@@ -21,11 +21,11 @@ class SellVolPlanSpec extends munit.FunSuite:
   test("selectStrangle: 离目标到期最近的到期 + 贴近现价两侧的价外 call/put"):
     val d = 86_400_000L
     val chain = Vector(
-      OptionInstrument("ETH-A-3000-C", 10 * d, 3000, OptionRight.Call), // 错误到期
-      OptionInstrument("ETH-B-2900-P", 21 * d, 2900, OptionRight.Put),  // <spot 较远
-      OptionInstrument("ETH-B-3000-P", 21 * d, 3000, OptionRight.Put),  // <spot 最近 -> 选
-      OptionInstrument("ETH-B-3100-C", 21 * d, 3100, OptionRight.Call), // >spot 最近 -> 选
-      OptionInstrument("ETH-B-3200-C", 21 * d, 3200, OptionRight.Call), // >spot 较远
+      OptionInstrument("ETH-A-3000-C", 10 * d, 3000, OptionRight.Call, ctVal = 1.0), // 错误到期
+      OptionInstrument("ETH-B-2900-P", 21 * d, 2900, OptionRight.Put, ctVal = 1.0),  // <spot 较远
+      OptionInstrument("ETH-B-3000-P", 21 * d, 3000, OptionRight.Put, ctVal = 1.0),  // <spot 最近 -> 选
+      OptionInstrument("ETH-B-3100-C", 21 * d, 3100, OptionRight.Call, ctVal = 1.0), // >spot 最近 -> 选
+      OptionInstrument("ETH-B-3200-C", 21 * d, 3200, OptionRight.Call, ctVal = 1.0), // >spot 较远
     )
     val res = SellVolPlan.selectStrangle(chain, nowMs = 0, spot = 3060, targetExpiryMs = 21 * d)
     assertEquals(res.map((c, p) => (c.symbol, p.symbol)), Some(("ETH-B-3100-C", "ETH-B-3000-P")))

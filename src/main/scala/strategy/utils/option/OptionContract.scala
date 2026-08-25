@@ -3,9 +3,14 @@ package strategy.utils.option
 /** 期权卖方实盘代码——**与 hft 回测/交易框架隔离**的独立 package (voltrade)。
   * 只复用 hft 里的纯数学工具 (RealizedVol/BlackScholes) 与底层 Bybit 签名原语, 不掺入 hft 交易引擎。 */
 
-/** 看涨/看跌 */
-enum OptionRight:
-  case Call, Put
+/** 看涨/看跌 —— **不另立一份**，就是 [[hft.option.OptionRight]]。
+  *
+  * 从前这里有一个同名 enum，与 BlackScholes 用的那个是两个互不相容的类型：同一个"看涨"
+  * 概念有两个定义，跨边界就得写一次映射，而映射写反了编译器不会有任何反应 (Call/Put 两个
+  * 分支形状相同)。类型别名让它们成为同一个类型，映射连存在的必要都没有。
+  */
+type OptionRight = hft.option.OptionRight
+val OptionRight: hft.option.OptionRight.type = hft.option.OptionRight
 
 /** 一个期权合约 (来自交易所 option chain)。
   * @param symbol   交易所原始符号 (Bybit: ETH-26SEP25-3000-C-USDT), 下单时原样回传, 不自行拼接避免格式错
@@ -15,16 +20,23 @@ enum OptionRight:
   * @param minQty   最小下单量 (lotSizeFilter.minOrderQty)
   * @param qtyStep  下单量步长 (lotSizeFilter.qtyStep)
   * @param tickSize 价格最小变动 (priceFilter.tickSize)
+  * @param ctVal    **每张对应多少标的** (OKX ctVal, 如 ETH 期权 0.01)。张数 -> 标的敞口的换算靠它，
+  *                 故**无默认值**：给个 1.0 的"合理默认"在 ctVal≠1 的交易所上会把 delta 静默错算
+  *                 一个整数倍，而这类错误没有任何外在症状
   */
 final case class OptionInstrument(
     symbol: String,
     expiryMs: Long,
     strike: Double,
     right: OptionRight,
+    ctVal: Double,
     minQty: Double = 0.0,
     qtyStep: Double = 0.0,
     tickSize: Double = 0.0,
-)
+):
+  /** 带符号张数 -> **币本位**标的量。张到币的换算只在这里写一次：写两处的话，改了其中一处
+    * 不会有任何编译错误 —— 只是从此 delta 与名义价值按不同的倍数算，两个数各自看着都合理。 */
+  def toCoin(contracts: Double): Double = contracts * ctVal
 
 /** 期权盘口最优买卖价 (bid1/ask1)。供卖价决策: 价差 = ask−bid, 公允(中)价 = (bid+ask)/2。 */
 final case class Quote(bid: Double, ask: Double):
@@ -48,3 +60,28 @@ object OptionContract:
         case _   => None
       strikeStr.toDoubleOption.zip(right).map { case (k, r) => (base, k, r) }
     }
+
+/** 一个期权合约的**标记读数** (交易所每腿各自给出)。
+  *
+  * @param symbol  期权 instId
+  * @param markVol 标记隐含波动率 (年化, 1.0 = 100%)。卖出定量与 delta 计算都用它
+  */
+final case class OptionMark(symbol: String, markVol: Double)
+
+/** 一笔期权持仓。
+  *
+  * @param symbol    期权 instId
+  * @param contracts **带符号**张数 (正=多头, 负=空头)
+  */
+final case class OptionHolding(symbol: String, contracts: Double)
+
+/** 账户的现金读数：净值 (杠杆闸门) 与某币种现金余额 (币本位期权的裸多头敞口)。
+  *
+  * 两者出自同一个账户接口，故一起返回 —— 分两次拉会看到两个时刻的账户，而杠杆率与对冲目标
+  * 都是"此刻这个账户"的性质。
+  *
+  * @param equity      账户净值 (计价货币)
+  * @param coinBalance 该币种**现金**余额 (不含期权未实现盈亏：那部分的价格敏感性已由 delta 描述，
+  *                    再当成一笔静态余额对冲就是把同一份敞口算两遍)
+  */
+final case class OptionAccountCash(equity: Double, coinBalance: Double)

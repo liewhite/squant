@@ -407,6 +407,7 @@ sbt "runMain strategy.compare.WeeklySellVolBacktest"
 # 实盘 / 影子盘启动器 (需 conf/ 下的凭证配置)
 sbt "runMain strategy.strategies.volsell.live.VolSellLauncher"
 sbt "runMain strategy.strategies.makerhedge.live.PerpHedgeEngineLauncher"
+sbt "runMain strategy.strategies.ivsellhedge.live.OkxIvSellHedgeLauncher"   # IV 定量卖出 + KAMA 死区对冲
 ```
 
 dry-run 模式下信号以 Error 事件即时清理 pending，做市类策略会随行情 tick 高频空转 ——

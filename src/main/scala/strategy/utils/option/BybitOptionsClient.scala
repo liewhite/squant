@@ -75,7 +75,8 @@ final class BybitOptionsClient(
           val insts = r.list.flatMap { i =>
             OptionContract.parseSymbol(i.symbol).flatMap { case (_, strike, right) =>
               i.deliveryTime.toLongOption.filter(_ > 0).map { exp =>
-                OptionInstrument(i.symbol, exp, strike, right,
+                // Bybit ETH/BTC 期权每张对应 1 单位标的 (数量本身就是币本位), 故 ctVal=1
+                OptionInstrument(i.symbol, exp, strike, right, ctVal = 1.0,
                   minQty = i.lotSizeFilter.flatMap(_.minOrderQty.toDoubleOption).getOrElse(0.0),
                   qtyStep = i.lotSizeFilter.flatMap(_.qtyStep.toDoubleOption).getOrElse(0.0),
                   tickSize = i.priceFilter.flatMap(_.tickSize.toDoubleOption).getOrElse(0.0))

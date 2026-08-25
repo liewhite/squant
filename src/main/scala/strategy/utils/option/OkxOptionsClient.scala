@@ -29,7 +29,7 @@ final class OkxOptionsClient(
     quote: String = "USDT",
     optionCcy: Option[String] = None,
     simulated: Boolean = false,
-) extends OptionsExchange:
+) extends OptionsExchange with OptionAccountData:
   import OkxOptionsClient.*
 
   private val logger = LoggerFactory.getLogger(classOf[OkxOptionsClient])
@@ -37,6 +37,9 @@ final class OkxOptionsClient(
 
   /** 基础币 -> 永续 instId (与 hft OkxCodec.toOkx 同口径: BASE-QUOTE-SWAP) */
   private def swapInstId(symbol: String): String = s"$symbol-$quote-SWAP"
+
+  /** 基础币 -> 期权 instFamily (OKX 币本位期权: `<base>-USD`)。拼在一处, 免得几个接口各拼一遍 */
+  private def optionFamily(baseCoin: String): String = s"$baseCoin-USD"
 
   override def underlyingCloses5m(symbol: String, bars: Int): Either[String, Vector[Double]] =
     candles(swapInstId(symbol), bar = "5m", bars).map(_.map(_.close))
@@ -65,7 +68,7 @@ final class OkxOptionsClient(
 
   override def optionChain(baseCoin: String): Either[String, Vector[OptionInstrument]] =
     // OKX 期权链一次返回全量 (无游标), 直接读 stk/optType/expTime 字段, 无需解析符号
-    publicGet[Envelope[InstrumentItem]](s"/api/v5/public/instruments?instType=OPTION&instFamily=$baseCoin-USD").flatMap { env =>
+    publicGet[Envelope[InstrumentItem]](s"/api/v5/public/instruments?instType=OPTION&instFamily=${optionFamily(baseCoin)}").flatMap { env =>
       env.asEither.map(_.flatMap(instrumentOf).toVector)
     }
 
@@ -74,6 +77,45 @@ final class OkxOptionsClient(
       env.result.flatMap { t =>
         for bid <- t.bidPx.toDoubleOption.filter(_ > 0); ask <- t.askPx.toDoubleOption.filter(_ > 0)
         yield Quote(bid, ask)
+      }
+    }
+
+  // ==================== OptionAccountData: 声明式对账与实时 delta 的读数 ====================
+
+  override def optionMarks(baseCoin: String): Either[String, Vector[OptionMark]] =
+    // OKX opt-summary 一次返回该 instFamily 全部合约的标记读数 (含 markVol), 无游标
+    publicGet[Envelope[SummaryItem]](s"/api/v5/public/opt-summary?instFamily=${optionFamily(baseCoin)}").flatMap { env =>
+      env.asEither.map(_.flatMap(markOf).toVector)
+    }
+
+  override def optionPositions(baseCoin: String): Either[String, Vector[OptionHolding]] =
+    val family = optionFamily(baseCoin)
+    signedGet[Envelope[PositionItem]]("/api/v5/account/positions", s"instType=OPTION&instFamily=$family").flatMap { env =>
+      // **再按 instId 前缀过滤一遍**, 不只依赖服务端的 instFamily 过滤。
+      // 若那个查询参数被忽略, 账户里其它标的的期权就会混进来 —— 它们配不上本标的的期权链与
+      // 标记 IV, 于是每一轮都被判为"敞口不完整", 对冲**永久冻结**。症状是"一直不对冲",
+      // 而原因在一个跟对冲毫无关系的持仓上, 极难查。
+      env.asEither.map(_.filter(_.instId.startsWith(s"$family-")).flatMap(holdingOf).toVector)
+    }
+
+  override def underlyingLast(symbol: String): Either[String, Double] =
+    publicGet[Envelope[TickerItem]](s"/api/v5/market/ticker?instId=${swapInstId(symbol)}").flatMap { env =>
+      env.asEither.flatMap { rows =>
+        rows.headOption.toRight(s"${swapInstId(symbol)} 无 ticker 数据")
+          .flatMap(t => t.last.toDoubleOption.filter(_ > 0).toRight(s"${swapInstId(symbol)} ticker.last 非法: '${t.last}'"))
+      }
+    }
+
+  override def accountCash(ccy: String): Either[String, OptionAccountCash] =
+    signedGet[Envelope[BalanceItem]]("/api/v5/account/balance", s"ccy=$ccy").flatMap { env =>
+      env.asEither.flatMap { rows =>
+        rows.headOption.toRight("OKX account/balance 无数据").flatMap { b =>
+          b.totalEq.toDoubleOption.toRight(s"OKX totalEq 非法: '${b.totalEq}'").map { equity =>
+            // 币种行缺失 = 该币余额为 0 (OKX 余额为 0 时常不下发该行), 不是错误
+            val cash = b.details.find(_.ccy == ccy).flatMap(_.cashBal.toDoubleOption).getOrElse(0.0)
+            OptionAccountCash(equity, cash)
+          }
+        }
       }
     }
 
@@ -155,16 +197,27 @@ object OkxOptionsClient:
   def clOrdIdOf(orderLinkId: String): String = orderLinkId.filter(_.isLetterOrDigit).take(32)
 
   /** OKX 期权 instruments 行 -> [[OptionInstrument]] (直接读 stk/optType/expTime 字段, 不解析符号)。
-    * strike/optType/expTime 任一缺失或非法 -> None (跳过该合约, 不污染期权链)。 */
+    * strike/optType/expTime/ctVal 任一缺失或非法 -> None (跳过该合约, 不污染期权链)。 */
   def instrumentOf(i: InstrumentItem): Option[OptionInstrument] =
     for
       strike <- i.stk.toDoubleOption
       right <- rightOf(i.optType)
       exp <- i.expTime.toLongOption.filter(_ > 0)
-    yield OptionInstrument(i.instId, exp, strike, right,
+      ctVal <- i.ctVal.toDoubleOption.filter(_ > 0) // ctVal 缺失/非法则跳过该合约: 张数换算不了, 宁缺勿错
+    yield OptionInstrument(i.instId, exp, strike, right, ctVal,
       minQty = i.minSz.toDoubleOption.getOrElse(0.0),
       qtyStep = i.lotSz.toDoubleOption.getOrElse(0.0),
       tickSize = i.tickSz.toDoubleOption.getOrElse(0.0))
+
+  /** opt-summary 行 -> [[OptionMark]]; markVol 缺失/非法 -> None (该腿无标记 IV, 上层据此跳过) */
+  def markOf(i: SummaryItem): Option[OptionMark] =
+    i.markVol.toDoubleOption.filter(_ > 0).map(v => OptionMark(i.instId, v))
+
+  /** positions 行 -> [[OptionHolding]]; pos 非法 -> None。**pos=0 也保留** ——
+    * "这个合约现在是 0 张"与"没这行"对声明式对账是同一个结论, 但保留它让日志能区分
+    * "刚平完"和"从没开过"。 */
+  def holdingOf(i: PositionItem): Option[OptionHolding] =
+    i.pos.toDoubleOption.map(p => OptionHolding(i.instId, p))
 
   /** 一根 K 线 (ts ms + OHLC), 由 OKX candles 行 [ts,o,h,l,c,...] 解析 */
   final case class Bar(ts: Long, high: Double, low: Double, close: Double)
@@ -188,8 +241,12 @@ object OkxOptionsClient:
     def asEither: Either[String, List[List[String]]] =
       if code == "0" then Right(data) else Left(s"OKX code=$code: $msg")
 
-  final case class InstrumentItem(instId: String, stk: String, optType: String, expTime: String, lotSz: String, minSz: String, tickSz: String)
-  final case class TickerItem(bidPx: String, askPx: String)
+  final case class InstrumentItem(instId: String, stk: String, optType: String, expTime: String, lotSz: String, minSz: String, tickSz: String, ctVal: String = "")
+  final case class TickerItem(bidPx: String = "", askPx: String = "", last: String = "")
+  final case class SummaryItem(instId: String = "", markVol: String = "")
+  final case class PositionItem(instId: String = "", pos: String = "")
+  final case class BalanceDetail(ccy: String = "", cashBal: String = "")
+  final case class BalanceItem(totalEq: String = "", details: List[BalanceDetail] = Nil)
   final case class OrderItem(ordId: String, clOrdId: String, sCode: String, sMsg: String)
   final case class GreeksItem(ccy: String, deltaBS: String, gammaBS: String)
 
@@ -198,3 +255,6 @@ object OkxOptionsClient:
   given tickerCodec: JsonValueCodec[Envelope[TickerItem]] = JsonCodecMaker.make
   given orderCodec: JsonValueCodec[Envelope[OrderItem]] = JsonCodecMaker.make
   given greeksCodec: JsonValueCodec[Envelope[GreeksItem]] = JsonCodecMaker.make
+  given summaryCodec: JsonValueCodec[Envelope[SummaryItem]] = JsonCodecMaker.make
+  given positionsCodec: JsonValueCodec[Envelope[PositionItem]] = JsonCodecMaker.make
+  given balanceCodec: JsonValueCodec[Envelope[BalanceItem]] = JsonCodecMaker.make

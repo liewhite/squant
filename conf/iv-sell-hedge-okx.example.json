@@ -1,0 +1,40 @@
+{
+  "apiKey": "YOUR_OKX_API_KEY",
+  "apiSecret": "YOUR_OKX_API_SECRET",
+  "passphrase": "YOUR_OKX_PASSPHRASE",
+  "quote": "USDT",
+  "simulated": true,
+  "tuning": {
+    "symbol": "ETH",
+    "baseCoin": "ETH",
+    "ccy": "ETH",
+
+    "targetDays": 3,
+    "minTtlDays": 1,
+    "minStrikeDistance": 0.02,
+    "ivStart": 0.2,
+    "ivQtyStart": 5.0,
+    "ivQtySlope": 1.0,
+    "ivQtyMax": 30.0,
+    "minPremium": 0.0,
+    "maxSpreadRatio": 1.1,
+    "maxOptionLeverage": 1.0,
+    "enableOpen": false,
+    "publishExposureMs": 1000,
+    "refreshMarksMs": 5000,
+    "sellIntervalMs": 5000,
+    "settleRounds": 1,
+
+    "deltaThreshold": 0.3,
+    "macdTightenRatio": 0.5,
+    "kamaBucketMs": 300000,
+    "kamaErPeriod": 10,
+    "kamaFast": 2,
+    "kamaSlow": 30,
+    "macdBar": "1H",
+    "offset": 0.0002,
+    "requoteMs": 5000,
+    "minHedgeQty": 0.001,
+    "maxHedgeQty": 5.0
+  }
+}

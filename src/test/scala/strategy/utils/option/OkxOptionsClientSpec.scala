@@ -7,18 +7,20 @@ import strategy.utils.option.OkxOptionsClient.*
 class OkxOptionsClientSpec extends munit.FunSuite:
 
   test("instrumentOf: 读 stk/optType/expTime 字段, 不解析符号"):
-    val call = InstrumentItem("ETH-USD-240329-3000-C", "3000", "C", "1711699200000", "1", "1", "0.1")
+    val call = InstrumentItem("ETH-USD-240329-3000-C", "3000", "C", "1711699200000", "1", "1", "0.1", ctVal = "0.01")
     // lotSz/minSz 取不同值, 验证 qtyStep<-lotSz、minQty<-minSz 的映射方向
-    val put = InstrumentItem("ETH-USD-240329-3000-P", "3000.5", "P", "1711699200000", "2", "0.1", "0.05")
-    assertEquals(instrumentOf(call), Some(OptionInstrument("ETH-USD-240329-3000-C", 1711699200000L, 3000.0, OptionRight.Call, 1.0, 1.0, 0.1)))
+    val put = InstrumentItem("ETH-USD-240329-3000-P", "3000.5", "P", "1711699200000", "2", "0.1", "0.05", ctVal = "0.01")
+    assertEquals(instrumentOf(call), Some(OptionInstrument("ETH-USD-240329-3000-C", 1711699200000L, 3000.0, OptionRight.Call, 0.01, 1.0, 1.0, 0.1)))
     assertEquals(instrumentOf(put).map(_.right), Some(OptionRight.Put))
     assertEquals(instrumentOf(put).map(_.strike), Some(3000.5))
     assertEquals(instrumentOf(put).map(i => (i.minQty, i.qtyStep, i.tickSize)), Some((0.1, 2.0, 0.05)))
 
   test("instrumentOf: 非法/缺失字段 -> None (跳过该合约)"):
-    assertEquals(instrumentOf(InstrumentItem("x", "abc", "C", "1711699200000", "1", "1", "0.1")), None) // strike 非数字
-    assertEquals(instrumentOf(InstrumentItem("x", "3000", "X", "1711699200000", "1", "1", "0.1")), None) // optType 非 C/P
-    assertEquals(instrumentOf(InstrumentItem("x", "3000", "C", "0", "1", "1", "0.1")), None)             // expTime<=0
+    assertEquals(instrumentOf(InstrumentItem("x", "abc", "C", "1711699200000", "1", "1", "0.1", ctVal = "0.01")), None) // strike 非数字
+    assertEquals(instrumentOf(InstrumentItem("x", "3000", "X", "1711699200000", "1", "1", "0.1", ctVal = "0.01")), None) // optType 非 C/P
+    assertEquals(instrumentOf(InstrumentItem("x", "3000", "C", "0", "1", "1", "0.1", ctVal = "0.01")), None) // expTime<=0
+    // ctVal 缺失 -> None: 张数换算不了, 按 1 猜会把 delta 静默错算一个整数倍
+    assertEquals(instrumentOf(InstrumentItem("x", "3000", "C", "1711699200000", "1", "1", "0.1")), None)
 
   test("clOrdIdOf: 去连字符 + 截断 32, 确定性 (幂等)"):
     assertEquals(clOrdIdOf("vs-1711699200000-c"), "vs1711699200000c")
@@ -52,3 +54,19 @@ class OkxOptionsClientSpec extends munit.FunSuite:
     assertEquals(Envelope("51000", "param error", List.empty[Int]).asEither, Left("OKX code=51000: param error"))
     assertEquals(CandlesEnvelope("0", "", List(List("a"))).asEither, Right(List(List("a"))))
     assert(CandlesEnvelope("1", "boom", Nil).asEither.isLeft)
+
+  test("markOf: markVol 缺失/非法/<=0 -> None (该腿无标记 IV, 不参与定量与 delta)"):
+    assertEquals(markOf(SummaryItem("ETH-USD-C", "0.65")), Some(OptionMark("ETH-USD-C", 0.65)))
+    assertEquals(markOf(SummaryItem("ETH-USD-C", "")), None)
+    assertEquals(markOf(SummaryItem("ETH-USD-C", "abc")), None)
+    assertEquals(markOf(SummaryItem("ETH-USD-C", "0")), None)
+
+  test("期权 instFamily 拼在一处 (三个接口同一个口径)"):
+    // 前缀过滤依赖它与 instId 的形状一致: instFamily=ETH-USD, instId=ETH-USD-260327-3000-C
+    assert("ETH-USD-260327-3000-C".startsWith("ETH-USD-"))
+    assert(!"BTC-USD-260327-60000-C".startsWith("ETH-USD-"))
+
+  test("holdingOf: pos 带符号 (负=空头); 0 张也保留 (让日志能区分刚平完和从没开过)"):
+    assertEquals(holdingOf(PositionItem("ETH-USD-C", "-10")), Some(OptionHolding("ETH-USD-C", -10.0)))
+    assertEquals(holdingOf(PositionItem("ETH-USD-C", "0")), Some(OptionHolding("ETH-USD-C", 0.0)))
+    assertEquals(holdingOf(PositionItem("ETH-USD-C", "")), None)

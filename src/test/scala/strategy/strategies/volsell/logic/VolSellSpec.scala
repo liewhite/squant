@@ -15,7 +15,7 @@ class VolSellSpec extends munit.FunSuite:
   private val rvUpCloses = flat ++ choppy // spot = 3060
 
   private def inst(sym: String, strike: Double, right: OptionRight, min: Double = 0.1, step: Double = 0.1) =
-    OptionInstrument(sym, now + 21 * d, strike, right, minQty = min, qtyStep = step, tickSize = 0.1) // 到期 ~21天后
+    OptionInstrument(sym, now + 21 * d, strike, right, ctVal = 1.0, minQty = min, qtyStep = step, tickSize = 0.1) // 到期 ~21天后
 
   // spot=3060: 最近宽跨 = call 3100 (>spot 最小) + put 3000 (<spot 最大); 另含更远腿验证"最近"
   private val chain = Vector(
