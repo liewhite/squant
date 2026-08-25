@@ -113,6 +113,16 @@ object StrategyRunner:
       counter += 1
       id
 
-  /** 回测专用工厂：注入确定性 client_order_id 生成器 (杜绝 UUID 随机带来的不可复现)。 */
-  def backtest(strategy: Strategy, symbolMetas: Map[(Exchange, Symbol), SymbolMeta]): StrategyRunner =
-    StrategyRunner(strategy, symbolMetas, AccountId.Live, deterministicIdGen())
+  /** 回测专用工厂：注入确定性 client_order_id 生成器 (杜绝 UUID 随机带来的不可复现)。
+    *
+    * `account` 必须与 [[hft.backtest.BacktestEngine]] 的账户一致 —— 私有回报按
+    * `AccountInstrument(account, 标的)` 路由，两边不一致的话撮合发出的成交回报根本进不了
+    * 本 runner 的订阅范围，策略从此收不到自己的成交，而这不会报任何错。
+    * 引擎在装配期校验这一点，此处保留参数是为了不把"回测只能有一个账户"焊死。
+    */
+  def backtest(
+      strategy: Strategy,
+      symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
+      account: AccountId = AccountId.Live,
+  ): StrategyRunner =
+    StrategyRunner(strategy, symbolMetas, account, deterministicIdGen())

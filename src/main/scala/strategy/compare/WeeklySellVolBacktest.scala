@@ -1,7 +1,8 @@
 package strategy.compare
 import strategy.utils.backtest.{WeeklyIvGrid, WeekPlan, WeekResult, WeekRec, pct, writeWeekly, writeFills, summarize}
 
-import hft.backtest.{BacktestEngine, BinanceDataKind, BinanceHistory, BsGreeksConfig, BsGreeksSource, TradePrintBboSource}
+import hft.backtest.binance.BinanceMarketDataProvider
+import hft.backtest.{BacktestEngine, BsGreeksConfig, BsGreeksSource, MarketDataKind, SyntheticBboSource}
 import hft.domain.*
 import hft.engine.StrategyRunner
 import hft.indicator.RealizedVol
@@ -87,7 +88,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   println(f"仓位: 波动↑卖${gridHigh}×/↓卖${gridLow}×   对冲带: $bandDesc   执行=$execDesc  delay=${delayMs}ms")
 
   def tradeSource(backend: sttp.client4.SyncBackend, s: LocalDate, e: LocalDate) =
-    BinanceHistory.source(backend, Seq(symbol), s, e, kinds = Seq(BinanceDataKind.Trades), cacheDir = cacheDir)
+    BinanceMarketDataProvider(backend, cacheDir).source(Seq(symbol), s, e, Set(MarketDataKind.Trades))
 
   def prepass(s: LocalDate, e: LocalDate): Double =
     val backend = DefaultSyncBackend()
@@ -112,7 +113,8 @@ import scala.concurrent.{Await, ExecutionContext, Future}
         riskFreeRate = 0.0, spotHolding = 0.0, emitIntervalMs = 1000, minTenorDays = 1.0,
       )
       val withGreeks = BsGreeksSource(tradeSource(backend, start, end), cfg)
-      val source = TradePrintBboSource(withGreeks)
+      // 对冲策略订阅盘口, 而该区间币安无 bookTicker 历史 -> 显式合成零价差盘口 (低估点差成本)
+      val source = SyntheticBboSource(withGreeks)
       val hedgeStrat =
         if hedgeExec == "take" then BandHedgeStrategy(Exchange.Binance, symbol, ccy, band) // 市价 at-touch
         else MakerHedgeStrategy(Exchange.Binance, symbol, ccy, band, offsetPct = makerOffset, requoteMs = requoteMs)

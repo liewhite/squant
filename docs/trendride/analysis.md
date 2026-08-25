@@ -13,7 +13,7 @@
 
 ## 2. 回测设置
 
-- 标的 ETHUSDT 永续，trade-native 行情 + 零价差合成 BBO（`TradeBboAugmentSource`，使 taker 可成交，**低估真实点差成本**）。
+- 标的 ETHUSDT 永续，trade-native 行情 + 零价差合成 BBO（`SyntheticBboSource`，使 taker 可成交，**低估真实点差成本**）。
 - 资金 100k，maker 0.02% / taker 0.05%，每周期往前预热 8 天，正式区间起点重置基准净值。
 - 周期：**趋势** 2025-10-06→11-17（ETH −33%）；**震荡** 2026-02-16→05-25。
 - 原始数据：`/tmp/trendride/{trend,chop}_{equity,fills}.csv`；曲线 `docs/trendride/trendride_pnl.png`。

@@ -61,23 +61,28 @@ final case class SimState(
 
   // ==================== 上游行情到达 (实时, 用于撮合) ====================
 
-  /** 行情到达交易所：更新行情 + 撮合越价挂单。返回 (新状态, 要回流策略的事件)。
-    * 第一个事件即转发给策略的行情, 其后是本次行情触发的成交回报 (保证行情先于成交)。
+  /** 行情到达交易所：更新行情快照 + 撮合被穿越的挂单。返回 (新状态, **撮合产生的**回报)。
+    *
+    * **不回显行情本身**。"把行情转发给策略"是扮演网关那一方的职责，不是撮合的 ——
+    * 实盘替身要转发 (策略的行情只有它这一个来源)，影子盘不能转发 (策略直接从总线读真实行情，
+    * 转了就是重复投递)。此前行情混在回报里返回，于是影子盘不得不再把它滤掉，
+    * 一个本不属于撮合的事实污染了撮合的输出形态。现在谁转发谁自己发 (见 [[Counter]])。
+    *
     * `now` 为当前时刻 (回测虚拟时间 / 实盘墙钟)，成交回报的时间戳取自它。
     */
   def onMarket(exchange: Exchange, ev: AnyEvent, now: Timestamp): (SimState, Vector[AnyEvent]) =
     ev.as(Topics.Bbo).map { bbo =>
-      val withBbo = copy(lastBbo = lastBbo.updated(bbo.symbol, bbo))
-      val (next, fills) = withBbo.matchCrossing(exchange, bbo, now)
-      (next, ev +: fills)
+      copy(lastBbo = lastBbo.updated(bbo.symbol, bbo)).matchCrossing(exchange, bbo, now)
     }.orElse(ev.as(Topics.MarkPrice).map { mp =>
-      (copy(lastMark = lastMark.updated(mp.symbol, mp.price)), Vector(ev))
+      (copy(lastMark = lastMark.updated(mp.symbol, mp.price)), Vector.empty[AnyEvent])
     }).orElse(ev.as(Topics.Trade).map { t =>
-      // trade-print 撮合：真实成交价严格越过挂单价即成交 (无 bbo 行情时的撮合来源)
-      val withTrade = copy(lastTrade = lastTrade.updated(t.symbol, t.price))
-      val (next, fills) = withTrade.matchTrade(exchange, t, now)
-      (next, ev +: fills)
-    }).getOrElse((this, Vector(ev)))
+      // 逐笔撮合：真实成交价严格穿越挂单价即成交 (与 BBO 穿越同一 maker 口径, 见 Matcher)
+      copy(lastTrade = lastTrade.updated(t.symbol, t.price)).matchTrade(exchange, t, now)
+    }).getOrElse((this, Vector.empty[AnyEvent]))
+
+  /** 本柜台账户的读数快照 (估值口径见 [[markOf]])。
+    * 回测、影子盘、实盘替身三处都取这一个 —— 见 [[Ledger.accountInfo]]。 */
+  def accountInfo(exchange: Exchange): AccountInfo = ledger.accountInfo(exchange, markOf)
 
   /** 收集越价挂单, 按 (价格, 到达序) 优先级排序 (更激进者先成交, 同价 FIFO)，杜绝 HashMap 哈希序。
     * 单趟扫描 valuesIterator；无匹配 (绝大多数行情) 零分配快速返回；单张免排序。 */
@@ -104,13 +109,13 @@ final case class SimState(
         (next, evs ++ fillEvs)
       }
 
-  /** BBO 越过挂单价的全部挂单成交 (maker 成交价取挂单价) */
+  /** BBO 严格穿越挂单价的全部挂单成交 (maker 悲观侧, 成交价取挂单价) */
   private def matchCrossing(exchange: Exchange, bbo: BBO, now: Timestamp): (SimState, Vector[AnyEvent]) =
-    fillCrossed(exchange, crossingOrders(o => o.symbol == bbo.symbol && Matcher.crosses(o.side, o.limitPrice, bbo)), now)
+    fillCrossed(exchange, crossingOrders(o => o.symbol == bbo.symbol && Matcher.crossedByBbo(o.side, o.limitPrice, bbo)), now)
 
-  /** 真实成交严格越过挂单价的全部挂单成交 (maker 成交价取挂单价) */
+  /** 真实成交严格穿越挂单价的全部挂单成交 (maker 悲观侧, 成交价取挂单价) */
   private def matchTrade(exchange: Exchange, t: MarketTrade, now: Timestamp): (SimState, Vector[AnyEvent]) =
-    fillCrossed(exchange, crossingOrders(o => o.symbol == t.symbol && Matcher.tradeCrosses(o.side, o.limitPrice, t.price)), now)
+    fillCrossed(exchange, crossingOrders(o => o.symbol == t.symbol && Matcher.crossedByTrade(o.side, o.limitPrice, t.price)), now)
 
   // ==================== 下单到达撮合 ====================
 
@@ -127,10 +132,11 @@ final case class SimState(
           case None =>
             (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected("no market data for market order"), 0.0, now)))
       case OrderType.Limit(limit, tif) =>
-        // 到达即可成交时的对手价 (None = 不可成交)。可成交性与 resting 越价用同一判定
-        // (Matcher.crosses) 二者自洽；价与可成交性同源, 无需 .get
+        // 到达即可成交时的对手价 (None = 不可成交)。用 taker 判定 (价格重合即成交, 乐观侧),
+        // 与 resting 的严格穿越判定刻意不同 —— 见 [[Matcher]] 的"悲观间隙"说明。
+        // 价与可成交性同源 (都出自这张 bbo), 无需 .get
         val takerPrice: Option[Price] =
-          bboOpt.filter(Matcher.crosses(order.side, limit, _)).map(Matcher.touchPrice(order.side, _))
+          bboOpt.filter(Matcher.marketable(order.side, limit, _)).map(Matcher.touchPrice(order.side, _))
         def takerFill(price: Price) = fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, price, order.quantity, now, Liquidity.Taker, order.reduceOnly)
         tif match
           case TimeInForce.PostOnly =>

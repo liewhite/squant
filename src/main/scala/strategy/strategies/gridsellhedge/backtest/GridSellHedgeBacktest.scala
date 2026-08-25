@@ -1,6 +1,7 @@
 package strategy.strategies.gridsellhedge.backtest
 
-import hft.backtest.{BinanceDataKind, BinanceHistory}
+import hft.backtest.MarketDataKind
+import hft.backtest.binance.BinanceMarketDataProvider
 import hft.domain.{Exchange, Side}
 import hft.event.Topics
 import strategy.strategies.gridsellhedge.logic.DynamicHedgeBand
@@ -67,8 +68,8 @@ import java.time.LocalDate
   val t0 = System.nanoTime()
   var n = 0L
   try
-    val it = BinanceHistory
-      .source(backend, Seq(symbol), start, end, kinds = Seq(BinanceDataKind.Trades), cacheDir = cacheDir)
+    val it = BinanceMarketDataProvider(backend, cacheDir)
+      .source(Seq(symbol), start, end, Set(MarketDataKind.Trades))
       .events()
     while it.hasNext do
       it.next().as(Topics.Trade).filter(_.symbol == symbol).foreach { t =>

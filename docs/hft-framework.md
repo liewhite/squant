@@ -90,9 +90,42 @@ object AlphaSignal extends Topic[Symbol, Score]("alphaSignal"):
 偏乐观，据此得出的结论无法外推。延迟用 `ActorContext.scheduleEvent` 表达：定时器只把发布
 推迟到点，撮合仍在 actor 线程串行进行（单线程定时器是顺序保证的承重墙）。
 
-**如实声明的偏差**：撮合不建模**队列位置** —— 只要行情越过挂单价就算成交。成交价格是对的，
-成交机会偏多，真实盘口里排在后面的单可能根本轮不到。所以影子盘的成交率与盈亏系统性偏高，
-拿它做晋升判据时门槛要留余量；晋升后实盘与影子并行，两边成交率之差正是校准这个偏差的数据。
+### 一个柜台核心，三个驱动
+
+"虚拟柜台"这件事在系统里有三个出场：回测引擎、实盘替身 `SimulatedExchange`、影子盘
+`PaperCounter`。它们共用的不只是撮合状态机，还有**延迟语义**——都在 `hft.sim.Counter`：
+
+```
+Counter.step(state, exchange, input: CounterInput, now, config)
+  -> (SimState, Vector[Delayed[AnyEvent]])
+```
+
+命令形态（`CounterInput`：行情到达 / 下单到达 / 撤单到达）与"回报该晚多久送达"都由核心给出，
+三个驱动只回答两个问题：**现在几点**（虚拟时间 / 墙钟）、**事件往哪送**（虚拟时间优先队列 /
+定时器加总线）。
+
+这不是为了少写代码。三者若各写一份延迟模型，改了其中一份不会有任何编译错误 ——
+它们只是从此对同一个策略给出不同结论，而"结论应当一致"正是这套东西全部的价值所在。
+
+**撮合不回显行情**：`SimState.onMarket` 只返回撮合产生的回报，不把输入的行情再吐一遍。
+转发行情是**网关**职责：实盘替身要转发（策略的行情只有它这一个来源），影子盘不能转发
+（策略直接从总线读真实行情，转了就是重复投递），回测由引擎自己转发。此前行情混在回报里
+返回，影子盘不得不再滤掉一次 —— 一个本不属于撮合的事实污染了撮合的输出形态。
+"行情先于它引发的成交送达策略"这条保证因此落在驱动层，测试也在那里。
+
+**如实声明的偏差**：撮合不建模**队列位置**，也不建模**盘口深度**，两侧刻意取不同方向的
+近似（`Matcher`，回测与影子盘共用）：
+
+- **maker（被动挂单）取悲观侧**：价格必须**严格穿越**挂单价才算成交，仅仅触及不算 ——
+  真实盘口里那个价位上排着队，价格没穿过去意味着队列没消化到我。行情是 L1 盘口还是逐笔
+  成交，判据同一份（`crossedByBbo` / `crossedByTrade`）。
+- **taker（主动吃单）取乐观侧**：与盘口**价格重合即全量成交**（`marketable`），在对手价
+  一次成交，不看盘口挂单量、不建模吃穿多档的冲击成本。
+
+两侧判据只差一个等号，中间留出一格**有意的间隙**：买单挂在 L、盘口 ask 恰好等于 L 时，
+订单此刻到达就按 taker 成交，早已在簿上就不成交。这不是漏洞，正是"主动吃 vs 被动等"的
+真实差别。净效果是 maker 成交机会偏少、taker 成本偏低，所以拿影子盘做晋升判据时门槛要留
+余量；晋升后实盘与影子并行，两边成交率之差正是校准这个偏差的数据。
 
 **影子账户的启动对齐**：它从零开始，没有历史仓位与挂单要恢复，唯一的初值（净值）由柜台
 周期发布。绝不能拿真实交易所的持仓去对齐一个模拟账户 —— 那是别人的仓位。
@@ -237,9 +270,12 @@ def handlers = StrategyHandlers.empty
 | `state` | `SymbolState`/`StateManager` (策略视角的聚合状态) |
 | `exchange` | 核心抽象: `ExchangeClient` (REST trait)、`ExchangeConnector` (WS trait)、`SubscriptionKind`、`WsLoop` (通用重连泵) |
 | `engine` | `Engine` (装配/生命周期)、`Executor` (策略运行器)、`OutcomeProcessor` (信号执行) |
-| `strategy` | `Strategy` trait + `OutcomeEvent`；`BboMakerStrategy` (BBO 外被动做市 + 杠杆率风控) |
-| `exchange/binance` | Binance USDⓈ-M 实现 (REST 签名、公共/私有 WS、jsoniter 编解码) |
-| `demo` | `HftDemo` (公开行情演示) / `MakerDemo` (做市策略) 入口 + `FundingWatchStrategy` 演示策略 |
+| `strategy` | `Strategy` / `StrategyHandlers` / `StrategyContext` + `OutcomeEvent` — 策略契约与能力面 |
+| `sim` | `SimState` (撮合状态机) / `Ledger` / `Matcher` / `Counter` (柜台核心) / `SimulatedExchange` / `PaperCounter` |
+| `backtest` | `MarketDataProvider` 抽象 + `BacktestEngine` (虚拟时间驱动) + 各交易所数据实现 |
+| `perf` | `PerformanceTracker` / `PromotionPolicy` / `Supervisor` — 战绩统计与晋升调度 |
+| `indicator` / `option` | 纯计算: K 线与技术指标 / Black-Scholes 与希腊字母 |
+| `exchange/{binance,okx,bybit}` | 各所实现 (REST 签名、公共/私有 WS、jsoniter 编解码) |
 
 ## 核心设计
 
@@ -338,9 +374,6 @@ ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内
 (`accountRefreshMs`，默认 10s) 持续发布 `Topics.AccountInfo` 事件保证风控数据新鲜。
 注意净值最多滞后一个刷新周期，临界风控阈值 (如杠杆率上限) 应自留余量。
 
-dry-run 模式下信号以 Error 事件即时清理 pending，做市类策略会随行情 tick 高频空转，
-dry-run 仅适合验证接线，策略行为观察请用小额实盘。
-
 ## Binance 接入说明
 
 - REST: `https://fapi.binance.com`，私有接口 HMAC-SHA256 签名。
@@ -352,16 +385,20 @@ dry-run 仅适合验证接线，策略行为观察请用小额实盘。
 - 注意: 未路由的旧端点 `wss://fstream.binance.com/ws` 不再推送 markPrice 等 `/market` 路由的数据。
 - Binance 每 24 小时强制断开连接——fail-fast 模型下进程至少每日重启一次，需外层自动拉起。
 
-## 运行演示与测试
+## 运行与测试
 
 ```bash
-sbt "runMain hft.demo.HftDemo"    # 公开行情 dry-run 演示 (无需 API key)
-sbt test                          # 单元测试 (domain 精度/费率、订单生命周期、Executor 链路、策略行为)
+sbt test                          # 单元测试 (撮合语义、订单生命周期、事件路由、回测确定性)
 
-# BBO 做市策略 (需 API key；默认 dry-run，LIVE=1 真实下单)
-BINANCE_API_KEY=.. BINANCE_API_SECRET=.. sbt "runMain hft.demo.MakerDemo"
+# 回测 (读 data-cache/, 缺的日期自动从 data.binance.vision 下载)
+sbt "runMain strategy.strategies.macdgrid.backtest.MacdGridBacktest ETHUSDT 2026-05-01 2026-05-31"
+sbt "runMain strategy.strategies.gridsellhedge.backtest.GridSellHedgeBacktest"
+sbt "runMain strategy.compare.WeeklySellVolBacktest"
+
+# 实盘 / 影子盘启动器 (需 conf/ 下的凭证配置)
+sbt "runMain strategy.strategies.volsell.live.VolSellLauncher"
+sbt "runMain strategy.strategies.makerhedge.live.PerpHedgeEngineLauncher"
 ```
 
-dry-run 模式接入 Binance 公开行情 (无需 API key)，可观察完整闭环：
-行情流入 → 状态聚合 → 资金费率信号 → dry-run 下单 → pending 订单 5 秒超时清理。
-配置 `BINANCE_API_KEY` / `BINANCE_API_SECRET` 环境变量可接入私有流 (真实下单需去掉 dryRun)。
+dry-run 模式下信号以 Error 事件即时清理 pending，做市类策略会随行情 tick 高频空转 ——
+它只适合验证接线，策略行为观察请用小额实盘或影子盘。

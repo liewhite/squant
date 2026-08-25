@@ -10,10 +10,11 @@ import org.slf4j.LoggerFactory
   *
   * 走总线而不是自己起一条内部队列：这样命令仍由 actor 线程串行消费，柜台状态的写者
   * 依旧只有一个。key 是账户，因此只有本柜台会收到自己的命令。
+  *
+  * 载荷直接用共用的 [[CounterInput]]，本类型只给它套一个账户路由键 —— 撮合命令的形态
+  * 与回测、实盘替身是同一份。
   */
-private[sim] enum CounterCommand(val account: AccountId):
-  case OrderArrived(override val account: AccountId, order: Order, orderId: OrderId) extends CounterCommand(account)
-  case CancelArrived(override val account: AccountId, ref: OrderRef) extends CounterCommand(account)
+private[sim] final case class CounterCommand(account: AccountId, input: CounterInput)
 
 private[sim] object CounterCommands extends Topic[AccountId, CounterCommand]("paperCounterCommand"):
   def keyOf(payload: CounterCommand): AccountId = payload.account
@@ -24,6 +25,10 @@ private[sim] object CounterCommands extends Topic[AccountId, CounterCommand]("pa
   * 无感知)，本类则与实盘同时存在：两边看同一份真实行情、跑同一份策略逻辑，只有账户不同。
   * 撮合内核 ([[SimState]]) 是同一个。
   *
+  * 不需要 `SymbolMeta`：本柜台从总线收 [[OrderIntent]]，那里的数量已是币本位。
+  * 张数换算只发生在 exchange 适配层，而本柜台不在那条路径上 (替身 [[SimulatedExchange]]
+  * 才要，它扮演的是收 `ExchangeOrder` 的交易所)。
+  *
   * ## 为什么建模延迟
   *
   * 影子盘存在的理由是"预测实盘表现"。若它没有下单在途与回报回传的延迟，就会系统性偏
@@ -32,17 +37,16 @@ private[sim] object CounterCommands extends Topic[AccountId, CounterCommand]("pa
   *
   * ## 如实声明的偏差
   *
-  * 撮合不建模**队列位置**：只要行情越过挂单价就算成交。成交**价格**是对的，成交**机会**
-  * 偏多 —— 真实盘口里排在后面的单可能根本轮不到。所以影子盘的成交率与盈亏系统性偏高，
-  * 拿它做晋升判据时门槛要留余量。晋升后实盘与影子并行，两边成交率之差正是校准这个偏差
-  * 的数据。
+  * 撮合不建模**队列位置**，也不建模**盘口深度**，两侧朝相反方向近似（见 [[Matcher]]）：
+  * maker 要价格**严格穿越**挂单价才成交（悲观，仅仅触及不算），taker 与盘口**价格重合
+  * 即全量成交**（乐观，不看挂单量）。净效果是成交机会偏多、taker 成本偏低，所以影子盘的
+  * 盈亏系统性偏高，拿它做晋升判据时门槛要留余量。晋升后实盘与影子并行，两边成交率之差
+  * 正是校准这个偏差的数据。
   */
 final class PaperCounter(
     val account: AccountId,
     exchange: Exchange,
     config: SimConfig,
-    /** 撮合要用它把订单从交易所格式还原成币本位 (见 [[SimState.onOrderArrived]]) */
-    symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     /** 净值刷新间隔：与实盘的 [[hft.engine.AccountRefresher]] 对齐，让两边的净值同频 */
     equityRefreshMs: Long = 1000,
 ) extends Actor:
@@ -75,17 +79,11 @@ final class PaperCounter(
   override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
     // 行情即时进撮合 (柜台用实时行情)，回报按 ex->strat 延迟回传给策略 ——
     // 如实建模"基于稍陈旧的价格挂单、订单在途期间行情已经动了"
-    if event.is(Topics.Bbo) || event.is(Topics.Trade) || event.is(Topics.MarkPrice) then
-      applyMatching(state.onMarket(exchange, event, now), forwardMarket = false)
+    if isMarket(event) then matchNow(CounterInput.Market(event), now)
 
     event.as(OrderIntent).foreach(intent => onIntent(intent, now))
 
-    event.as(CounterCommands).foreach {
-      case CounterCommand.OrderArrived(_, order, orderId) =>
-        applyMatching(state.onOrderArrived(exchange, order, orderId, now), forwardMarket = false)
-      case CounterCommand.CancelArrived(_, ref) =>
-        applyMatching(state.onCancelArrived(exchange, ref, now), forwardMarket = false)
-    }
+    event.as(CounterCommands).foreach(cmd => matchNow(cmd.input, now))
 
     event.as(Topics.Clock).foreach(_ => publishEquity(now))
     Vector.empty
@@ -94,31 +92,28 @@ final class PaperCounter(
     case OutcomeEvent.PlaceOrders(orders, comment) =>
       orders.foreach { order =>
         orderIdSeq += 1
-        val orderId = s"paper-$orderIdSeq"
         logger.debug(s"[$account] order in flight: ${order.symbol} ${order.side} qty=${order.quantity} ($comment)")
-        ctx.scheduleEvent(
-          config.orderToExchangeDelayMs,
-          Event.local(CounterCommands, CounterCommand.OrderArrived(account, order, orderId)),
-        )
+        enqueue(Counter.inbound(config, CounterInput.OrderArrived(order, s"paper-$orderIdSeq")))
       }
     case OutcomeEvent.CancelOrder(_, _, ref) =>
-      ctx.scheduleEvent(
-        config.orderToExchangeDelayMs,
-        Event.local(CounterCommands, CounterCommand.CancelArrived(account, ref)),
-      )
+      enqueue(Counter.inbound(config, CounterInput.CancelArrived(ref)))
 
-  /** 落地撮合结果：回报按 ex->strat 延迟发回策略。
+  /** 撮合一条命令并落地：回报按各自延迟发回策略。
     *
-    * 第一个元素是被转发的行情本身 (柜台替身模式下要转发给策略)，这里策略直接从总线读
-    * 真实行情，不需要柜台再转一份 —— 转了就是重复投递。
+    * 延迟由 [[Counter]] 决定（与回测、实盘替身同一份），这里只负责用 actor 定时器等到点。
+    * 本柜台**不转发行情** —— 策略直接从总线读真实行情，柜台再转一份就是重复投递。
+    * 撮合本身也不回显行情（见 [[SimState.onMarket]]），所以这里无需再过滤。
     */
-  private def applyMatching(transfer: (SimState, Vector[AnyEvent]), forwardMarket: Boolean): Unit =
-    val (next, replies) = transfer
+  private def matchNow(input: CounterInput, now: Timestamp): Unit =
+    val (next, replies) = Counter.step(state, exchange, input, now, config)
     state = next
-    val toSend = if forwardMarket then replies else replies.filterNot(isMarketEcho)
-    toSend.foreach(ev => ctx.scheduleEvent(config.exchangeToStrategyDelayMs, ev))
+    replies.foreach(out => ctx.scheduleEvent(out.delayMs, out.value))
 
-  private def isMarketEcho(ev: AnyEvent): Boolean =
+  /** 兑现一条延迟输入：在途结束后作为命令回到本柜台的邮箱 */
+  private def enqueue(cmd: Delayed[CounterInput]): Unit =
+    ctx.scheduleEvent(cmd.delayMs, Event.local(CounterCommands, CounterCommand(account, cmd.value)))
+
+  private def isMarket(ev: AnyEvent): Boolean =
     ev.is(Topics.Bbo) || ev.is(Topics.Trade) || ev.is(Topics.MarkPrice)
 
   /** 周期发布本账户净值 —— 策略的杠杆闸门读它。
@@ -129,8 +124,7 @@ final class PaperCounter(
   private def publishEquity(now: Timestamp): Unit =
     if now - lastEquityAt >= equityRefreshMs then
       lastEquityAt = now
-      val info = AccountInfo(account, exchange, state.ledger.equity(state.markOf), state.ledger.notional(state.markOf))
-      ctx.publish(Event.local(Topics.AccountInfo, info))
+      ctx.publish(Event.local(Topics.AccountInfo, state.accountInfo(exchange)))
 
   /** 本账户当前的账本快照 (供绩效统计与测试) */
   def ledger: Ledger = state.ledger

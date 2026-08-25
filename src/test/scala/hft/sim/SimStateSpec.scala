@@ -40,21 +40,48 @@ class SimStateSpec extends munit.FunSuite:
     assert(s2.resting.isEmpty)
     assert(fills(evs).isEmpty)
 
-  test("resting 买单被卖价越过 -> 成交于挂单价, 出簿, 仓位增加"):
+  test("resting 买单只被卖价**触及** (ask == 挂单价) -> 不成交 (maker 悲观: 队列未消化到我)"):
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
     val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1", 1)
-    val (s3, evs) = s2.onMarket(ex, marketEv(bbo(49990, 49994, ts = 2)), 2) // ask 49994 <= 49995
+    val (s3, evs) = s2.onMarket(ex, marketEv(bbo(49990, 49995, ts = 2)), 2) // ask 恰等于挂单价
+    assert(fills(evs).isEmpty)
+    assert(s3.resting.contains("1"), "仅触及不成交, 挂单仍在簿")
+
+  test("resting 卖单只被买价**触及** (bid == 挂单价) -> 不成交"):
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Short, 50005, TimeInForce.PostOnly, "s1"), "1", 1)
+    val (s3, evs) = s2.onMarket(ex, marketEv(bbo(50005, 50006, ts = 2)), 2) // bid 恰等于挂单价
+    assert(fills(evs).isEmpty)
+    assert(s3.resting.contains("1"))
+
+  test("同一价位: 到达单按 taker 成交, 簿上单不成交 (悲观间隙, 主动吃 vs 被动等)"):
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "resting"), "1", 1)
+    val (s3, quiet) = s2.onMarket(ex, marketEv(bbo(49990, 49995, ts = 2)), 2) // ask 触及簿上单价
+    assert(fills(quiet).isEmpty, "簿上单被动排队, 不成交")
+    // 同一盘口下, 一张新单此刻到达同一价位 -> 主动吃单成交
+    val (_, arriving) = s3.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.GTC, "taker"), "2", 2)
+    assertEquals(fills(arriving).map(_.price), Vector(49995.0))
+
+  test("resting 买单被卖价严格穿越 -> 成交于挂单价, 出簿, 仓位增加"):
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1", 1)
+    val (s3, evs) = s2.onMarket(ex, marketEv(bbo(49990, 49994, ts = 2)), 2) // ask 49994 < 49995, 穿越
     val f = fills(evs)
     assertEquals(f.map(_.price), Vector(49995.0)) // maker 价
     assertEquals(s3.resting.size, 0)
     assertEquals(s3.ledger.positions(sym).size.value, 0.002)
 
-  test("行情先于成交回流: onMarket 返回的首事件是行情, 其后才是成交"):
+  test("撮合输出只含回报, 不回显行情 (转发行情是网关职责, 不是撮合的)"):
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
     val (s2, _) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.PostOnly, "b1"), "1", 1)
     val (_, evs) = s2.onMarket(ex, marketEv(bbo(49990, 49994, ts = 2)), 2)
-    assert(evs.head.is(Topics.Bbo), "首事件应为行情转发")
-    assert(evs.tail.exists(_.is(Topics.Fill)), "成交回报排在行情之后")
+    assert(!evs.exists(_.is(Topics.Bbo)), s"不应回显行情, got $evs")
+    assert(evs.exists(_.is(Topics.Fill)), "应产出成交回报")
+
+  test("无事可撮合的行情 -> 空输出 (而非回显一条行情)"):
+    val (_, evs) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    assertEquals(evs, Vector.empty)
 
   test("GTC 到达即可成交 -> taker 成交于对手价"):
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)

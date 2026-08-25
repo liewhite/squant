@@ -48,7 +48,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
-      system.spawn(PaperCounter(paper, ex, instant, metas1))
+      system.spawn(PaperCounter(paper, ex, instant))
 
       // 挂一张买单在 bid 下方, 随后行情下穿 -> 成交
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 0.5, "c1"))))
@@ -65,7 +65,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
-      system.spawn(PaperCounter(paper, ex, instant, metas1))
+      system.spawn(PaperCounter(paper, ex, instant))
 
       // 实盘意图: 柜台不该撮合它
       bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, buyLimit(99.0, 0.5, "live1"))))
@@ -83,7 +83,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val infos = collect(bus, Set(Interest.All(Topics.AccountInfo)))
-      val counter = PaperCounter(paper, ex, instant, metas1, equityRefreshMs = 0)
+      val counter = PaperCounter(paper, ex, instant, equityRefreshMs = 0)
       system.spawn(counter)
 
       bus.publish(Topics.clockAt(1L))
@@ -102,7 +102,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
       val metas = Map((ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = 0.01))
-      system.spawn(PaperCounter(paper, ex, instant, metas))
+      system.spawn(PaperCounter(paper, ex, instant))
 
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 0.03, "c1"))))
       bus.publish(Event.at(Topics.Bbo, bbo(98.0, 98.1), 1L))
@@ -111,7 +111,7 @@ class PaperCounterSpec extends munit.FunSuite:
       assertEqualsDouble(fill.size.value, 0.03, 1e-12, "币进币出, contractSize 不参与")
 
   test("拒绝占用实盘账户"):
-    intercept[IllegalArgumentException](PaperCounter(AccountId.Live, ex, instant, metas1))
+    intercept[IllegalArgumentException](PaperCounter(AccountId.Live, ex, instant))
 
   test("下单在途与回报回传都有延迟 —— 否则影子盘系统性偏乐观"):
     supervised:
@@ -119,7 +119,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
       val delayed = SimConfig(exchangeToStrategyDelayMs = 120, orderToExchangeDelayMs = 120, initialBalanceUsdt = 10_000.0)
-      system.spawn(PaperCounter(paper, ex, delayed, metas1))
+      system.spawn(PaperCounter(paper, ex, delayed))
 
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 0.5, "c1"))))
       // 订单还在途 (120ms 未到)，此刻的下穿行情不该让它成交

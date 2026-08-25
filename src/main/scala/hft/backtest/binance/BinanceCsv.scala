@@ -1,51 +1,57 @@
-package hft.backtest
+package hft.backtest.binance
 
 import hft.domain.*
 import hft.event.{AnyEvent, Event, Topic, Topics}
 
-import java.io.{BufferedReader, ByteArrayInputStream, InputStreamReader}
+import java.io.{BufferedReader, InputStream, InputStreamReader}
 import java.util.zip.ZipInputStream
-import scala.collection.mutable.ArrayBuffer
 
-/** data.binance.vision CSV (zip) 解析。
+/** data.binance.vision CSV (zip) 解析 —— 一律**流式**逐行产出。
   *
   * 官方列定义 (U 本位合约)：
   *   - bookTicker: `update_id, best_bid_price, best_bid_qty, best_ask_price, best_ask_qty, transaction_time, event_time`
   *   - trades:     `id, price, qty, quote_qty, time, is_buyer_maker`
   *
   * 部分文件首行为表头：通过"首字段能否解析为数字"探测，非数字即表头跳过。
-  * BBO 时间戳取 event_time (col 6) 以对齐实盘 WS 推送语义。
+  *
+  * 全流式而非物化：单日单标的 bookTicker 可达上亿行，物化成 Vector 直接爆内存。输入是
+  * [[InputStream]] (来自 [[hft.backtest.DataCache]])，解压边读边产出，常驻内存与文件大小无关；
+  * 多文件的时间归并由 [[hft.backtest.MarketDataSource.merge]] 以 O(k) 内存完成。
+  *
+  * 流的所有权：解析器接管传入的流，**读尽时自动关闭**。迭代器提前弃用则不会关闭
+  * (回测总会读尽，无虞)。
   */
 object BinanceCsv:
 
-  /** 解析 bookTicker zip 字节为 BBO 事件 (单文件全量物化；调用方按天合并排序)。 */
-  def parseBookTicker(symbol: Symbol, zipBytes: Array[Byte]): Vector[AnyEvent] =
-    mapRows(zipBytes)(bookTickerRow(symbol))
+  /** 流式解析 trades zip 为 [[MarketTrade]] 事件 (文件内已按 id/时间升序)。 */
+  def streamTrades(symbol: Symbol, zip: InputStream): Iterator[AnyEvent] =
+    streamRows(zip)(tradeRow(symbol))
 
-  /** 解析 trades zip 字节为 MarketTrade 事件 (全量物化)。 */
-  def parseTrades(symbol: Symbol, zipBytes: Array[Byte]): Vector[AnyEvent] =
-    mapRows(zipBytes)(tradeRow(symbol))
-
-  /** 流式解析 trades zip：逐行产出，消费即可 GC，常驻内存仅为 zip 字节本身 (不物化整日 Vector)。
-    * 单 trades 文件按 id/时间升序，故无需排序——仅供单 symbol、按天已天然有序的场景。
-    * 注意：迭代器在读尽时自动关闭底层流；若**提前弃用**则不会关闭 (回测引擎总会读尽，无虞)。
+  /** 流式解析 bookTicker zip 为 [[BBO]] 事件。
+    * 注意：官方文件内偶有毫秒级乱序 (binance-public-data issue #305)，由回测引擎的时间钳制兜底。
     */
-  def streamTrades(symbol: Symbol, zipBytes: Array[Byte]): Iterator[AnyEvent] =
-    streamRows(zipBytes)(tradeRow(symbol))
+  def streamBookTicker(symbol: Symbol, zip: InputStream): Iterator[AnyEvent] =
+    streamRows(zip)(bookTickerRow(symbol))
 
+  /** bookTicker 是最大的文件 (单标的单日可达数千万行)，与 [[tradeRow]] 同样单趟切片、
+    * 不物化整行 split 数组。
+    * 列: update_id(0),bid_price(1),bid_qty(2),ask_price(3),ask_qty(4),transaction_time(5),event_time(6)。 */
   private def bookTickerRow(symbol: Symbol)(line: String): AnyEvent =
-    val f = line.split(",")
+    val c0 = line.indexOf(',')
+    val c1 = line.indexOf(',', c0 + 1)
+    val c2 = line.indexOf(',', c1 + 1)
+    val c3 = line.indexOf(',', c2 + 1)
+    val c4 = line.indexOf(',', c3 + 1)
+    val c5 = line.indexOf(',', c4 + 1) // transaction_time 之后即末列 event_time, 无尾逗号
     val bbo = BBO(
       exchange = Exchange.Binance,
       symbol = symbol,
-      bidPrice = f(1).toDouble,
-      bidQty = Coin(f(2).toDouble),
-      askPrice = f(3).toDouble,
-      askQty = Coin(f(4).toDouble),
-      timestamp = f(6).toLong,
+      bidPrice = line.substring(c0 + 1, c1).toDouble,
+      bidQty = Coin(line.substring(c1 + 1, c2).toDouble),
+      askPrice = line.substring(c2 + 1, c3).toDouble,
+      askQty = Coin(line.substring(c3 + 1, c4).toDouble),
+      timestamp = line.substring(c5 + 1).trim.toLong, // event_time, 对齐实盘 WS 推送语义
     )
-    // 历史事件的 localTs 即其历史发生时刻 (= exchangeTs)，不取墙钟：既诚实
-    // (延迟由回测引擎建模，源数据无网络延迟) 又保证回测确定性。
     historical(Topics.Bbo, bbo, bbo.timestamp)
 
   /** trades 是回测热路径 (单 symbol 月级达数千万行)，故单趟切片只取所需列、不物化整行 split 数组。
@@ -66,27 +72,13 @@ object BinanceCsv:
     )
     historical(Topics.Trade, trade, trade.timestamp)
 
-  /** 历史事件构造：localTs == exchangeTs (见上)。 */
+  /** 历史事件的 localTs 即其历史发生时刻 (= exchangeTs)，不取墙钟：既诚实
+    * (延迟由回测引擎建模，源数据无网络延迟) 又保证回测确定性。 */
   private def historical[K, P](topic: Topic[K, P], payload: P, ts: Long): AnyEvent = Event.stamped(topic, payload, ts, ts)
 
-  /** 解压 zip 内单一 CSV，逐行映射 (行解析器自行切字段)；自动跳过表头行 (首字段非数字)。 */
-  private def mapRows(zipBytes: Array[Byte])(f: String => AnyEvent): Vector[AnyEvent] =
-    val zis = ZipInputStream(ByteArrayInputStream(zipBytes))
-    try
-      if zis.getNextEntry == null then Vector.empty
-      else
-        val reader = BufferedReader(InputStreamReader(zis))
-        val out = ArrayBuffer.empty[AnyEvent]
-        var line = reader.readLine()
-        while line != null do
-          if line.nonEmpty && isDataRow(line) then out += f(line)
-          line = reader.readLine()
-        out.toVector
-    finally zis.close()
-
-  /** 解压 zip 内单一 CSV 并**惰性**逐行映射；读尽时关闭底层流 (见 [[streamTrades]] 的提前弃用说明)。 */
-  private def streamRows(zipBytes: Array[Byte])(f: String => AnyEvent): Iterator[AnyEvent] =
-    val zis = ZipInputStream(ByteArrayInputStream(zipBytes))
+  /** 解压 zip 内单一 CSV 并**惰性**逐行映射 (跳过表头/空行)；读尽时关闭底层流。 */
+  private def streamRows(zip: InputStream)(f: String => AnyEvent): Iterator[AnyEvent] =
+    val zis = ZipInputStream(zip)
     if zis.getNextEntry == null then
       zis.close()
       Iterator.empty

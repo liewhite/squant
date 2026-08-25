@@ -1,7 +1,7 @@
 package strategy.strategies.macdgrid.backtest
 
-import hft.backtest.{BacktestEngine, BinanceDataKind, BinanceHistory, TradeBboAugmentSource}
-import hft.domain.Exchange
+import hft.backtest.binance.BinanceMarketDataProvider
+import hft.backtest.{BacktestEngine, MarketDataKind, SyntheticBboSource}
 import hft.engine.StrategyRunner
 import hft.sim.SimConfig
 import strategy.strategies.macdgrid.logic.MacdGridStrategy
@@ -40,16 +40,19 @@ import java.time.{LocalDate, ZoneOffset}
   def epochMs(d: LocalDate): Long = d.atStartOfDay(ZoneOffset.UTC).toInstant.toEpochMilli
   val startMs = epochMs(start)
 
-  val source = TradeBboAugmentSource(
-    BinanceHistory.source(backend, Seq(symbol), start.minusDays(warmupDays), end, kinds = Seq(BinanceDataKind.Trades))
+  // 币安 bookTicker 历史止于 2024-03-30, 本回测区间只有 trades -> 显式合成零价差盘口供
+  // taker 对冲单取对手价 (低估真实点差成本, 见 SyntheticBboSource)
+  val provider = BinanceMarketDataProvider(backend)
+  val source = SyntheticBboSource(
+    provider.source(Seq(symbol), start.minusDays(warmupDays), end, Set(MarketDataKind.Trades))
   )
-  val strategy = MacdGridStrategy(exchange = Exchange.Binance, symbol = symbol, leverage = 1.0, referenceEquity = initBalance)
+  val strategy = MacdGridStrategy(exchange = provider.exchange, symbol = symbol, leverage = 1.0, referenceEquity = initBalance)
   val runner = StrategyRunner.backtest(strategy, symbolMetas)
 
-  val rec = BacktestRecorder(exchange = Exchange.Binance, symbol = symbol, startMs = startMs, initialBalance = initBalance)
+  val rec = BacktestRecorder(exchange = provider.exchange, symbol = symbol, startMs = startMs, initialBalance = initBalance)
 
   val engine = BacktestEngine(
-    exchange = Exchange.Binance, source = source, runners = Seq(runner),
+    exchange = provider.exchange, source = source, runners = Seq(runner),
     config = SimConfig(
       exchangeToStrategyDelayMs = 100, orderToExchangeDelayMs = 50,
       initialBalanceUsdt = initBalance, makerFeeRate = makerFee, takerFeeRate = takerFee,

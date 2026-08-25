@@ -63,6 +63,37 @@ class BacktestEngineSpec extends munit.FunSuite:
     // 未实现 = (mark 99.75 - entry 100) * 1 = -0.25; equity = 10000 - 0.25
     assertEqualsDouble(r.finalEquity, 10_000.0 - 0.25, 1e-6)
 
+  test("行情先于它引发的成交送达策略 (撮合不回显, 由引擎按网关职责转发)"):
+    val evs = runCollect()
+    val bboIdx = evs.indexWhere(e => e.is(Topics.Bbo) && e.exchangeTs == 2000L)
+    val fillIdx = evs.indexWhere(_.is(Topics.Fill))
+    assert(bboIdx >= 0, "引发成交的那条行情应被转发给策略")
+    assert(fillIdx >= 0, "应有成交")
+    assert(bboIdx < fillIdx, s"行情($bboIdx) 必须排在它引发的成交($fillIdx) 之前")
+
+  test("每条行情都被转发, 一条不少"):
+    val bbos = runCollect().count(_.is(Topics.Bbo))
+    assertEquals(bbos, series.size, "撮合不再回显行情后, 转发的条数仍应等于源事件数")
+
+  test("账户不一致的 runner 在装配期即被拒 (私有回报按账户路由, 不一致会静默饿死策略)"):
+    val runner = StrategyRunner.backtest(OneShotBuy(), metas, AccountId.Paper(1))
+    val e = intercept[IllegalArgumentException](
+      BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(), metas)
+    )
+    assert(e.getMessage.contains("paper1"), e.getMessage)
+
+  test("数据源乱序: 虚拟时间不倒流, 乱序条数被计数上报"):
+    // 第 2 条 BBO 的时间戳倒退回 1500 (< 已推进到的 2000), 引擎应钳制而非让时间回退
+    val disordered = Vector(bboEv(100.0, 100.1, 1000), bboEv(99.8, 99.9, 2000), bboEv(99.7, 99.8, 1500))
+    val runner = StrategyRunner.backtest(OneShotBuy(), metas)
+    val r = BacktestEngine(ex, FixedSource(disordered), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0), metas).run()
+    assertEquals(r.outOfOrderEvents, 1L)
+    assertEquals(r.marketEvents, 3L)
+    assert(r.lastTs >= 2000L, s"虚拟时间不得回退到乱序事件的时间戳, got ${r.lastTs}")
+
+  test("数据源有序时乱序计数为 0"):
+    assertEquals(runOnce().outOfOrderEvents, 0L)
+
   test("确定性: 相同输入两次运行结果完全一致"):
     assertEquals(runOnce(), runOnce())
 

@@ -2,21 +2,40 @@ package hft.sim
 
 import hft.domain.*
 
-/** 撮合判定 (纯函数)。挂单成交判定即「BBO 越过挂单价」。 */
+/** 撮合判定 (纯函数) —— 回测与模拟盘共用的成交模型，两侧刻意不对称：
+  *
+  *   - **maker (被动挂单) 走悲观侧**：只有价格**严格穿越**挂单价才算成交 ([[crossedByBbo]] /
+  *     [[crossedByTrade]])。价格仅仅触及挂单价时不成交 —— 真实交易所里价位上排着队，
+  *     价格没穿过去意味着队列没消化到我。无深度数据可判队列位置，故取下界。
+  *   - **taker (主动吃单) 走乐观侧**：与盘口**价格重合即全量成交** ([[marketable]])，
+  *     在对手价 ([[touchPrice]]) 一次成交，不看盘口挂单量、不建模吃穿多档的冲击成本。
+  *
+  * 两侧用同一个盘口但判据不同 (`<` 与 `<=`)，中间留出一格**有意的悲观间隙**：买单挂在 L、
+  * 盘口 ask 恰好等于 L 时，若订单是此刻到达则按 taker 成交 (主动吃单)，若订单早已在簿上
+  * 则不成交 (被动排队)。这不是漏洞，正是"主动吃 vs 被动等"的真实差别。
+  */
 object Matcher:
-  /** resting 单是否被 BBO 越过：买单在最优卖价跌破挂单价时成交，卖单在最优买价升破挂单价时成交。
-    * 到达撮合时的「可成交性 (marketable)」判定与此完全一致 —— 保证「不可成交即 resting、
-    * 下个 BBO 再撮合」自洽。
+  /** taker 可成交性：到达单与盘口**价格重合即可成交** (含相等)。买单出价够到最优卖价、
+    * 卖单要价够到最优买价即成立。乐观侧 —— 不看量、不建模冲击，价内即全量成交。
+    *
+    * 也是 PostOnly 的拒单判据：到达即可吃单的 PostOnly 必须拒 (与真实交易所一致)。
     */
-  def crosses(side: Side, limitPrice: Price, bbo: BBO): Boolean = side match
+  def marketable(side: Side, limitPrice: Price, bbo: BBO): Boolean = side match
     case Side.Long  => bbo.askPrice <= limitPrice
     case Side.Short => bbo.bidPrice >= limitPrice
 
-  /** resting 单是否被一笔**真实成交**越过 (trade-print 撮合，严格不含相等)：
-    * 买单在成交价**跌破**挂单价时成交、卖单在成交价**升破**挂单价时成交。
-    * 相等不算 (价格只触及挂单价时通常排在队尾，未真正穿过)，是更保守的下界模型。
+  /** resting 单是否被 BBO **严格穿越** (悲观, 不含相等)：买单在最优卖价**跌破**挂单价时成交、
+    * 卖单在最优买价**升破**挂单价时成交。与 [[crossedByTrade]] 同一口径 —— 无论行情是 L1
+    * 盘口还是逐笔成交，maker 成交判据都是"价格穿过去了"。
     */
-  def tradeCrosses(side: Side, limitPrice: Price, tradePrice: Price): Boolean = side match
+  def crossedByBbo(side: Side, limitPrice: Price, bbo: BBO): Boolean = side match
+    case Side.Long  => bbo.askPrice < limitPrice
+    case Side.Short => bbo.bidPrice > limitPrice
+
+  /** resting 单是否被一笔**真实成交**严格穿越 (逐笔撮合，不含相等)：
+    * 买单在成交价**跌破**挂单价时成交、卖单在成交价**升破**挂单价时成交。
+    */
+  def crossedByTrade(side: Side, limitPrice: Price, tradePrice: Price): Boolean = side match
     case Side.Long  => tradePrice < limitPrice
     case Side.Short => tradePrice > limitPrice
 
@@ -30,6 +49,15 @@ object Matcher:
   * 仓位 size 带符号 (正多负空)，entryPrice 为持仓均价，现金累加已实现盈亏。
   */
 final case class Ledger(account: AccountId, positions: Map[Symbol, Position], cash: Double):
+
+  /** 账户读数快照 —— 净值与名义价值的**唯一构造处**。
+    *
+    * 回测周期发布、影子盘周期发布、实盘替身的 REST 查询，三处此前各拼一遍
+    * `AccountInfo(account, exchange, equity(...), notional(...))`。同一个读数三处构造，
+    * 迟早有一处漏跟上口径变化 (比如将来净值要扣未结算资金费)。
+    */
+  def accountInfo(exchange: Exchange, markOf: Symbol => Double): AccountInfo =
+    AccountInfo(account, exchange, equity = equity(markOf), notional = notional(markOf))
 
   /** 应用一笔成交，返回新账本：
     *   - 新开 / 同向加仓：加权平均成本

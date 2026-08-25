@@ -69,7 +69,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
 
       // 两条出口：真实交易所 (Live) 与虚拟柜台 (Paper(1))
       system.spawn(OutcomeProcessor(Map(ex -> RecordingClient(livePlaced)), metas, dryRun = false, AccountId.Live))
-      system.spawn(PaperCounter(paper, ex, instant, metas))
+      system.spawn(PaperCounter(paper, ex, instant))
 
       // 同一份策略逻辑, 两个账户各一个实例
       system.spawn(Executor(OneShotMaker(), metas, AccountId.Live))

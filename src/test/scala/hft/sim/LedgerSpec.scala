@@ -67,12 +67,32 @@ class LedgerSpec extends munit.FunSuite:
     val l = empty.applyFill(ex, sym, Side.Long, 100.0, Coin(2.0))
     assertEquals(l.equity((_: Symbol) => 0.0), 10_000.0)
 
-  test("Matcher.crosses: 买单卖价跌破成交, 卖单买价升破成交"):
+  test("Matcher.marketable (taker, 乐观): 价格重合即可成交"):
     val bbo = BBO(ex, sym, bidPrice = 100.0, Coin(1), askPrice = 101.0, Coin(1), timestamp = 0)
-    assert(!Matcher.crosses(Side.Long, 99.0, bbo))  // ask 101 > 99, 不成交
-    assert(Matcher.crosses(Side.Long, 101.0, bbo))  // ask 101 <= 101, 成交
-    assert(!Matcher.crosses(Side.Short, 102.0, bbo)) // bid 100 < 102, 不成交
-    assert(Matcher.crosses(Side.Short, 100.0, bbo))  // bid 100 >= 100, 成交
+    assert(!Matcher.marketable(Side.Long, 99.0, bbo))  // 出价 99 < ask 101, 够不着
+    assert(Matcher.marketable(Side.Long, 101.0, bbo))  // 出价 == ask, 重合即成交
+    assert(Matcher.marketable(Side.Long, 102.0, bbo))  // 出价高过 ask, 成交
+    assert(!Matcher.marketable(Side.Short, 102.0, bbo)) // 要价 102 > bid 100, 够不着
+    assert(Matcher.marketable(Side.Short, 100.0, bbo))  // 要价 == bid, 重合即成交
+    assert(Matcher.marketable(Side.Short, 99.0, bbo))   // 要价低于 bid, 成交
+
+  test("Matcher.crossedByBbo (maker, 悲观): 必须严格穿越, 仅触及不成交"):
+    val bbo = BBO(ex, sym, bidPrice = 100.0, Coin(1), askPrice = 101.0, Coin(1), timestamp = 0)
+    assert(!Matcher.crossedByBbo(Side.Long, 101.0, bbo)) // ask 恰好触及挂单价 -> 排队未消化, 不成交
+    assert(Matcher.crossedByBbo(Side.Long, 101.5, bbo))  // ask 101 跌破挂单价 101.5 -> 成交
+    assert(!Matcher.crossedByBbo(Side.Short, 100.0, bbo)) // bid 恰好触及挂单价 -> 不成交
+    assert(Matcher.crossedByBbo(Side.Short, 99.5, bbo))   // bid 100 升破挂单价 99.5 -> 成交
+
+  test("Matcher.crossedByTrade (maker, 悲观): 逐笔与 BBO 同一穿越口径"):
+    assert(!Matcher.crossedByTrade(Side.Long, 100.0, 100.0)) // 成交价仅触及挂单价 -> 不成交
+    assert(Matcher.crossedByTrade(Side.Long, 100.0, 99.9))   // 成交价跌破 -> 成交
+    assert(!Matcher.crossedByTrade(Side.Short, 100.0, 100.0))
+    assert(Matcher.crossedByTrade(Side.Short, 100.0, 100.1)) // 成交价升破 -> 成交
+
+  test("maker 悲观 / taker 乐观的有意间隙: ask 恰等于挂单价时, 到达单吃单成交、簿上单不成交"):
+    val bbo = BBO(ex, sym, bidPrice = 100.0, Coin(1), askPrice = 101.0, Coin(1), timestamp = 0)
+    assert(Matcher.marketable(Side.Long, 101.0, bbo))     // 此刻到达 -> 主动吃单
+    assert(!Matcher.crossedByBbo(Side.Long, 101.0, bbo))  // 早已在簿 -> 被动排队, 不成交
 
   test("Matcher.touchPrice: 买单吃卖价, 卖单吃买价"):
     val bbo = BBO(ex, sym, 100.0, Coin(1), 101.0, Coin(1), 0)

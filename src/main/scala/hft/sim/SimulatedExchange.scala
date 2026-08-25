@@ -61,14 +61,9 @@ final class SimulatedExchange(
 
   override def exchange: Exchange = publicClient.exchange
 
-  /** 柜台内部命令：全部串行进入 mailbox */
-  private enum Command:
-    case Market(ev: AnyEvent)          // 上游行情到达 (实时)
-    case OrderArrived(order: Order, orderId: OrderId)
-    case CancelArrived(ref: OrderRef)
-
   // ---- actor 基础设施 ----
-  private val mailbox = Channel.unlimited[Command]
+  /** 命令形态用共用的 [[CounterInput]] —— 与回测、影子盘同一份 */
+  private val mailbox = Channel.unlimited[CounterInput]
   /** 唯一写者 = actor 线程；读者 = REST 查询线程。不可变快照 + @volatile 保证可见性 */
   @volatile private var state: SimState = SimState.empty(account, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   @volatile private var strategyBus: EventBus = scala.compiletime.uninitialized
@@ -114,7 +109,7 @@ final class SimulatedExchange(
       market.start(rawBus)
       // 只订公共行情：柜台撮合的输入就是行情，别的 topic 与它无关
       val upstream = rawBus.subscribe(Topics.market.map(Interest.All.apply))
-      fork { while true do mailbox.send(Command.Market(upstream.events.receive())) }
+      fork { while true do mailbox.send(CounterInput.Market(upstream.events.receive())) }
       // actor 线程：串行消费命令, 是状态唯一写者与事件唯一发布者
       fork { while true do process(mailbox.receive()) }
       logger.info(
@@ -124,21 +119,24 @@ final class SimulatedExchange(
 
   override def subscribe(kinds: Set[SubscriptionKind]): Unit = market.subscribe(kinds)
 
-  /** actor 主循环：纯转移 + 顺序发布 (在唯一线程上, 故全局有序) */
-  private def process(cmd: Command): Unit =
-    val (next, events) = cmd match
-      case Command.Market(ev)             => state.onMarket(exchange, ev, nowMs)
-      case Command.OrderArrived(order, id) => state.onOrderArrived(exchange, order, id, nowMs)
-      case Command.CancelArrived(ref)      => state.onCancelArrived(exchange, ref, nowMs)
+  /** actor 主循环：纯转移 + 顺序发布 (在唯一线程上, 故全局有序)。
+    * 撮合与延迟语义都来自 [[Counter]]，这里只负责"用真实定时器等到点"。 */
+  private def process(input: CounterInput): Unit =
+    // 本柜台**替换**整个网关, 策略的行情只有这一个来源 -> 要原样转发 (撮合本身不回显)。
+    // 先转发后撮合: 同一个单线程定时器按提交序 FIFO, 故策略必先看到行情再看到它引发的成交。
+    input match
+      case CounterInput.Market(ev) => emit(Counter.toStrategy(config, ev))
+      case _                       => ()
+    val (next, replies) = Counter.step(state, exchange, input, nowMs, config)
     state = next
-    events.foreach { ev =>
-      ev.as(Topics.Fill).foreach(f => logger.info(s"[SIM] fill ${f.side} ${f.symbol} qty=${f.size} @ ${f.price}"))
-      deliver(ev)
+    replies.foreach { out =>
+      out.value.as(Topics.Fill).foreach(f => logger.info(s"[SIM] fill ${f.side} ${f.symbol} qty=${f.size} @ ${f.price}"))
+      emit(out)
     }
 
-  /** 把交易所侧事件按 ex->strat 延迟投递给策略 */
-  private def deliver(ev: AnyEvent): Unit =
-    after(config.exchangeToStrategyDelayMs) { strategyBus.publish(ev) }
+  /** 兑现一条延迟输出：等到点后发布给策略 */
+  private def emit(out: Delayed[AnyEvent]): Unit =
+    after(out.delayMs) { strategyBus.publish(out.value) }
 
   // ==================== ExchangeClient: 公共 REST (委托真实客户端) ====================
 
@@ -156,7 +154,8 @@ final class SimulatedExchange(
       orderType = order.orderType, quantity = metaOf(order.symbol).toCoin(order.quantity),
       reduceOnly = order.reduceOnly, clientOrderId = order.clientOrderId,
     )
-    after(config.orderToExchangeDelayMs) { mailbox.send(Command.OrderArrived(coinOrder, orderId)) }
+    val cmd = Counter.inbound(config, CounterInput.OrderArrived(coinOrder, orderId))
+    after(cmd.delayMs) { mailbox.send(cmd.value) }
     Right(orderId)
 
   override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
@@ -164,7 +163,8 @@ final class SimulatedExchange(
     // 读快照判定；在途期间真撤由 CancelArrived 在 actor 线程内裁决 (届时成交则 remove 落空, 不再发 Cancelled)
     if state.findResting(ref).isEmpty then Left(ExchangeError.OrderNotFound(s"order ${ref.raw} not in book"))
     else
-      after(config.orderToExchangeDelayMs) { mailbox.send(Command.CancelArrived(ref)) }
+      val cmd = Counter.inbound(config, CounterInput.CancelArrived(ref))
+      after(cmd.delayMs) { mailbox.send(cmd.value) }
       Right(())
 
   override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] =
@@ -176,8 +176,7 @@ final class SimulatedExchange(
   override def setLeverage(symbol: Symbol, leverage: Int): Either[ExchangeError, Unit] = Right(())
 
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] =
-    val s = state
-    Right(AccountInfo(account, exchange, equity = s.ledger.equity(s.markOf), notional = s.ledger.notional(s.markOf)))
+    Right(state.accountInfo(exchange))
 
   override def fetchPositions(): Either[ExchangeError, Vector[Position]] =
     val s = state

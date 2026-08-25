@@ -19,7 +19,7 @@ import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
   * [[strategy.strategies.atrtakehedge.logic.AtrTakeHedgeStrategy]] 基线。
   *
   * **需要盘口**：market 单到撮合需 BBO，故订阅 [[SubscriptionKind.BBO]]；回测以
-  * [[hft.backtest.TradePrintBboSource]] 把 trades 合成零价差盘口。onEvent 由框架单线程串行调用，
+  * [[hft.backtest.SyntheticBboSource]] 把 trades 合成零价差盘口。onEvent 由框架单线程串行调用，
   * 内部可变状态无需同步。
   */
 final class BandHedgeStrategy(
