@@ -215,6 +215,34 @@ class TradingGatewaySpec extends munit.FunSuite:
         "0.3 + 增量 0.2 = 0.5; 若把 0.5 整个当增量就会变成 0.8",
       )
 
+  test("三方对账: 谁跟谁对不上, 决定了这是什么性质的问题"):
+    import RestTradingGateway.Verdict
+    val tol = 1e-9
+
+    // 三本账一致
+    assertEquals(
+      RestTradingGateway.compare(Coin(0.5), Coin(0.5), Some(Coin(0.5)), tol).collect { case v: Verdict.Agreed => v.kind },
+      Vector("内部", "外部"),
+    )
+
+    // 两条**内部**渠道对不上 -> 我们这边的 bug (漏解析、字段读错、去重去多了)
+    RestTradingGateway.compare(Coin(0.5), Coin(0.3), Some(Coin(0.5)), tol) match
+      case Vector(Verdict.Internal(o, f), Verdict.Agreed("外部")) =>
+        assertEqualsDouble(o.value, 0.5, tol); assertEqualsDouble(f.value, 0.3, tol)
+      case other => fail(s"应报内部不一致: $other")
+
+    // 账本与**交易所**对不上 -> 外部改了账户 (强平/手动/资金费)
+    RestTradingGateway.compare(Coin(0.5), Coin(0.5), Some(Coin(0.9)), tol) match
+      case Vector(Verdict.Agreed("内部"), Verdict.External(o, r)) =>
+        assertEqualsDouble(o.value, 0.5, tol); assertEqualsDouble(r.value, 0.9, tol)
+      case other => fail(s"应报外部不一致: $other")
+
+    // 交易所还没推过 -> 只做内部比对, 不假装"外部一致"
+    assertEquals(RestTradingGateway.compare(Coin(0.5), Coin(0.5), None, tol).size, 1)
+
+    // 容差之内不算不一致
+    assert(RestTradingGateway.compare(Coin(0.5), Coin(0.5 + 1e-12), Some(Coin(0.5)), tol).forall(_.isInstanceOf[Verdict.Agreed]))
+
   test("交易所报的仓位不进总线 —— 总线上的仓位只有账本一个来源"):
     withFeed { (feed, seen) =>
       feed.emit(AccountReport.PositionReported("BTCUSDT", Coin(9.9), 1L))

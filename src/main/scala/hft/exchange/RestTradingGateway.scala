@@ -57,17 +57,40 @@ final class RestTradingGateway(
     */
   private var syncedSymbols: Set[Symbol] = Set.empty
 
-  /** 上一次观测到的不一致：标的 -> (当时的账本值, 当时的交易所值)。见 [[reconcile]] */
-  private val mismatches = scala.collection.mutable.Map.empty[Symbol, (Coin, Coin)]
+  /** 成交明细独立累出来的账本 —— **第二意见**。
+    *
+    * 它与 [[ledger]] 走的是两条完全不同的渠道：一个来自订单回报的累计成交量、一个来自
+    * 成交推送的逐笔明细。两者对不上就说明**我们这边**有问题 (少解析了一条推送、
+    * 字段读错了、去重去多了)，而不是账户被外部改了 —— 后者要看 [[reportedPositions]]。
+    * 三方比对的价值全在这个区分上: 内部 bug 与外部事实要用不同的方式处理。
+    */
+  private var fillLedger: Ledger = Ledger.empty(account, cash = 0.0)
+
+  /** 交易所报的最新仓位 —— **第三方读数**，不是账本 */
+  private val reportedPositions = scala.collection.mutable.Map.empty[Symbol, Coin]
+
+  /** 连续对不上的次数：(标的, 比对名) -> 次数。偶尔一次是时序窗口, 连续多次才是真问题 */
+  private val disagreements = scala.collection.mutable.Map.empty[(Symbol, String), Int]
+
+  /** 上次对账时刻 —— 时钟一秒一拍, 对账不必那么勤 */
+  private var lastReconciledAt: Timestamp = 0L
 
   override def exchange: Exchange = client.exchange
 
   /** 汇报面解析出的每一条都排进本柜台的邮箱 (不经总线)，由 actor 线程按序消费 ——
     * 于是"柜台是回报的唯一发布者"成立，账本也只有一个写者。 */
+  /** 除下单与对齐之外还收时钟 —— 三方对账按节拍做 (见 [[reconcile]]) */
+  override protected def extraInterests: Set[Interest] = Set(Interest.All(Topics.Clock))
+
   override protected def connect(): Unit =
     feed.connect(report => tell(Event.local(GatewayInboxes, GatewayInbox(report))), body => fork(body))
 
   override protected def onOther(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+    event.as(Topics.Clock).foreach { _ =>
+      if now - lastReconciledAt >= RestTradingGateway.ReconcileIntervalMs then
+        lastReconciledAt = now
+        reconcile()
+    }
     event.as(GatewayInboxes).map(inbox => handle(inbox.report, now)).getOrElse(Vector.empty)
 
   /** 把一条账户变动翻译成总线上的回报。**顺序在这里构造**：账本一变就先发仓位快照。
@@ -91,7 +114,9 @@ final class RestTradingGateway(
 
   private def translate(report: AccountReport, now: Timestamp): Vector[AnyEvent] = report match
     case AccountReport.Executed(symbol, side, price, qty, ts) =>
-      // 成交只是明细, 不记账 —— 仓位由订单回报的累计量驱动 (见 AccountReport)
+      // 成交明细不进主账本 (仓位由订单回报的累计量驱动)，但要进第二本账 —— 它是对账的
+      // 另一条独立渠道，两本对不上就说明我们这边漏了什么。
+      fillLedger = fillLedger.applyFill(exchange, symbol, side, price, qty)
       Vector(Event.stamped(Topics.Fill, Fill(account, exchange, symbol, side, price, qty, ts), ts, now))
 
     case AccountReport.OrderStatusChanged(orderId, clientOrderId, symbol, side, status, price, avgFillPrice, quantity, filledQuantity, ts) =>
@@ -117,8 +142,8 @@ final class RestTradingGateway(
     case AccountReport.GreeksChanged(ccy, delta, gamma, theta, vega, ts) =>
       Vector(Event.stamped(Topics.Greeks, Greeks(account, exchange, ccy, delta, gamma, theta, vega, ts), ts, now))
 
-    case AccountReport.PositionReported(symbol, size, ts) =>
-      reconcile(symbol, size, now, ts)
+    case AccountReport.PositionReported(symbol, size, _) =>
+      reportedPositions(symbol) = size // 只记下来, 按节拍统一对账
       Vector.empty // 总线上的仓位只有一个来源: 本账本
 
   /** 把某订单的账记到 `cumulativeQty` 为止，产出「仓位快照 → 成交」。
@@ -206,49 +231,50 @@ final class RestTradingGateway(
   private def positionOf(symbol: Symbol): Position =
     ledger.positions.getOrElse(symbol, Position.empty(account, exchange, symbol))
 
-  /** 拿交易所报的仓位与本账本比对。**只告警，不覆盖。**
+    /** 三方对账：两本独立记出来的账 + 交易所报的读数，两两比对。
     *
-    * 不覆盖是因为跨频道没有顺序保证：成交与仓位走的是两条频道，交易所先推仓位、后推那笔
-    * 成交是可能的 —— 覆盖之后再把那笔成交记进账本，就双重计数了。这正是"不做快照覆盖式
-    * 对账"这条老结论的由来。
+    * 三条渠道各说各话时，**谁跟谁对不上**决定了这是什么性质的问题：
     *
-    * 那漂移怎么修？**发一条账户对齐指令**：REST 查的是快照，不参与推送的流竞争，
-    * 柜台会据此重置账本并广播新仓位 (见 [[syncPositions]])。检测用推送 (便宜、及时)、
-    * 修复用 REST (权威、无竞态)，两件事分开。
+    *   - **成交明细账 vs 订单回报账**：两者都是我们自己记的，来源却完全不同 (逐笔明细 /
+    *     累计成交量)。对不上说明**我们这边有 bug** —— 少解析了一条推送、字段读错了、
+    *     去重去多了。这不是外部世界的事，是代码的事。
+    *   - **订单回报账 vs 交易所仓位**：账户被外部改了 (强平、手动干预、资金费结算)，
+    *     或者我们漏收了回报。这是外部事实，只能报出来等人处置。
     *
-    * 触发漂移的是账本看不见的东西：强平、手动干预、资金费结算、以及任何一笔漏收的成交。
-    * 不报出来的话，策略会一直按一个错的敞口对冲，而这没有任何外在症状。
+    * 只有这个区分能让告警变得可行动：内部 bug 要改代码，外部事实要人去交易所看一眼。
+    * 两方对账做不到 —— 它只能说"对不上"。
+    *
+    * **偶尔一次不算数**。成交与仓位走不同频道、订单回报与成交推送也不同步，任一时刻
+    * 三本账都可能差着一笔。连续 [[RestTradingGateway.DisagreementsBeforeAlarm]] 次
+    * 仍然对不上才升级为告警 —— 时序窗口撑不了那么久，撑得住的只有真问题。
     */
-  private def reconcile(symbol: Symbol, reported: Coin, now: Timestamp, reportedAt: Timestamp): Unit =
-    evictSettled(now) // 顺带清一次: 只靠终态触发的话, 一段时间没有订单终态就不清了
-    val mine = positionOf(symbol).size
-    // 浮点比较总要容差 —— 半个最小变动单位以下是噪声, 不是漂移 (换到币本位域, 见 dustOf)
-    val tolerance = dustOf(symbol) * 2
-    if (mine - reported).abs.value <= tolerance then mismatches.remove(symbol)
-    else
-      // **连续两次观测都不一致, 且期间账本没动、交易所读数也没动** 才算真漂移。
-      //
-      // 单次不一致说明不了什么: 成交与仓位走不同频道, 交易所先推仓位、后推那笔订单回报时,
-      // 账本必然落后一笔。那种落后会在下一条回报到达后自行消失 —— 于是下次观测的账本值
-      // 就变了, 判据自然不成立。真漂移 (强平/手动干预/资金费/漏收回报) 则每次观测都在,
-      // 且两边的值都不动。
-      //
-      // 这比"等 N 秒"强的地方在于它有依据: 判的是"两边都静止了却仍然对不上",
-      // 而不是赌 N 秒足够长。
-      val persisted = mismatches.get(symbol).contains((mine, reported))
-      mismatches(symbol) = (mine, reported)
-      if persisted then
-        logger.error(
-          s"!!! 仓位漂移 $target $symbol (交易所读数时刻 $reportedAt): 本地账本=${mine.value} 交易所=${reported.value}, " +
-            "连续两次观测一致。强平/手动干预/资金费/漏收订单回报都会造成。策略正按本地账本决策, 需人工确认; " +
-            "确认后**先撤掉在途单**再发账户对齐指令让柜台按 REST 快照重置 —— " +
-            "有单在途时重置会把一笔既在快照里、回报又还在路上的成交记两遍"
-        )
+  private def reconcile(): Unit =
+    syncedSymbols.toVector.sorted.foreach { symbol =>
+      val verdicts = RestTradingGateway.compare(
+        byOrders = positionOf(symbol).size,
+        byFills = fillLedger.positions.get(symbol).map(_.size).getOrElse(Coin.Zero),
+        reported = reportedPositions.get(symbol),
+        tolerance = dustOf(symbol) * 2,
+      )
+      verdicts.foreach(record(symbol, _))
+    }
 
-  /** 把某订单的账记到 `cumulativeQty` 为止，产出「仓位快照 → 成交」。
+  /** 记一次比对结果：一致就清零，不一致就累加，连续够多次才喊。
     *
-    * 增量为零 (重复推送、乱序后到的那条) 时什么都不发 —— 幂等是这套记账的立身之本。
+    * 中间那几次只留 debug —— 它们多半是时序窗口，报出来会把真问题淹掉。
     */
+  private def record(symbol: Symbol, verdict: RestTradingGateway.Verdict): Unit =
+    import RestTradingGateway.Verdict
+    val key = (symbol, verdict.kind)
+    verdict match
+      case _: Verdict.Agreed => disagreements.remove(key)
+      case mismatch =>
+        val times = disagreements.getOrElse(key, 0) + 1
+        disagreements(key) = times
+        if times == RestTradingGateway.DisagreementsBeforeAlarm then logger.error(s"!!! $target $symbol ${mismatch.explain}")
+        else if times < RestTradingGateway.DisagreementsBeforeAlarm then
+          logger.debug(s"$target $symbol ${verdict.kind} 对账第 $times 次不一致 (未到告警阈值, 多半是时序窗口)")
+        // 超过阈值之后不再重复刷屏, 首次告警已经说清楚了
 
   override protected def metaOf(symbol: Symbol): SymbolMeta =
     metas.getOrElse(symbol, sys.error(s"$exchange 没有 $symbol 的合约规格, 无法发单 (装配时未加载?)"))
@@ -300,8 +326,11 @@ final class RestTradingGateway(
       case Right(positions) =>
         val mine = positions.filter(p => symbols.contains(p.symbol)).map(_.copy(account = account))
         ledger = Ledger(account, mine.map(p => p.symbol -> p).toMap, cash = 0.0)
-        settled.clear() // 账本重置, 记账进度跟着归零 (随后由既有挂单填回, 见 syncPendingOrders)
-        mismatches.clear()
+        // 账本重置 -> 记账进度、第二本账、对账状态全部跟着归零
+        settled.clear() // 随后由既有挂单填回, 见 syncPendingOrders
+        fillLedger = Ledger(account, mine.map(p => p.symbol -> p).toMap, cash = 0.0)
+        reportedPositions.clear()
+        disagreements.clear()
         syncedSymbols ++= symbols
         mine
       case Left(e) => throw IllegalStateException(s"$exchange 拉取初始持仓失败: ${e.message}")
@@ -333,6 +362,52 @@ final class RestTradingGateway(
       case Left(e)     => throw IllegalStateException(s"$exchange 拉取账户信息失败: ${e.message}")
 
 object RestTradingGateway:
+  /** 多久对一次账。时钟一秒一拍, 对账不必那么勤 —— 它抓的是持续存在的偏差 */
+  val ReconcileIntervalMs: Long = 5_000
+
+  /** 一次三方比对的结论。
+    *
+    * 分成两类不是分类癖 —— **它们要用完全不同的方式处理**：内部不一致要改代码，
+    * 外部不一致要人去交易所看一眼。两方对账给不出这个区分，它只能说"对不上"。
+    */
+  private[exchange] enum Verdict(val kind: String):
+    case Agreed(k: String) extends Verdict(k)
+    /** 两条内部渠道对不上 —— 我们这边有 bug */
+    case Internal(byOrders: Coin, byFills: Coin) extends Verdict("内部")
+    /** 账本与交易所对不上 —— 账户被外部改了, 或漏收了回报 */
+    case External(byOrders: Coin, reported: Coin) extends Verdict("外部")
+
+    def explain: String = this match
+      case Agreed(_) => "一致"
+      case Internal(byOrders, byFills) =>
+        s"两条内部渠道对不上: 订单回报账=${byOrders.value} 成交明细账=${byFills.value}。" +
+          "**这是我们这边的 bug** —— 少解析了一条推送 / 字段读错 / 去重去多了, 与账户被外部改动无关, 请查适配层"
+      case External(byOrders, reported) =>
+        s"账本与交易所对不上: 本地=${byOrders.value} 交易所=${reported.value}。" +
+          "强平/手动干预/资金费/漏收回报都会造成。策略正按本地账本决策, 需人工确认; " +
+          "确认后**先撤掉在途单**再发账户对齐指令让柜台按 REST 快照重置 —— " +
+          "有单在途时重置会把一笔既在快照里、回报又还在路上的成交记两遍"
+
+  /** 三方比对 —— 纯函数，判定与告警节流分开，前者才是要盯住的那部分。
+    *
+    * 交易所读数缺席时 (还没推过) 只做内部比对：那不是"一致"，是"无从比较"。
+    */
+  private[exchange] def compare(byOrders: Coin, byFills: Coin, reported: Option[Coin], tolerance: Double): Vector[Verdict] =
+    val internal =
+      if (byOrders - byFills).abs.value <= tolerance then Verdict.Agreed("内部")
+      else Verdict.Internal(byOrders, byFills)
+    val external = reported.map { r =>
+      if (byOrders - r).abs.value <= tolerance then Verdict.Agreed("外部") else Verdict.External(byOrders, r)
+    }
+    internal +: external.toVector
+
+  /** 连续对不上多少次才升级为告警。
+    *
+    * 偶尔一次是时序窗口 (成交与仓位走不同频道, 账本落后一笔是常态), 那种落后会在
+    * 下一条回报到达后自行消失。连续三次跨越十几秒仍然对不上, 时序窗口解释不了。
+    */
+  val DisagreementsBeforeAlarm: Int = 3
+
   /** 一张订单的记账进度。`terminalAt` 有值表示已终态，只等过保留期被清掉 */
   private[exchange] final case class Settlement(
       cumulative: Coin,
