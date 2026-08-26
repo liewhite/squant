@@ -27,7 +27,7 @@ object BybitAccountFeed:
   * 解析 (linear 数量即币本位，无张<->币换算)：
   *   - execution -> Fill (本次成交，维护仓位)。Bybit order 频道只带累计成交 cumExecQty 不带单笔增量，
   *     故仓位维护交由 execution 频道，与 order 频道职责分离，避免重复计数
-  *   - order     -> OrderUpdate (挂单状态追踪；fillSize=0，仓位不在此维护)
+  *   - order     -> OrderUpdate (仅挂单状态追踪；本频道不带单笔成交增量)
   *   - wallet    -> AccountInfo(净值) + 各币种 Balance
   *
   * Fail-fast：连接断开、解析失败、auth/订阅失败一律抛异常终止引擎作用域。
@@ -103,7 +103,9 @@ final class BybitAccountFeed(
     )
     publish(Event.local(Topics.Fill, fill))
 
-  /** 订单状态 -> OrderUpdate，仅追踪挂单生命周期；fillSize=0，仓位由 execution 维护 */
+  /** 订单状态 -> OrderUpdate，仅追踪挂单生命周期。
+    * 本频道只带累计成交、不带单笔增量，所以仓位不在这里维护 —— 柜台用 execution 推来的
+    * 成交记账 (见 [[hft.exchange.RestTradingGateway]])。 */
   private def publishOrder(d: OrderData): Unit =
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in order: '${d.symbol}'"))
     val filled = Coin(d.cumExecQty.asDouble)
