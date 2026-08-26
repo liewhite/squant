@@ -2,10 +2,9 @@ package hft.exchange.bybit
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{MarketDataStream, WsLoop}
-import hft.event.{Event, EventBus, Topics}
+import hft.exchange.{MarketFeed, WsLoop}
+import hft.event.{Event, Topics}
 import org.slf4j.LoggerFactory
-import ox.{Ox, fork}
 import ox.channels.Channel
 import sttp.client4.WebSocketSyncBackend
 import sttp.ws.WebSocketFrame
@@ -13,7 +12,7 @@ import sttp.ws.WebSocketFrame
 import BybitCodec.*
 import BybitCodec.given
 
-object BybitMarketStream:
+object BybitMarketFeed:
   /** 应用层心跳间隔。Bybit 要求 ~20s 内发 ping，否则连接被服务端判为失活而关闭 */
   val HeartbeatIntervalMs: Long = 20_000
 
@@ -29,30 +28,25 @@ object BybitMarketStream:
   *
   * Fail-fast：连接断开、解析失败、订阅失败 (success=false) 一律抛异常终止引擎作用域。
   */
-final class BybitMarketStream(
+final class BybitMarketFeed(
     backend: WebSocketSyncBackend,
     wsUrl: String = BybitClient.WsPublicLinearUrl,
-) extends MarketDataStream:
-  private val logger = LoggerFactory.getLogger(classOf[BybitMarketStream])
+) extends MarketFeed:
+  private val logger = LoggerFactory.getLogger(classOf[BybitMarketFeed])
 
   override def exchange: Exchange = Exchange.Bybit
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
-  private var bus: EventBus = scala.compiletime.uninitialized
 
-  override def start(eventBus: EventBus)(using Ox): Unit =
-    bus = eventBus
-    WsLoop.run("bybit/public", backend, () => wsUrl, outgoing, onPublicText)
+  override protected def connect(): Unit =
+    WsLoop.run("bybit/public", backend, () => wsUrl, outgoing, onPublicText, body => fork(body))
     startHeartbeat(outgoing)
 
-  override def subscribe(kinds: Set[SubscriptionKind]): Unit =
-    if kinds.nonEmpty then
-      // tickers 频道被 Mark/Index/Funding 共用，topic 集合天然去重
-      val topics = kinds.map(topicOf)
-      val args = topics.map(t => s"\"$t\"").mkString(",")
-      val message = s"""{"op":"subscribe","args":[$args]}"""
-      logger.info(s"subscribing on bybit/public: $topics")
-      outgoing.send(WebSocketFrame.text(message))
+  /** 基类已去重，这里收到的都是尚未订阅过的流 */
+  override protected def subscribeToExchange(kinds: Set[SubscriptionKind]): Unit =
+    // tickers 频道被 Mark/Index/Funding 共用，topic 集合天然去重
+    val args = kinds.map(topicOf).map(t => s"\"$t\"").mkString(",")
+    outgoing.send(WebSocketFrame.text(s"""{"op":"subscribe","args":[$args]}"""))
 
   private def topicOf(kind: SubscriptionKind): String = kind match
     case SubscriptionKind.BBO(s)         => s"orderbook.1.$s"
@@ -102,14 +96,14 @@ final class BybitMarketStream(
       askQty = Coin(ask(1).asDouble),
       timestamp = ts,
     )
-    bus.publish(Event.at(Topics.Bbo, bbo, ts))
+    publish(Event.at(Topics.Bbo, bbo, ts))
 
   /** tickers 一帧 (snapshot 或 delta) 携带 mark/index/funding，仅发布本帧实际出现 (非空) 的字段 */
   private def publishTicker(sym: Symbol, d: TickerData, ts: Long): Unit =
     if d.markPrice.nonEmpty then
-      bus.publish(Event.at(Topics.MarkPrice, MarkPrice(Exchange.Bybit, sym, d.markPrice.asPrice, ts), ts))
+      publish(Event.at(Topics.MarkPrice, MarkPrice(Exchange.Bybit, sym, d.markPrice.asPrice, ts), ts))
     if d.indexPrice.nonEmpty then
-      bus.publish(Event.at(Topics.IndexPrice, IndexPrice(Exchange.Bybit, sym, d.indexPrice.asPrice, ts), ts))
+      publish(Event.at(Topics.IndexPrice, IndexPrice(Exchange.Bybit, sym, d.indexPrice.asPrice, ts), ts))
     if d.fundingRate.nonEmpty then
       val fr = FundingRate(
         exchange = Exchange.Bybit,
@@ -118,18 +112,18 @@ final class BybitMarketStream(
         nextSettleTime = d.nextFundingTime.toLongOption.getOrElse(0L),
         timestamp = ts,
       )
-      bus.publish(Event.at(Topics.FundingRate, fr, ts))
+      publish(Event.at(Topics.FundingRate, fr, ts))
 
   private def publishTrade(sym: Symbol, d: PublicTradeData): Unit =
     // Bybit S = taker 方向: S=Sell -> 买方是挂单方 (isBuyerMaker=true)
     val trade = MarketTrade(Exchange.Bybit, sym, d.p.asPrice, Coin(d.v.asDouble), isBuyerMaker = d.S == "Sell", d.T)
-    bus.publish(Event.at(Topics.Trade, trade, d.T))
+    publish(Event.at(Topics.Trade, trade, d.T))
 
   /** 心跳发送线程：定期入队 ping 帧，维持连接 (服务端回 pong 同时刷新 WsLoop 空闲计时) */
-  private def startHeartbeat(out: Channel[WebSocketFrame])(using Ox): Unit =
+  private def startHeartbeat(out: Channel[WebSocketFrame]): Unit =
     fork {
       while true do
-        Thread.sleep(BybitMarketStream.HeartbeatIntervalMs)
+        Thread.sleep(BybitMarketFeed.HeartbeatIntervalMs)
         out.send(WebSocketFrame.text("""{"op":"ping"}"""))
     }
     ()

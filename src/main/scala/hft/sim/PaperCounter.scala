@@ -1,9 +1,9 @@
 package hft.sim
 
-import hft.actor.{Actor, ActorContext}
+import hft.actor.ActorContext
 import hft.domain.*
 import hft.event.{AnyEvent, Event, Interest, Topic, Topics}
-import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent}
+import hft.exchange.TradingGateway
 import org.slf4j.LoggerFactory
 
 /** 虚拟柜台内部的延迟命令 —— "过一会儿才到达撮合"的那件事。
@@ -46,57 +46,65 @@ private[sim] object CounterCommands extends Topic[AccountId, CounterCommand]("pa
 final class PaperCounter(
     /** 本柜台服务的影子账户。类型就是 [[AccountId.Paper]] —— 虚拟柜台占用实盘账户是**写不出来**的，
       * 不必再拿运行时 require 去挡（Scala 3 里带参数的 enum case 本身就是一个类型）。 */
-    val account: AccountId.Paper,
-    exchange: Exchange,
+    val paperAccount: AccountId.Paper,
+    override val exchange: Exchange,
     config: SimConfig,
-    /** 净值刷新间隔：与实盘的 [[hft.engine.AccountRefresher]] 对齐，让两边的净值同频 */
+    /** 本所合约规格：影子盘也按交易所精度对齐, 否则它的成交量与实盘系统性地差一个取整，
+      * 而它存在的全部理由就是预测实盘。 */
+    metas: Map[Symbol, SymbolMeta],
+    /** 净值刷新间隔：与实盘柜台对齐，让两边的净值同频 */
     equityRefreshMs: Long = 1000,
-) extends Actor:
+) extends TradingGateway:
   private val logger = LoggerFactory.getLogger(classOf[PaperCounter])
-  private var state: SimState = SimState.empty(account, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
-  private var ctx: ActorContext = scala.compiletime.uninitialized
+  /** 唯一写者是 actor 线程；净值刷新线程只读快照 —— 不可变状态 + @volatile 即可, 无需锁 */
+  @volatile private var state: SimState =
+    SimState.empty(paperAccount, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
   private var orderIdSeq: Long = 0L
-  private var lastEquityAt: Timestamp = 0L
 
-  override def name: String = s"paper-counter@$account"
+  override def account: AccountId = paperAccount
+  override def name: String = s"paper-counter@$paperAccount"
+  override protected def accountRefreshMs: Long = equityRefreshMs
 
   /** 行情全量收：柜台是基础设施，哪个标的会被交易由策略决定，它不必也不该预先知道。
-    * 下单意图只收自己账户的 —— 实盘的意图不该进虚拟柜台。
+    * 下单意图与对齐指令由基类按 (账户, 交易所) 声明 —— 实盘的意图不会进虚拟柜台。
     */
-  override def interests: Set[Interest] = Set(
-    Interest.Keyed(OrderIntent, Set(account)),
+  override protected def extraInterests: Set[Interest] = Set(
     Interest.Keyed(CounterCommands, Set(account)),
     Interest.All(Topics.Bbo),
     Interest.All(Topics.Trade),
     Interest.All(Topics.MarkPrice),
-    Interest.All(Topics.Clock),
   )
 
-  override def onStart(context: ActorContext): Unit =
-    ctx = context
-    logger.info(s"paper counter started: $account balance=${config.initialBalanceUsdt}")
+  override protected def connect(): Unit =
+    logger.info(s"paper counter started: $paperAccount balance=${config.initialBalanceUsdt}")
 
-  override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+  override protected def onOther(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
     // 行情即时进撮合 (柜台用实时行情)，回报按 ex->strat 延迟回传给策略 ——
     // 如实建模"基于稍陈旧的价格挂单、订单在途期间行情已经动了"
     if isMarket(event) then matchNow(CounterInput.Market(event), now)
-
-    event.as(OrderIntent).foreach(intent => onIntent(intent, now))
-
     event.as(CounterCommands).foreach(cmd => matchNow(cmd.input, now))
-
-    event.as(Topics.Clock).foreach(_ => publishEquity(now))
     Vector.empty
 
-  private def onIntent(intent: AccountOutcome, now: Timestamp): Unit = intent.outcome match
-    case OutcomeEvent.PlaceOrders(orders, comment) =>
-      orders.foreach { order =>
-        orderIdSeq += 1
-        logger.debug(s"[$account] order in flight: ${order.symbol} ${order.side} qty=${order.quantity} ($comment)")
-        enqueue(Counter.inbound(config, CounterInput.OrderArrived(order, s"paper-$orderIdSeq")))
-      }
-    case OutcomeEvent.CancelOrder(_, _, ref) =>
-      enqueue(Counter.inbound(config, CounterInput.CancelArrived(ref)))
+  override protected def metaOf(symbol: Symbol): SymbolMeta =
+    metas.getOrElse(symbol, sys.error(s"影子柜台没有 $symbol 的合约规格, 无法撮合 (装配时未加载?)"))
+
+  override protected def placeAligned(order: Order, now: Timestamp): Unit =
+    orderIdSeq += 1
+    logger.debug(s"[$paperAccount] order in flight: ${order.symbol} ${order.side} qty=${order.quantity}")
+    enqueue(Counter.inbound(config, CounterInput.OrderArrived(order, s"paper-$orderIdSeq")))
+
+  override protected def cancelOrder(symbol: Symbol, ref: OrderRef, now: Timestamp): Unit =
+    enqueue(Counter.inbound(config, CounterInput.CancelArrived(ref)))
+
+  /** 影子账户从零开始, 没有历史可对齐 —— 引擎也不会给它发对齐指令 (见 Engine.addStrategies)。
+    * 这两个实现只在有人手工发指令时才会被用到, 如实返回"什么都没有"。 */
+  override protected def syncPositions(symbols: Set[Symbol]): Vector[Position] =
+    state.ledger.openPositions(state.markOf)
+
+  override protected def syncPendingOrders(symbols: Set[Symbol]): Vector[OrderUpdate] = Vector.empty
+
+  /** 本账户当前净值 —— 策略的杠杆闸门读它。基类按 [[accountRefreshMs]] 周期发布 */
+  override protected def currentAccountInfo(): AccountInfo = state.accountInfo(exchange)
 
   /** 撮合一条命令并落地：回报按各自延迟发回策略。
     *
@@ -107,24 +115,14 @@ final class PaperCounter(
   private def matchNow(input: CounterInput, now: Timestamp): Unit =
     val (next, replies) = Counter.step(state, exchange, input, now, config)
     state = next
-    replies.foreach(out => ctx.scheduleEvent(out.delayMs, out.value))
+    replies.foreach(out => schedule(out.delayMs, out.value))
 
   /** 兑现一条延迟输入：在途结束后作为命令回到本柜台的邮箱 */
   private def enqueue(cmd: Delayed[CounterInput]): Unit =
-    ctx.scheduleEvent(cmd.delayMs, Event.local(CounterCommands, CounterCommand(account, cmd.value)))
+    schedule(cmd.delayMs, Event.local(CounterCommands, CounterCommand(account, cmd.value)))
 
   private def isMarket(ev: AnyEvent): Boolean =
     ev.is(Topics.Bbo) || ev.is(Topics.Trade) || ev.is(Topics.MarkPrice)
-
-  /** 周期发布本账户净值 —— 策略的杠杆闸门读它。
-    *
-    * 也是 Paper 账户的"启动对齐"：它从零开始，没有历史仓位与挂单要恢复，
-    * 唯一需要的初值就是净值，而周期刷新天然覆盖了这一点 (策略订阅后一个节拍内就能读到)。
-    */
-  private def publishEquity(now: Timestamp): Unit =
-    if now - lastEquityAt >= equityRefreshMs then
-      lastEquityAt = now
-      ctx.publish(Event.local(Topics.AccountInfo, state.accountInfo(exchange)))
 
   /** 本账户当前的账本快照 (供绩效统计与测试) */
   def ledger: Ledger = state.ledger

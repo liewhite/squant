@@ -5,8 +5,9 @@ import strategy.utils.hedge.DeltaBand
 import strategy.utils.option.OkxOptionsClient
 
 import hft.domain.{AccountId, Coin, Exchange}
-import hft.engine.{Engine, ExchangeGateway}
-import hft.exchange.okx.{OkxAccountStream, OkxClient, OkxCredentials, OkxMarketStream}
+import hft.engine.Engine
+import hft.exchange.okx.{OkxAccountFeed, OkxClient, OkxCredentials, OkxMarketFeed}
+import hft.exchange.RestTradingGateway
 import org.slf4j.LoggerFactory
 import ox.supervised
 import sttp.client4.DefaultSyncBackend
@@ -69,10 +70,9 @@ import sttp.client4.DefaultSyncBackend
     val backend = DefaultSyncBackend()
     val perp = OkxClient.trading(backend, credentials, quote = conf.quote) // 永续: 对冲腿下单/查仓
     val opt = OkxOptionsClient(backend, Some(credentials), quote = conf.quote, optionCcy = Some(t.ccy), simulated = conf.simulated)
-    val market = OkxMarketStream(perp, backend)
-    val account = OkxAccountStream(perp, backend)
-
-    val engine = Engine.start(gateways = Vector(ExchangeGateway.trading(perp, market, Some(account))))
+    // 柜台在前、行情在后: 柜台既接下单指令也推回报 (消费者), 行情源是纯生产者。
+    val gateway = RestTradingGateway.load(perp, OkxAccountFeed(perp, backend), AccountId.Live)
+    val engine = Engine.start(plugins = Vector(gateway, OkxMarketFeed(perp, backend)))
 
     val hedge = DeltaHedgeStrategy(
       Exchange.Okx, t.symbol, t.ccy,
@@ -102,7 +102,7 @@ import sttp.client4.DefaultSyncBackend
       case Left(e)     => logger.error(s"prewarm 取 K 线失败 (σ 未就绪期间阈值取下限 ${t.minTheta}, 对冲偏频): $e")
 
     engine.addStrategy(hedge, AccountId.Live) // 先订阅总线
-    engine.spawn(OptionSellerActor(opt, Exchange.Okx, sellerCfg)) // 再开始发敞口读数
+    engine.install(OptionSellerActor(opt, Exchange.Okx, sellerCfg)) // 再开始发敞口读数
 
     logger.warn("运行中 (期权腿旁路 REST, 对冲腿走框架通道). Ctrl+C 退出")
     Thread.sleep(Long.MaxValue)

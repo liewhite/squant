@@ -60,6 +60,14 @@ final class ActorContext private[actor] (
   def scheduleEvent(ms: Long, event: AnyEvent): Unit =
     system.schedule(ms) { if handle.finished.getCount > 0 then system.bus.publish(event) }
 
+  /** 本 actor 所在的并发作用域。
+    *
+    * 限定 `private[hft]`：业务插件只该用 [[fork]] / [[spawn]]，够不着作用域本身。
+    * 框架内部装配**嵌套组件**时需要它 —— 虚拟柜台要在自己的私有总线上装一个上游行情源，
+    * 那个行情源是完整的 actor，得有地方跑。
+    */
+  private[hft] def scope: Ox = summon[Ox]
+
   /** 睡 `ms` 毫秒，除非期间收到了停止信号。返回 true 表示该收工了。
     *
     * 自驱动循环用它代替裸 `Thread.sleep`，就能被协作式地叫停：

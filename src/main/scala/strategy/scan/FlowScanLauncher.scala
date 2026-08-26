@@ -1,9 +1,9 @@
 package strategy.scan
 
 import hft.domain.{Exchange, Instrument}
-import hft.engine.{Engine, ExchangeGateway}
+import hft.engine.Engine
 import hft.event.{Interest, Topics}
-import hft.exchange.binance.{BinanceClient, BinanceMarketStream}
+import hft.exchange.binance.{BinanceClient, BinanceMarketFeed}
 import org.slf4j.LoggerFactory
 import ox.{fork, supervised}
 import sttp.client4.DefaultSyncBackend
@@ -31,11 +31,10 @@ import sttp.client4.DefaultSyncBackend
   supervised:
     val backend = DefaultSyncBackend()
     val client = BinanceClient.public(backend) // 只读公开行情, 无需凭证
-    val market = BinanceMarketStream(backend)
-    val engine = Engine.start(gateways = Vector(ExchangeGateway.readOnly(client, market)))
+    // 只装行情插件, 不装柜台 —— 扫描器不交易, "能不能下单"因此是装配期的事实。
+    val engine = Engine.start(plugins = Vector(BinanceMarketFeed(backend)))
 
-    // 全部 USDT 永续。SymbolMeta 已由 Engine 启动时预加载并校验过, 这里再取一次拿全集 ——
-    // 交易所自己才知道当前上市了哪些合约, 不写死清单。
+    // 全部 USDT 永续 —— 交易所自己才知道当前上市了哪些合约, 不写死清单。
     val instruments: Set[Instrument] = client.fetchAllSymbolMetas() match
       case Right(metas) => metas.filter(_.symbol.endsWith("USDT")).map(m => Instrument(m.exchange, m.symbol)).toSet
       case Left(e)      => logger.error(s"取合约列表失败: ${e.message}"); sys.exit(1)
@@ -46,7 +45,7 @@ import sttp.client4.DefaultSyncBackend
     val scanner = FlowScanner(Exchange.Binance, config, rule)
 
     // 消费者先起、生产者后起：扫描器要先挂在总线上, 否则最早那批成交没人接
-    engine.spawn(scanner)
+    engine.install(scanner)
     engine.watchMarket(instruments, Set(Topics.Trade))
 
     logger.warn(

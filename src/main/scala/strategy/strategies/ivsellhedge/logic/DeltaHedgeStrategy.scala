@@ -218,16 +218,14 @@ final class DeltaHedgeStrategy(
             else
               val side = if net > Coin.Zero then Side.Short else Side.Long // 净多->卖, 净空->买
               val (limitPx, tif) = leg.place(style, side, Some(bbo), bbo.midPrice)
-              Vector(
-                ctx.place(
-                  Order("", exchange, symbol, side, OrderType.Limit(limitPx, tif), qty,
-                    reduceOnly = false, clientOrderId = ""),
-                  f"delta_kama_hedge | $side qty=${qty.value}%.4f ${style.label} limit=${limitPx.value}%.2f " +
-                    f"净敞口=${net.value}%.4f 带=(+${upTh.value}%.4f,-${downTh.value}%.4f) " +
-                    f"方向=$driftDir σ=${sigma.map(v => f"$v%.3f").getOrElse("预热中")} " +
-                    f"gamma=${e.optionGamma.value}%.5f er=${fastKlines.efficiencyRatio.map(v => f"$v%.2f").getOrElse("预热中")} " +
-                    f"期权=${e.optionDelta.value}%.4f 现货=${e.coinBalance.value}%.4f 永续=${perp.value}%.4f",
-                )
+              ctx.place(
+                Order("", exchange, symbol, side, OrderType.Limit(limitPx, tif), qty,
+                  reduceOnly = false, clientOrderId = ""),
+                f"delta_kama_hedge | $side qty=${qty.value}%.4f ${style.label} limit=${limitPx.value}%.2f " +
+                  f"净敞口=${net.value}%.4f 带=(+${upTh.value}%.4f,-${downTh.value}%.4f) " +
+                  f"方向=$driftDir σ=${sigma.map(v => f"$v%.3f").getOrElse("预热中")} " +
+                  f"gamma=${e.optionGamma.value}%.5f er=${fastKlines.efficiencyRatio.map(v => f"$v%.2f").getOrElse("预热中")} " +
+                  f"期权=${e.optionDelta.value}%.4f 现货=${e.coinBalance.value}%.4f 永续=${perp.value}%.4f",
               )
         ).getOrElse(Vector.empty)
 

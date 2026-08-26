@@ -147,10 +147,8 @@ final class MakerHedgeStrategy(
                     val bbo = ss.bbo(exchange)
                     if bbo.isEmpty then warnThrottled(f"盘口 BBO 缺失 -> maker 挂价回退中间价 $px%.2f (检查 BBO 订阅是否在推)")
                     val (limitPx, tif) = leg.place(quoteStyle, side, bbo, Price(px))
-                    Vector(
-                      ctx.place(
-                        Order("", exchange, symbol, side, OrderType.Limit(limitPx, tif), Coin(qty), reduceOnly = false, clientOrderId = ""),
-                        f"maker_hedge | $side qty=$qty%.4f limit=$limitPx%.2f px=$px%.2f netDelta=$netDelta%.4f maBias=$maBias band=($up%.2f,$down%.2f)",
-                      )
+                    ctx.place(
+                      Order("", exchange, symbol, side, OrderType.Limit(limitPx, tif), Coin(qty), reduceOnly = false, clientOrderId = ""),
+                      f"maker_hedge | $side qty=$qty%.4f limit=$limitPx%.2f px=$px%.2f netDelta=$netDelta%.4f maBias=$maBias band=($up%.2f,$down%.2f)",
                     )
               ).getOrElse(Vector.empty)

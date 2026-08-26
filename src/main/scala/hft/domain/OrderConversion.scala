@@ -3,7 +3,7 @@ package hft.domain
 /** 已换算成**交易所格式**的订单：数量是合约张数、价格已按 tick 取整。
   *
   * 独立类型而非复用 [[Order]]，是为了让"哪一侧的单"由类型回答。框架内部一律用 [[Order]]
-  * （币本位），只有 [[hft.exchange.ExchangeClient.placeOrder]] 收本类型 —— 于是"忘了换算就
+  * （币本位），只有 [[hft.exchange.TradingClient.placeOrder]] 收本类型 —— 于是"忘了换算就
   * 直接下单"在类型上写不出来。张数这个概念也就被关在了适配层里。
   */
 final case class ExchangeOrder(
@@ -16,37 +16,31 @@ final case class ExchangeOrder(
     clientOrderId: String,
 )
 
-/** 订单在"框架内"与"交易所侧"之间的换算。
+/** 订单在"框架内"与"交易所侧"之间的换算 —— **只在柜台里发生**。
+  *
+  * 精度是交易所的事实：tick 大小、最小下单量、张数换算，策略与引擎都不需要知道。
+  * 从前这一层泄漏到了策略侧 (策略执行器持有全交易所的合约规格表)，代价是每个发单方
+  * 都得自己回答"收不下怎么办"，而它们回答得并不一致。
   *
   * 分成两步是有原因的：
-  *   - [[alignToExchange]] 在策略产出后立刻做，把数量对齐到交易所收得下的精度（收不下就明说），
+  *   - [[alignToExchange]] 把数量对齐到交易所收得下的精度（收不下就明说），
   *     **但结果仍是币本位**。回测撮合与实盘因此看到同一个数，不必为了取整而把张数
   *     泄漏进框架。
-  *   - [[toExchangeOrder]] 是发往真实交易所的最后一步，只有 exchange 适配层需要。
-  *
-  * 不止一个地方要发单（策略经 [[hft.engine.StrategyRunner]]、监督者降级平仓），
-  * 同一份换算只能有一处实现 —— 各写各的迟早会在取整方向或张数换算上错开。
+  *   - [[toExchangeOrder]] 是发往真实交易所的最后一步。虚拟柜台不走这一步 ——
+  *     它撮合的就是币本位。
   */
 object OrderConversion:
-  /** 缺 [[SymbolMeta]] 说明发单方引用了未预加载的标的，是配置错误，立即终止 */
-  private def metaOf(order: Order, symbolMetas: Map[(Exchange, Symbol), SymbolMeta]): SymbolMeta =
-    symbolMetas.getOrElse(
-      (order.exchange, order.symbol),
-      sys.error(s"SymbolMeta not found for ${order.exchange} ${order.symbol}, cannot convert order"),
-    )
-
   /** 把数量与价格对齐到交易所精度，**数量仍是币本位**。
     *
     * 返回 `Left` 表示对齐之后交易所**收不下**这一单（低于最小下单量，含被取整成 0 的情形）。
-    * 用 Either 而不是直接返回 Order，是为了让每个发单方在编译期就被迫回答"收不下怎么办"
+    * 用 Either 而不是直接返回 Order，是为了让调用方在编译期就被迫回答"收不下怎么办"
     * —— 从前这个判定压根不存在：`minOrderSize` 三家交易所都解析了却从没被用过，
     * 低于一档的量被向下取整成 0 之后照样发出去，换回一个拒单和一次白跑的往返。
     *
-    * Left 里给的是**拼好的说明**而不是错误码：两个调用方（策略发单、监督者平仓）都要把它写进
-    * 日志，各自再查一遍 meta 拼一遍消息只会写出两种说法。
+    * Left 里给的是**拼好的说明**而不是错误码：它最终会作为拒单理由回流给策略，
+    * 沿途每一层各自查一遍规格拼一遍消息只会写出几种说法。
     */
-  def alignToExchange(order: Order, symbolMetas: Map[(Exchange, Symbol), SymbolMeta]): Either[String, Order] =
-    val meta = metaOf(order, symbolMetas)
+  def alignToExchange(order: Order, meta: SymbolMeta): Either[String, Order] =
     val orderType = order.orderType match
       case OrderType.Market            => OrderType.Market
       case OrderType.Limit(price, tif) => OrderType.Limit(meta.roundPrice(price), tif)
@@ -59,8 +53,7 @@ object OrderConversion:
       )
 
   /** 换算成交易所格式（币本位 -> 合约张数）—— 发往真实交易所前的最后一步 */
-  def toExchangeOrder(order: Order, symbolMetas: Map[(Exchange, Symbol), SymbolMeta]): ExchangeOrder =
-    val meta = metaOf(order, symbolMetas)
+  def toExchangeOrder(order: Order, meta: SymbolMeta): ExchangeOrder =
     ExchangeOrder(
       exchange = order.exchange,
       symbol = order.symbol,

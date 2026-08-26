@@ -2,9 +2,10 @@ package hft.backtest
 
 import hft.domain.*
 import hft.engine.StrategyRunner
+import hft.event.Commands.{OrderIntent, OutcomeEvent}
 import hft.event.{AnyEvent, Event, Topics}
+import hft.exchange.TradingGateway
 import hft.sim.{Counter, CounterInput, Delayed, SimConfig, SimState}
-import hft.strategy.{OrderIntent, OutcomeEvent}
 import org.slf4j.LoggerFactory
 
 import scala.collection.mutable
@@ -49,8 +50,10 @@ final class BacktestEngine(
     source: MarketDataSource,
     runners: Seq[StrategyRunner],
     config: SimConfig = SimConfig(),
-    /** 合约规格：撮合入口据此把订单从交易所格式还原成币本位 (见 [[hft.sim.SimState.onOrderArrived]])。
-      * 无默认值 —— 缺了它任何订单都撮合不了，与其在首笔成交时炸，不如装配期就写清楚。 */
+    /** 合约规格：回测里引擎兼任柜台，据此把策略的币本位意图对齐到交易所精度 ——
+      * 与实盘的柜台同一份判据 (见 [[hft.exchange.TradingGateway]])，否则回测的成交量会
+      * 系统性地比实盘多出一个取整。
+      * 无默认值 —— 缺了它任何订单都对齐不了，与其在首笔下单时炸，不如装配期就写清楚。 */
     symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     observers: Seq[AnyEvent => Unit] = Nil,
     clockIntervalMs: Long = 1000,
@@ -209,9 +212,16 @@ final class BacktestEngine(
             case Some(intent) =>
               intent.outcome match
                 case OutcomeEvent.PlaceOrders(orders, _) =>
+                  // 回测里引擎兼任柜台：精度对齐与"收不下就拒单回流"都走实盘那一份判据，
+                  // 否则策略在回测里发得出、在实盘发不出的单会悄悄改变结论。
                   orders.foreach { o =>
-                    orderIdGen += 1
-                    enqueue(Counter.inbound(config, CounterInput.OrderArrived(o, orderIdGen.toString)))
+                    OrderConversion.alignToExchange(o, metaOf(o)) match
+                      case Right(aligned) =>
+                        orderIdGen += 1
+                        enqueue(Counter.inbound(config, CounterInput.OrderArrived(aligned, orderIdGen.toString)))
+                      case Left(reason) =>
+                        logger.warn(s"下单被交易所精度拒绝: $reason")
+                        schedule(now, Action.Deliver(TradingGateway.rejection(account, exchange, o, reason)))
                   }
                 case OutcomeEvent.CancelOrder(_, _, ref) =>
                   enqueue(Counter.inbound(config, CounterInput.CancelArrived(ref)))
@@ -220,6 +230,13 @@ final class BacktestEngine(
               schedule(now, Action.Deliver(produced))
         }
     }
+
+  /** 缺规格即策略引用了未装配的标的, 是装配错误, 立即终止 */
+  private def metaOf(order: Order): SymbolMeta =
+    symbolMetas.getOrElse(
+      (order.exchange, order.symbol),
+      sys.error(s"回测缺少 ${order.exchange} ${order.symbol} 的合约规格, 无法对齐订单"),
+    )
 
   private def accountInfoEvent(ts: Timestamp): AnyEvent =
     Event.stamped(Topics.AccountInfo, state.accountInfo(exchange), ts, ts)

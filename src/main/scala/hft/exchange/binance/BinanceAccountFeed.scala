@@ -2,10 +2,9 @@ package hft.exchange.binance
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{AccountStream, WsLoop}
-import hft.event.{Event, EventBus, Topics}
+import hft.exchange.{AccountFeed, WsLoop}
+import hft.event.{AnyEvent, Event, Topics}
 import org.slf4j.LoggerFactory
-import ox.{Ox, fork}
 import ox.channels.Channel
 import sttp.client4.WebSocketSyncBackend
 import sttp.ws.WebSocketFrame
@@ -24,22 +23,26 @@ import BinanceCodec.given
   * Fail-fast：连接断开、消息解析失败、未知事件类型/订单状态、listenKey 续期失败，
   * 一律抛出异常终止引擎作用域——不重连、不丢弃，避免任何静默的状态发散。
   */
-final class BinanceAccountStream(
+final class BinanceAccountFeed(
     client: BinanceClient,
     backend: WebSocketSyncBackend,
     wsBaseUrl: String = BinanceClient.WsBaseUrl,
-) extends AccountStream:
-  private val logger = LoggerFactory.getLogger(classOf[BinanceAccountStream])
+) extends AccountFeed:
+  private val logger = LoggerFactory.getLogger(classOf[BinanceAccountFeed])
 
   override def exchange: Exchange = Exchange.Binance
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
-  private var bus: EventBus = scala.compiletime.uninitialized
 
-  override def start(eventBus: EventBus)(using Ox): Unit =
-    bus = eventBus
-    WsLoop.run("binance/private", backend, privateStreamUrl, outgoing, onPrivateText)
-    fork {
+  /** 回报归属的账户与发布通道，由柜台在 [[connect]] 时注入，之后只读 */
+  @volatile private var account: AccountId = scala.compiletime.uninitialized
+  @volatile private var publish: AnyEvent => Unit = scala.compiletime.uninitialized
+
+  override def connect(acct: AccountId, sink: AnyEvent => Unit, spawn: (=> Unit) => Unit): Unit =
+    account = acct
+    publish = sink
+    WsLoop.run("binance/private", backend, privateStreamUrl, outgoing, onPrivateText, spawn)
+    spawn {
       while true do
         Thread.sleep(30 * 60 * 1000)
         client.keepAliveListenKey() match
@@ -82,7 +85,7 @@ final class BinanceAccountStream(
       // 未知状态意味着无法解释交易所的订单状态机，继续运行只会静默发散
       case other => throw IllegalStateException(s"Unknown order status '$other': $o")
     val update = OrderUpdate(
-      account = AccountId.Live,
+      account = account,
       orderId = o.i.toString,
       clientOrderId = Some(o.c),
       exchange = Exchange.Binance,
@@ -95,19 +98,19 @@ final class BinanceAccountStream(
       fillSize = Coin(o.l.asDouble),
       timestamp = o.T,
     )
-    bus.publish(Event.at(Topics.OrderUpdate, update, msg.E))
+    publish(Event.at(Topics.OrderUpdate, update, msg.E))
     // 本次有成交 -> 同步发布 Fill 事件，乐观更新仓位
     if o.l.asDouble > 0 then
-      val fill = Fill(AccountId.Live, Exchange.Binance, o.s, side, price = o.L.asPrice, size = Coin(o.l.asDouble), timestamp = o.T)
-      bus.publish(Event.at(Topics.Fill, fill, msg.E))
+      val fill = Fill(account, Exchange.Binance, o.s, side, price = o.L.asPrice, size = Coin(o.l.asDouble), timestamp = o.T)
+      publish(Event.at(Topics.Fill, fill, msg.E))
 
   private def publishAccountUpdate(msg: AccountUpdateMsg): Unit =
     msg.a.B.foreach { b =>
-      bus.publish(
-        Event.at(Topics.Balance, Balance(AccountId.Live, Exchange.Binance, b.a, b.wb.asDouble, msg.E), msg.E)
+      publish(
+        Event.at(Topics.Balance, Balance(account, Exchange.Binance, b.a, b.wb.asDouble, msg.E), msg.E)
       )
     }
     msg.a.P.filter(_.ps == "BOTH").foreach { p =>
-      val position = Position(AccountId.Live, Exchange.Binance, p.s, Coin(p.pa.asDouble), p.ep.asPrice, p.up.asDouble)
-      bus.publish(Event.at(Topics.Position, position, msg.E))
+      val position = Position(account, Exchange.Binance, p.s, Coin(p.pa.asDouble), p.ep.asPrice, p.up.asDouble)
+      publish(Event.at(Topics.Position, position, msg.E))
     }

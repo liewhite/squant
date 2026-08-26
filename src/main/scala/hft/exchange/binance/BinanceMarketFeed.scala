@@ -2,10 +2,9 @@ package hft.exchange.binance
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{MarketDataStream, WsLoop}
-import hft.event.{Event, EventBus, Topics}
+import hft.exchange.{MarketFeed, WsLoop}
+import hft.event.{Event, Topics}
 import org.slf4j.LoggerFactory
-import ox.Ox
 import ox.channels.Channel
 import sttp.client4.WebSocketSyncBackend
 import sttp.ws.WebSocketFrame
@@ -23,11 +22,11 @@ import BinanceCodec.given
   *
   * Fail-fast：连接断开、消息解析失败、未知事件类型，一律抛出异常终止引擎作用域。
   */
-final class BinanceMarketStream(
+final class BinanceMarketFeed(
     backend: WebSocketSyncBackend,
     wsBaseUrl: String = BinanceClient.WsBaseUrl,
-) extends MarketDataStream:
-  private val logger = LoggerFactory.getLogger(classOf[BinanceMarketStream])
+) extends MarketFeed:
+  private val logger = LoggerFactory.getLogger(classOf[BinanceMarketFeed])
 
   override def exchange: Exchange = Exchange.Binance
 
@@ -40,15 +39,17 @@ final class BinanceMarketStream(
   private val outgoing: Map[Route, Channel[WebSocketFrame]] =
     Route.values.map(_ -> Channel.unlimited[WebSocketFrame]).toMap
   private val requestId = AtomicInteger(0)
-  private var bus: EventBus = scala.compiletime.uninitialized
 
-  override def start(eventBus: EventBus)(using Ox): Unit =
-    bus = eventBus
+  override protected def connect(): Unit =
     Route.values.foreach { route =>
-      WsLoop.run(s"binance${route.path.stripSuffix("/ws")}", backend, () => s"$wsBaseUrl${route.path}", outgoing(route), onPublicText)
+      WsLoop.run(
+        s"binance${route.path.stripSuffix("/ws")}", backend, () => s"$wsBaseUrl${route.path}",
+        outgoing(route), onPublicText, body => fork(body),
+      )
     }
 
-  override def subscribe(kinds: Set[SubscriptionKind]): Unit =
+  /** 基类已去重，这里收到的都是尚未订阅过的流 */
+  override protected def subscribeToExchange(kinds: Set[SubscriptionKind]): Unit =
     kinds.groupBy(routeOf).foreach { (route, routeKinds) =>
       sendSubscribe(route, routeKinds.map(streamName))
     }
@@ -105,7 +106,7 @@ final class BinanceMarketStream(
 
   private def publishTrade(msg: AggTradeMsg): Unit =
     val trade = MarketTrade(Exchange.Binance, msg.s, msg.p.asPrice, Coin(msg.q.asDouble), msg.m, msg.T)
-    bus.publish(Event.at(Topics.Trade, trade, msg.T))
+    publish(Event.at(Topics.Trade, trade, msg.T))
 
   private def publishBookTicker(msg: BookTickerMsg): Unit =
     val bbo = BBO(
@@ -117,16 +118,16 @@ final class BinanceMarketStream(
       askQty = Coin(msg.A.asDouble),
       timestamp = msg.E,
     )
-    bus.publish(Event.at(Topics.Bbo, bbo, msg.E))
+    publish(Event.at(Topics.Bbo, bbo, msg.E))
 
   /** markPrice 流一次携带标记价格/指数价格/资金费率，拆为三个事件发布 */
   private def publishMarkPrice(msg: MarkPriceMsg): Unit =
-    bus.publish(
+    publish(
       Event.at(Topics.MarkPrice, MarkPrice(Exchange.Binance, msg.s, msg.p.asPrice, msg.E), msg.E)
     )
-    bus.publish(
+    publish(
       Event.at(Topics.IndexPrice, IndexPrice(Exchange.Binance, msg.s, msg.i.asPrice, msg.E), msg.E)
     )
-    bus.publish(
+    publish(
       Event.at(Topics.FundingRate, FundingRate(Exchange.Binance, msg.s, msg.r.asDouble, nextSettleTime = msg.T, timestamp = msg.E), msg.E)
     )

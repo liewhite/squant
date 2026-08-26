@@ -2,8 +2,9 @@ package strategy.strategies.makerhedge.live
 import strategy.utils.option.*
 
 import hft.domain.{AccountId, Coin, Exchange}
-import hft.engine.{Engine, ExchangeGateway}
-import hft.exchange.bybit.{BybitAccountStream, BybitClient, BybitCredentials, BybitMarketStream}
+import hft.engine.Engine
+import hft.exchange.bybit.{BybitAccountFeed, BybitClient, BybitCredentials, BybitMarketFeed}
+import hft.exchange.RestTradingGateway
 import strategy.strategies.makerhedge.logic.{AsymHedgeBand, MakerHedgeStrategy}
 import org.slf4j.LoggerFactory
 import ox.supervised
@@ -41,11 +42,13 @@ import sttp.client4.DefaultSyncBackend
     val backend = DefaultSyncBackend()
     val perp = BybitClient.trading(backend, credentials.get) // 永续 (linear) 下单/查仓
     val opt = BybitOptionsClient(backend, credentials, testnet = conf.testnet)
-    val market = BybitMarketStream(backend)
-    // 一个 accountStream = 期权 greeks 注入流 (先, 同步发 ccy 余额兜底) + Bybit 永续账户流 (持仓/订单回报)
-    val account = CompositeAccountStream(Exchange.Bybit, Seq(OptionGreeksStream(opt, Exchange.Bybit, t.ccy, t.greeksPollMs), BybitAccountStream(perp, backend)))
 
-    val engine = Engine.start(gateways = Vector(ExchangeGateway.trading(perp, market, Some(account)))) // 实盘
+    // 一个 accountStream = 期权 greeks 注入流 (先, 同步发 ccy 余额兜底) + Bybit 永续账户流 (持仓/订单回报)
+    val feed = CompositeAccountFeed(Exchange.Bybit, Seq(OptionGreeksStream(opt, Exchange.Bybit, t.ccy, t.greeksPollMs), BybitAccountFeed(perp, backend)))
+
+    // 柜台在前、行情在后: 柜台既接下单指令也推回报 (消费者), 行情源是纯生产者。
+    val gateway = RestTradingGateway.load(perp, feed, AccountId.Live)
+    val engine = Engine.start(plugins = Vector(gateway, BybitMarketFeed(backend))) // 实盘
 
     // greeks 陈旧阈值 = 4× 轮询间隔 (连续几次拉取失败即暂停对冲, 不按过期 delta 乱挂)
     val strategy = MakerHedgeStrategy(Exchange.Bybit, t.symbol, t.ccy, AsymHedgeBand.byMa(t.tightAtr, t.looseAtr),

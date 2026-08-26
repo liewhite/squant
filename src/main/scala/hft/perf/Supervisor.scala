@@ -3,7 +3,8 @@ package hft.perf
 import hft.actor.{Actor, ActorContext, ActorHandle}
 import hft.domain.*
 import hft.event.{AnyEvent, Event, Interest, Topics}
-import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy}
+import hft.event.Commands.{AccountOutcome, OrderIntent, OutcomeEvent}
+import hft.strategy.Strategy
 import org.slf4j.LoggerFactory
 
 import scala.collection.mutable
@@ -42,8 +43,6 @@ final class Supervisor(
     /** 拉起 / 撤下实盘实例。由装配期注入，避免本类依赖具体的引擎类型 */
     promoteLive: (Instrument, Strategy) => ActorHandle,
     demoteLive: ActorHandle => Unit,
-    /** 平仓单也要换算成交易所格式 —— 与策略发单走同一份 [[OrderConversion]] */
-    symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     decideIntervalMs: Long = 5000,
 ) extends Actor:
   private val logger = LoggerFactory.getLogger(classOf[Supervisor])
@@ -108,6 +107,15 @@ final class Supervisor(
           flattening -= cid
           update.status match
             case OrderStatus.Filled => logger.warn(s"降级平仓已成交: $instrument")
+            case OrderStatus.Error(reason) =>
+              // 柜台确定性地拒了这一单 —— 最常见的原因是敞口已小到交易所收不下。
+              // 再怎么重试也发不出去, 所以停掉那条"仍有敞口"的周期告警, 换成一句要人处理的终局。
+              residual -= instrument
+              lastResidualWarn -= instrument
+              logger.error(
+                s"!!! $instrument 的降级平仓单被拒, 已停止重试: $reason. " +
+                  "敞口仍在且已无策略管理它, 需人工处理 (手工并单平掉, 或忽略这笔尘埃仓位)"
+              )
             case other =>
               logger.error(s"!!! 降级平仓未成交 ($other): $instrument 的实盘敞口仍在, 且已无策略管理它, 请人工介入")
       }
@@ -209,23 +217,14 @@ final class Supervisor(
         reduceOnly = true,
         clientOrderId = clientOrderId,
       )
-      OrderConversion.alignToExchange(raw, symbolMetas) match
-        case Right(order) =>
-          flattening(clientOrderId) = (instrument, now)
-          logger.warn(s"flattening live position: $instrument size=$size -> $side ${size.abs.value}")
-          ctx.publish(Event.local(
-            OrderIntent,
-            AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(order), s"demote flatten $instrument")),
-          ))
-        case Left(reason) =>
-          // 敞口小到交易所收不下 —— 再怎么重试也发不出单, 报清楚"为什么平不掉"而不是
-          // 让 checkResidual 一遍遍重复那句泛泛的"仍有敞口"。这是要人来处理的终局。
-          residual -= instrument
-          lastResidualWarn -= instrument
-          logger.error(
-            s"!!! $instrument 残留敞口 $size 低于交易所最小下单量, 无法用订单平掉, 已停止重试: $reason. " +
-              "需人工处理 (手工并单平掉, 或忽略这笔尘埃仓位)"
-          )
+      // 精度裁决归柜台 —— 敞口小到交易所收不下时它会以拒单回流, 由 checkFlatten 报终局。
+      // 监督者自己再判一次的话就有了第二份判据, 两份迟早会在取整方向上错开。
+      flattening(clientOrderId) = (instrument, now)
+      logger.warn(s"flattening live position: $instrument size=$size -> $side ${size.abs.value}")
+      ctx.publish(Event.local(
+        OrderIntent,
+        AccountOutcome(AccountId.Live, OutcomeEvent.PlaceOrders(Vector(raw), s"demote flatten $instrument")),
+      ))
 
 object Supervisor:
   /** 平仓单多久没见终态就开始告警 —— 之后每个时钟节拍重复报 */

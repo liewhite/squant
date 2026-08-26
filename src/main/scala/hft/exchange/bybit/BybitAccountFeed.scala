@@ -2,10 +2,9 @@ package hft.exchange.bybit
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{AccountStream, WsLoop}
-import hft.event.{Event, EventBus, Topics}
+import hft.exchange.{AccountFeed, WsLoop}
+import hft.event.{AnyEvent, Event, Topics}
 import org.slf4j.LoggerFactory
-import ox.{Ox, fork}
 import ox.channels.Channel
 import sttp.client4.WebSocketSyncBackend
 import sttp.ws.WebSocketFrame
@@ -15,7 +14,7 @@ import java.time.Instant
 import BybitCodec.*
 import BybitCodec.given
 
-object BybitAccountStream:
+object BybitAccountFeed:
   /** auth 帧 expires 相对当前时间的前移量 (ms)，给握手留出窗口 */
   val AuthExpiresBufferMs: Long = 10_000
 
@@ -33,28 +32,34 @@ object BybitAccountStream:
   *
   * Fail-fast：连接断开、解析失败、auth/订阅失败一律抛异常终止引擎作用域。
   */
-final class BybitAccountStream(
+final class BybitAccountFeed(
     client: BybitClient,
     backend: WebSocketSyncBackend,
     wsUrl: String = BybitClient.WsPrivateUrl,
-) extends AccountStream:
-  private val logger = LoggerFactory.getLogger(classOf[BybitAccountStream])
+) extends AccountFeed:
+  private val logger = LoggerFactory.getLogger(classOf[BybitAccountFeed])
   private val credentials = client.wsCredentials
 
   override def exchange: Exchange = Exchange.Bybit
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
-  private var bus: EventBus = scala.compiletime.uninitialized
 
-  override def start(eventBus: EventBus)(using Ox): Unit =
-    bus = eventBus
-    WsLoop.run("bybit/private", backend, () => wsUrl, outgoing, onPrivateText)
+  /** 回报归属的账户与发布通道，由柜台在 [[connect]] 时注入，之后只读 */
+  @volatile private var account: AccountId = scala.compiletime.uninitialized
+  @volatile private var publish: AnyEvent => Unit = scala.compiletime.uninitialized
+  @volatile private var spawnThread: (=> Unit) => Unit = scala.compiletime.uninitialized
+
+  override def connect(acct: AccountId, sink: AnyEvent => Unit, spawn: (=> Unit) => Unit): Unit =
+    account = acct
+    publish = sink
+    spawnThread = spawn
+    WsLoop.run("bybit/private", backend, () => wsUrl, outgoing, onPrivateText, spawn)
     // auth 帧入队，连接建立后立即发送 (expires 在此刻生成，留 10s 窗口)
     outgoing.send(WebSocketFrame.text(authFrame()))
     startHeartbeat()
 
   private def authFrame(): String =
-    val expires = Instant.now().toEpochMilli + BybitAccountStream.AuthExpiresBufferMs
+    val expires = Instant.now().toEpochMilli + BybitAccountFeed.AuthExpiresBufferMs
     val sign = credentials.signWsAuth(expires)
     s"""{"op":"auth","args":["${credentials.apiKey}",$expires,"$sign"]}"""
 
@@ -88,7 +93,7 @@ final class BybitAccountStream(
   private def publishExecution(d: ExecutionData): Unit =
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in execution: '${d.symbol}'"))
     val fill = Fill(
-      account = AccountId.Live,
+      account = account,
       exchange = Exchange.Bybit,
       symbol = sym,
       side = sideFromBybit(d.side),
@@ -96,14 +101,14 @@ final class BybitAccountStream(
       size = Coin(d.execQty.asDouble),
       timestamp = d.execTime.toLongOption.getOrElse(nowMs),
     )
-    bus.publish(Event.local(Topics.Fill, fill))
+    publish(Event.local(Topics.Fill, fill))
 
   /** 订单状态 -> OrderUpdate，仅追踪挂单生命周期；fillSize=0，仓位由 execution 维护 */
   private def publishOrder(d: OrderData): Unit =
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in order: '${d.symbol}'"))
     val filled = Coin(d.cumExecQty.asDouble)
     val update = OrderUpdate(
-      account = AccountId.Live,
+      account = account,
       orderId = d.orderId,
       clientOrderId = if d.orderLinkId.nonEmpty then Some(d.orderLinkId) else None,
       exchange = Exchange.Bybit,
@@ -116,23 +121,23 @@ final class BybitAccountStream(
       fillSize = Coin.Zero,
       timestamp = nowMs,
     )
-    bus.publish(Event.local(Topics.OrderUpdate, update))
+    publish(Event.local(Topics.OrderUpdate, update))
 
   /** 钱包快照 -> 账户净值 + 各币种现金余额 */
   private def publishWallet(d: WalletData): Unit =
     val ts = nowMs
-    bus.publish(
-      Event.at(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Bybit, d.totalEquity.asDouble, notional = 0.0), ts)
+    publish(
+      Event.at(Topics.AccountInfo, AccountInfo(account, Exchange.Bybit, d.totalEquity.asDouble, notional = 0.0), ts)
     )
     d.coin.foreach { c =>
-      bus.publish(Event.at(Topics.Balance, Balance(AccountId.Live, Exchange.Bybit, c.coin, c.walletBalance.asDoubleOrZero, ts), ts))
+      publish(Event.at(Topics.Balance, Balance(account, Exchange.Bybit, c.coin, c.walletBalance.asDoubleOrZero, ts), ts))
     }
 
   /** 心跳发送线程：定期入队 ping 帧，维持私有连接 (无成交时也不致空闲被断) */
-  private def startHeartbeat()(using Ox): Unit =
-    fork {
+  private def startHeartbeat(): Unit =
+    spawnThread {
       while true do
-        Thread.sleep(BybitMarketStream.HeartbeatIntervalMs)
+        Thread.sleep(BybitMarketFeed.HeartbeatIntervalMs)
         outgoing.send(WebSocketFrame.text("""{"op":"ping"}"""))
     }
     ()

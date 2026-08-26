@@ -73,11 +73,24 @@ final class EventBus:
     EventBus.Mailbox(ch, () => registrationLock.synchronized(remove(ch, allTopics, keyedByTopic)))
   }
 
-  /** 某个 (topic, key) 槽上的订阅者数 —— 供观测与测试确认退订确实摘干净了 */
-  def subscriberCount(topic: Topic[?, ?], key: Any): Int =
+  /** 某个 (topic, key) 槽上的订阅者数 —— 供观测与测试确认退订确实摘干净了。
+    *
+    * key 的类型由 topic 给出 (而不是 `Any`)：查一个类型对不上的 key 永远得 0，
+    * 那正是"订阅者数为零"这类校验最不该出现的静默假象。
+    */
+  def subscriberCount[K](topic: Topic[K, ?], key: K): Int =
     Option(topics.get(topic)).fold(0) { idx =>
       Option(idx.byKey.get(key)).fold(0)(_.size) + idx.all.size
     }
+
+  /** 这条 `(topic, key)` 上有没有人接。
+    *
+    * **指令面契约校验的唯一依据**（见 [[Commands]]）：引擎在装配期用它确认策略将要发出的
+    * 每一条指令都有接单者，没有就拒绝启动。校验的是订阅事实本身，因此不需要任何插件
+    * 额外声明"我提供什么" —— 订阅是它为了工作本来就必须做的事，多一份声明就多一处
+    * 会写错、会漏写的事实。
+    */
+  def hasSubscriber[K](topic: Topic[K, ?], key: K): Boolean = subscriberCount(topic, key) > 0
 
   /** 把一条 channel 从它登记过的每个槽里摘除。
     *

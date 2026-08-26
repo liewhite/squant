@@ -1,32 +1,30 @@
 package hft.engine
 
 import hft.domain.*
+import hft.event.Commands.{AccountOutcome, OrderIntent, OutcomeEvent}
 import hft.event.{AnyEvent, Event, Handlers, Interest, Subscription, Topics}
 import hft.state.StateManager
-import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy, StrategyContext}
-import org.slf4j.LoggerFactory
+import hft.strategy.{Strategy, StrategyContext}
 
-/** 策略执行的**纯逻辑核心**：把一个事件喂给策略、维护策略独享状态、产出"已按交易所精度转换"的信号。
+/** 策略执行的**纯逻辑核心**：把一个事件喂给策略、维护策略独享状态、产出下单意图。
   *
   * 不含任何传输/并发设施 (无 fork / channel / bus)，因此可被两种驱动复用：
-  *   - 实盘/模拟盘 [[Executor]]：虚拟线程串行消费总线事件，调用 [[onEvent]] 后把结果发布到 outcomeBus
+  *   - 实盘/模拟盘 [[Executor]]：虚拟线程串行消费总线事件，把结果发布到总线
   *   - 回测 [[hft.backtest.BacktestEngine]]：单线程虚拟时间循环里同步调用 [[accepts]]/[[onEvent]]
   *
-  * 职责与原 Executor.handle 完全一致：过滤订阅范围、更新 StateManager、分配 clientOrderId、
-  * 登记 pending、按 SymbolMeta 转换 (币本位->张数、价格/数量取整)。行为不变。
+  * **不做交易所精度对齐**：tick、最小下单量、张数换算都是交易所的事实，归柜台
+  * (见 [[hft.exchange.TradingGateway]])。策略这一侧从头到尾只有币本位，
+  * 收不下的单由柜台以拒单回流，与"交易所明确拒绝"走同一条清理路径。
   *
   * @param clientOrderIdGen client_order_id 生成器 (按交易所格式)。实盘默认用 UUID 保唯一；
   *   回测注入确定性自增计数 (见 [[StrategyRunner.backtest]])，使逐笔回报/CSV 跨运行可复现。
   */
 final class StrategyRunner(
     strategy: Strategy,
-    symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
     /** 本实例绑定的账户 —— 装配期决定，策略自己不知道。无默认值，理由同 [[Executor]] */
     val account: AccountId,
     clientOrderIdGen: Exchange => String = _.newClientOrderId,
 ):
-  private val logger = LoggerFactory.getLogger(classOf[StrategyRunner])
-
   /** 策略声明的处理器，账户已绑定 */
   // 只取一次：handlers 是 def，业务策略在里面捕获自身可变状态构造闭包，两次调用得到两个实例
   private val handlers: Handlers[StrategyContext] = strategy.handlers.bind(account)
@@ -39,37 +37,34 @@ final class StrategyRunner(
   /** 这条事件是否归本策略。判据来自 [[Subscription]]，与总线索引同源 */
   def accepts(event: AnyEvent): Boolean = subscription.accepts(event)
 
-  /** 更新状态并运行策略，返回策略产出的事件 (下单意图已分配 id、登记 pending、按精度换算)。
+  /** 更新状态并运行策略，返回策略产出的事件 (下单意图已分配 id、登记 pending)。
     * `now` 为当前处理时刻 (回测虚拟时间 / 实盘墙钟)，作为 pending order 的 createdAt。
     */
   def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
     state.apply(event)
     handlers.dispatch(event, StrategyContext(state, account, now), now).map(prepareIntent(_, now))
 
-  /** 对策略**真正返回**的下单意图施加发单前的三件必做事：分配 clientOrderId、
-    * 以币本位登记 pending、换算成交易所格式。
+  /** 对策略**真正返回**的下单意图施加发单前的两件必做事：分配 clientOrderId、
+    * 以币本位登记 pending。
     *
     * 收在这里而不是在 `ctx.place` 构造时做 —— 策略可能构造了却不返回（条件分支丢弃），
     * 那样会登记一条永远不会发出的幽灵挂单。只有返回的才算数。
     * 非下单意图（策略自己的指标等）原样透传。
+    *
+    * 登记的是**币本位原始数量**，而柜台真正发出的是对齐到交易所精度之后的量，两者可能
+    * 差一个取整。这是有意的：pending 登记的用途是超时检测与停机撤单，两者按
+    * clientOrderId 认单，不比对数量；而让策略侧看到"被交易所取整之后的数"反而会让
+    * 它的敞口账与自己的意图对不上。真实成交量一律以回报为准。
     */
   private def prepareIntent(produced: AnyEvent, now: Timestamp): AnyEvent =
     produced.as(OrderIntent) match
       case Some(AccountOutcome(acct, OutcomeEvent.PlaceOrders(orders, comment))) =>
-        // 登记 pending 放在对齐**之后**：交易所收不下的单根本不会发出去，
-        // 先登记就会留下一条永远等不到回报的幽灵挂单 —— 而框架的超时检测会把它当成
-        // "结果不确定"而终止进程。
-        val prepared = orders.flatMap { order =>
+        val identified = orders.map { order =>
           val withId = order.copy(clientOrderId = clientOrderIdGen(order.exchange))
-          OrderConversion.alignToExchange(withId, symbolMetas) match
-            case Right(aligned) =>
-              state.addPendingOrder(withId, now) // 币本位登记，策略端统一看到币的数量
-              Some(aligned)
-            case Left(reason) =>
-              logger.warn(s"下单意图被丢弃 (交易所收不下): $reason")
-              None
+          state.addPendingOrder(withId, now)
+          withId
         }
-        Event.stamped(OrderIntent, AccountOutcome(acct, OutcomeEvent.PlaceOrders(prepared, comment)), now, now)
+        Event.stamped(OrderIntent, AccountOutcome(acct, OutcomeEvent.PlaceOrders(identified, comment)), now, now)
       case _ => produced
 
   /** 撤掉本策略全部挂单的信号 —— 停机收尾用。
@@ -131,9 +126,5 @@ object StrategyRunner:
     * 本 runner 的订阅范围，策略从此收不到自己的成交，而这不会报任何错。
     * 引擎在装配期校验这一点，此处保留参数是为了不把"回测只能有一个账户"焊死。
     */
-  def backtest(
-      strategy: Strategy,
-      symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
-      account: AccountId = AccountId.Live,
-  ): StrategyRunner =
-    StrategyRunner(strategy, symbolMetas, account, deterministicIdGen())
+  def backtest(strategy: Strategy, account: AccountId = AccountId.Live): StrategyRunner =
+    StrategyRunner(strategy, account, deterministicIdGen())

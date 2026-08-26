@@ -118,7 +118,7 @@ import scala.concurrent.{Await, ExecutionContext, Future}
       val hedgeStrat =
         if hedgeExec == "take" then BandHedgeStrategy(Exchange.Binance, symbol, ccy, band) // 市价 at-touch
         else MakerHedgeStrategy(Exchange.Binance, symbol, ccy, band, offsetPct = makerOffset, requoteMs = requoteMs)
-      val runner = StrategyRunner.backtest(hedgeStrat, symbolMetas)
+      val runner = StrategyRunner.backtest(hedgeStrat)
       var lastMid = 0.0; var lastTs = 0L; var curveLastTs = 0L
       val curve = ArrayBuffer.empty[(Long, Double, Double)]
       val fillRecs = ArrayBuffer.empty[(Long, Side, Double, Double)]

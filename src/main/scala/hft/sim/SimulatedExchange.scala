@@ -1,14 +1,11 @@
 package hft.sim
 
+import hft.actor.ActorSystem
 import hft.domain.*
-import hft.exchange.{AccountStream, ExchangeClient, MarketDataStream, TradingClient}
-import hft.event.{AnyEvent, EventBus, Interest, Topics}
+import hft.event.Commands.{MarketSubscription, MarketSubscriptionRequest}
+import hft.event.{AnyEvent, Event, EventBus, Interest, Topic, Topics}
+import hft.exchange.{MarketFeed, TradingGateway}
 import org.slf4j.LoggerFactory
-import ox.{Ox, fork}
-import ox.channels.Channel
-
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong}
-import java.util.concurrent.{Executors, ScheduledExecutorService, TimeUnit}
 
 /** 虚拟柜台的延迟与初始资金配置。
   *
@@ -26,158 +23,147 @@ final case class SimConfig(
     takerFeeRate: Double = 0.0,
 )
 
-/** 虚拟柜台 / 模拟撮合引擎 —— 单 actor 实现。
+/** 上游行情抵达柜台 —— 从私有总线的消费线程串行化回 actor 线程的那一跳。
   *
-  * 完整扮演一个交易所的三个交互面 (REST 下单 / 公共行情流 / 私有账户流)，使策略
-  * 对"实盘还是模拟盘"完全无感知：
-  *   - [[MarketDataStream]]：消费上游真实公共行情 (实时, 用于撮合)，并把同样的行情
-  *     按 exchangeToStrategyDelay 延迟后转发给策略
-  *   - [[ExchangeClient]]：接收下单/撤单 (按 orderToExchangeDelay 延迟后到达撮合)，
-  *     提供账户/仓位/挂单查询
-  *   - [[AccountStream]]：撮合产生的订单回报/成交按 exchangeToStrategyDelay 延迟后回流策略
+  * 走总线而不是直接调用：柜台状态的写者必须只有 actor 线程一个。key 是账户，
+  * 因此只有本柜台会收到自己的上游行情。
+  */
+private[sim] final case class UpstreamMarket(account: AccountId, event: AnyEvent)
+
+private[sim] object UpstreamMarkets extends Topic[AccountId, UpstreamMarket]("simUpstreamMarket"):
+  def keyOf(payload: UpstreamMarket): AccountId = payload.account
+
+/** 虚拟柜台 (替身)：**整个交易所**的替代品 —— 行情面与交易面都由它扮演。
   *
-  * 撮合规则：挂单成交判定为 **BBO 越过挂单价**，PostOnly 到达即可成交则拒单。撮合用上游
-  * 实时行情、策略看延迟行情，如实建模"基于陈旧价格挂单、订单在途行情移动"。
+  * 与 [[PaperCounter]] 的区别是定位而非撮合：后者与实盘**并存** (两边看同一份真实行情、
+  * 跑同一份逻辑，只有账户不同)，本类则**替换**掉真实交易所的两个插件，策略对真假无感知。
+  * 撮合内核 ([[SimState]]) 是同一个。
   *
-  * 线程模型 (actor)：所有命令 (行情到达 / 下单到达 / 撤单到达) 串行进入单一 mailbox，由
-  * 唯一的处理线程消费——它是 [[SimState]] 的唯一写者，也是回流事件的唯一发布者。因此
-  * "状态变更顺序 == 回流顺序"天然成立 (一张订单的 Pending 必早于其 Filled)，无需锁。
-  * 延迟仅由 scheduler 负责"把命令/发布推迟到点"，不触碰状态。REST 查询读取 @volatile 的
-  * 不可变状态快照 (单写多读, 无锁)。
+  * ## 为什么行情要经过它，而不是让真实行情插件直接上总线
+  *
+  * 撮合用**实时**行情，策略看**延迟**行情 —— 如实建模"基于陈旧价格挂单、订单在途期间
+  * 行情已经动了"。同一条行情要有两个到达时刻，就不能只有一条路径：
+  *
+  * {{{
+  *   上游真实行情源 ──> 私有总线 ──> 本柜台 ──┬──> 撮合 (实时)
+  *                                          └──> 延迟 ──> 主总线 ──> 策略
+  * }}}
+  *
+  * 上游行情源装在**私有总线**上，主总线上看不见它 —— 否则策略会先收到那份没有延迟的。
+  * 行情订阅指令则反向穿过来：主总线 -> 本柜台 -> 私有总线 -> 上游。
+  *
+  * ## 线程模型
+  *
+  * 所有命令 (上游行情、下单到达、撤单到达) 都经**主总线**串行进入本柜台的邮箱，
+  * 由唯一的 actor 线程消费 —— 它是 [[SimState]] 的唯一写者，也是回流事件的唯一发布者。
+  * 于是"状态变更顺序 == 回流顺序"天然成立 (一张订单的 Pending 必早于其 Filled)，无需锁。
+  * 延迟只由定时器负责"把发布推迟到点"，不触碰状态。
   */
 final class SimulatedExchange(
-    market: MarketDataStream,
-    publicClient: ExchangeClient,
+    /** 上游真实行情源。装在私有总线上，由本柜台独占 —— 它的输出只经本柜台的延迟通道外流 */
+    upstream: MarketFeed,
+    /** 本所合约规格：撮合前按交易所精度对齐，与真实柜台同一份判据 */
+    metas: Map[Symbol, SymbolMeta],
     config: SimConfig = SimConfig(),
-    /** 本柜台服务的账户。作为实盘替身时是 [[AccountId.Live]] (策略对真假无感知)；
-      * 与实盘并行跑影子盘时是 `Paper(n)`，两边的回报靠这个维度分开。
-      * 无默认值，理由同 [[hft.engine.Executor]] */
-    account: AccountId,
-) extends TradingClient,
-      MarketDataStream,
-      AccountStream:
-  require(market.exchange == publicClient.exchange, "market and publicClient must be the same exchange")
+    /** 本柜台服务的账户。作为实盘替身时是 [[AccountId.Live]] (策略对真假无感知)。
+      * 无默认值，理由同 [[hft.exchange.TradingGateway.account]] */
+    override val account: AccountId,
+) extends TradingGateway:
   private val logger = LoggerFactory.getLogger(classOf[SimulatedExchange])
 
-  override def exchange: Exchange = publicClient.exchange
+  override def exchange: Exchange = upstream.exchange
+  override def name: String = s"simulated-exchange@$target"
+  override protected def accountRefreshMs: Long = 1000
 
-  // ---- actor 基础设施 ----
-  /** 命令形态用共用的 [[CounterInput]] —— 与回测、影子盘同一份 */
-  private val mailbox = Channel.unlimited[CounterInput]
-  /** 唯一写者 = actor 线程；读者 = REST 查询线程。不可变快照 + @volatile 保证可见性 */
-  @volatile private var state: SimState = SimState.empty(account, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
-  @volatile private var strategyBus: EventBus = scala.compiletime.uninitialized
+  /** 唯一写者是 actor 线程；净值刷新线程只读快照 —— 不可变状态 + @volatile 即可, 无需锁 */
+  @volatile private var state: SimState =
+    SimState.empty(account, config.initialBalanceUsdt, config.makerFeeRate, config.takerFeeRate)
+  private var orderIdSeq: Long = 0L
 
-  /** 合约规格：柜台扮演交易所，收到的是张数，要自己换回币本位 */
-  @volatile private var metas: Map[Symbol, SymbolMeta] = Map.empty
-  private def metaOf(symbol: Symbol): SymbolMeta =
-    metas.getOrElse(symbol, sys.error(s"SimulatedExchange: SymbolMeta not found for $symbol"))
-
-  private val orderIdSeq = AtomicLong(1)
-  private val started = AtomicBoolean(false)
+  /** 上游行情源专属的私有总线：主总线上看不见它发的行情 */
   private val rawBus = EventBus()
 
-  /** 延迟调度器：仅负责把命令/发布推迟到点 (不触碰状态)。
-    * **单线程是顺序保证的承重墙**——等延迟事件按提交序 FIFO 投递, 把 actor 的输出序原样透过延迟传出;
-    * 勿改为多线程 (会破坏等延迟事件的投递序)。daemon, 进程退出即回收 */
-  private val scheduler: ScheduledExecutorService =
-    Executors.newSingleThreadScheduledExecutor { r =>
-      val t = Thread(r, "sim-exchange-scheduler"); t.setDaemon(true); t
+  /** 除下单与对齐之外，本柜台还要接**行情订阅指令** —— 它扮演的是整个交易所，
+    * 行情面归它管。指令原样转给私有总线上的上游。 */
+  override protected def extraInterests: Set[Interest] = Set(
+    Interest.Keyed(MarketSubscription, Set(exchange)),
+    Interest.Keyed(UpstreamMarkets, Set(account)),
+    Interest.Keyed(CounterCommands, Set(account)),
+  )
+
+  override protected def connect(): Unit =
+    given ox.Ox = scope
+    val rawSystem = ActorSystem(rawBus)
+    rawSystem.spawn(upstream)
+    // 只订公共行情：柜台撮合的输入就是行情，别的与它无关
+    val fromUpstream = rawBus.subscribe(Topics.market.map(Interest.All.apply))
+    // 私有总线的消费线程只做一件事：把行情投回主总线上本柜台自己的键，
+    // 于是它重新回到 actor 线程手里 —— 状态的写者仍然只有一个。
+    fork {
+      fromUpstream.events.foreach(event => publish(Event.local(UpstreamMarkets, UpstreamMarket(account, event))))
     }
+    logger.info(
+      s"虚拟柜台 (替身) 启动: $target order->ex=${config.orderToExchangeDelayMs}ms " +
+        s"ex->strat=${config.exchangeToStrategyDelayMs}ms 初始资金=${config.initialBalanceUsdt}"
+    )
 
-  /** 延迟 delayMs 后执行 action；delayMs <= 0 时同步执行 */
-  private def after(delayMs: Long)(action: => Unit): Unit =
-    if delayMs <= 0 then action
-    else scheduler.schedule((() => action): Runnable, delayMs, TimeUnit.MILLISECONDS)
+  override protected def onOther(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+    event.as(MarketSubscription).foreach { request =>
+      // 原样转给上游 —— 去重由上游的 MarketFeed 基类负责, 这里不必再做一遍
+      rawBus.publish(Event.local(MarketSubscription, MarketSubscriptionRequest(request.exchange, request.kinds)))
+    }
+    event.as(UpstreamMarkets).foreach { arrival =>
+      // 本柜台**替换**整个交易所, 策略的行情只有这一个来源 -> 要原样转发 (撮合本身不回显)。
+      // 先转发后撮合: 同一个单线程定时器按提交序 FIFO, 故策略必先看到行情再看到它引发的成交。
+      emit(Counter.toStrategy(config, arrival.event))
+      matchNow(CounterInput.Market(arrival.event), now)
+    }
+    event.as(CounterCommands).foreach(command => matchNow(command.input, now))
+    Vector.empty
 
-  /** 关闭调度线程 (测试清理用) */
-  def shutdown(): Unit = scheduler.shutdownNow()
+  // ==================== 撮合 ====================
 
-  // ==================== 生命周期 (同时实现 MarketDataStream / AccountStream.start) ====================
+  override protected def metaOf(symbol: Symbol): SymbolMeta =
+    metas.getOrElse(symbol, sys.error(s"虚拟柜台没有 $symbol 的合约规格, 无法撮合 (装配时未加载?)"))
 
-  /** 启动柜台。幂等：Engine 经 accountStream 与 marketData 两个角色各调用一次，只生效一次 */
-  override def start(eventBus: EventBus)(using Ox): Unit =
-    require((strategyBus eq null) || (strategyBus eq eventBus), "SimulatedExchange started with two different buses")
-    strategyBus = eventBus
-    if started.compareAndSet(false, true) then
-      // 合约规格从自己的 client 取 —— 柜台扮演的是交易所, 交易所本就知道自己的合约规格,
-      // 不该让装配方再拉一遍。撮合用它把订单还原成币本位 (见 SimState.onOrderArrived)。
-      metas = publicClient.fetchAllSymbolMetas() match
-        case Right(ms) => ms.map(m => m.symbol -> m).toMap
-        case Left(e)   => sys.error(s"SimulatedExchange 无法加载合约规格: ${e.message}")
-      // 上游真实行情发布到内部 rawBus；转发线程把行情即时投入 mailbox (撮合用实时行情)
-      market.start(rawBus)
-      // 只订公共行情：柜台撮合的输入就是行情，别的 topic 与它无关
-      val upstream = rawBus.subscribe(Topics.market.map(Interest.All.apply))
-      fork { while true do mailbox.send(CounterInput.Market(upstream.events.receive())) }
-      // actor 线程：串行消费命令, 是状态唯一写者与事件唯一发布者
-      fork { while true do process(mailbox.receive()) }
-      logger.info(
-        s"SimulatedExchange started (exchange=$exchange, order->ex=${config.orderToExchangeDelayMs}ms, " +
-          s"ex->strat=${config.exchangeToStrategyDelayMs}ms, initialBalance=${config.initialBalanceUsdt})"
-      )
+  override protected def placeAligned(order: Order, now: Timestamp): Unit =
+    orderIdSeq += 1
+    enqueue(Counter.inbound(config, CounterInput.OrderArrived(order, orderIdSeq.toString)))
 
-  override def subscribe(kinds: Set[SubscriptionKind]): Unit = market.subscribe(kinds)
+  override protected def cancelOrder(symbol: Symbol, ref: OrderRef, now: Timestamp): Unit =
+    enqueue(Counter.inbound(config, CounterInput.CancelArrived(ref)))
 
-  /** actor 主循环：纯转移 + 顺序发布 (在唯一线程上, 故全局有序)。
-    * 撮合与延迟语义都来自 [[Counter]]，这里只负责"用真实定时器等到点"。 */
-  private def process(input: CounterInput): Unit =
-    // 本柜台**替换**整个网关, 策略的行情只有这一个来源 -> 要原样转发 (撮合本身不回显)。
-    // 先转发后撮合: 同一个单线程定时器按提交序 FIFO, 故策略必先看到行情再看到它引发的成交。
-    input match
-      case CounterInput.Market(ev) => emit(Counter.toStrategy(config, ev))
-      case _                       => ()
-    val (next, replies) = Counter.step(state, exchange, input, nowMs, config)
+  /** 落地一次撮合转移：新状态 + 按各自延迟回传的回报。
+    * 延迟语义来自 [[Counter]] (与回测、影子盘同一份)，这里只负责用真实定时器等到点。 */
+  private def matchNow(input: CounterInput, now: Timestamp): Unit =
+    val (next, replies) = Counter.step(state, exchange, input, now, config)
     state = next
     replies.foreach { out =>
       out.value.as(Topics.Fill).foreach(f => logger.info(s"[SIM] fill ${f.side} ${f.symbol} qty=${f.size} @ ${f.price}"))
       emit(out)
     }
 
-  /** 兑现一条延迟输出：等到点后发布给策略 */
-  private def emit(out: Delayed[AnyEvent]): Unit =
-    after(out.delayMs) { strategyBus.publish(out.value) }
+  private def emit(out: Delayed[AnyEvent]): Unit = schedule(out.delayMs, out.value)
 
-  // ==================== ExchangeClient: 公共 REST (委托真实客户端) ====================
+  /** 兑现一条延迟输入：在途结束后作为命令回到本柜台的邮箱 */
+  private def enqueue(cmd: Delayed[CounterInput]): Unit =
+    schedule(cmd.delayMs, Event.local(CounterCommands, CounterCommand(account, cmd.value)))
 
-  override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
-    publicClient.fetchAllSymbolMetas()
+  // ==================== 对齐 ====================
 
-  // ==================== ExchangeClient: 私有 REST (模拟) ====================
+  /** 替身账户同样从零开始 —— 没有"历史"可言，如实报告当下的账本 */
+  override protected def syncPositions(symbols: Set[Symbol]): Vector[Position] =
+    state.ledger.openPositions(state.markOf)
 
-  override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
-    val orderId = orderIdSeq.getAndIncrement().toString
-    // 下单在途延迟后作为命令进入 mailbox
-    // 柜台扮演交易所：收的是张数，进撮合前换回币本位 —— 与真实网关在回报侧还原对称
-    val coinOrder = Order(
-      id = "", exchange = order.exchange, symbol = order.symbol, side = order.side,
-      orderType = order.orderType, quantity = metaOf(order.symbol).toCoin(order.quantity),
-      reduceOnly = order.reduceOnly, clientOrderId = order.clientOrderId,
-    )
-    val cmd = Counter.inbound(config, CounterInput.OrderArrived(coinOrder, orderId))
-    after(cmd.delayMs) { mailbox.send(cmd.value) }
-    Right(orderId)
+  override protected def syncPendingOrders(symbols: Set[Symbol]): Vector[OrderUpdate] =
+    state.resting.values.filter(o => symbols.contains(o.symbol)).map { o =>
+      OrderUpdate(
+        account, o.orderId, Some(o.clientOrderId), exchange, o.symbol, o.side,
+        OrderStatus.Pending, o.limitPrice, o.quantity, Coin.Zero, Coin.Zero, nowMs,
+      )
+    }.toVector
 
-  override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
-    // 撤单请求时订单已不在挂单簿 -> OrderNotFound (已成交/已撤)，由 OutcomeProcessor 容忍。
-    // 读快照判定；在途期间真撤由 CancelArrived 在 actor 线程内裁决 (届时成交则 remove 落空, 不再发 Cancelled)
-    if state.findResting(ref).isEmpty then Left(ExchangeError.OrderNotFound(s"order ${ref.raw} not in book"))
-    else
-      val cmd = Counter.inbound(config, CounterInput.CancelArrived(ref))
-      after(cmd.delayMs) { mailbox.send(cmd.value) }
-      Right(())
+  override protected def currentAccountInfo(): AccountInfo = state.accountInfo(exchange)
 
-  override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] =
-    val s = state
-    Right(s.resting.values.filter(_.symbol == symbol).map { o =>
-      OrderUpdate(account, o.orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Pending, o.limitPrice, o.quantity, Coin.Zero, Coin.Zero, nowMs)
-    }.toVector)
-
-  override def setLeverage(symbol: Symbol, leverage: Int): Either[ExchangeError, Unit] = Right(())
-
-  override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] =
-    Right(state.accountInfo(exchange))
-
-  override def fetchPositions(): Either[ExchangeError, Vector[Position]] =
-    val s = state
-    Right(s.ledger.openPositions(s.markOf))
+  /** 本账户当前的账本快照 (供绩效统计与测试) */
+  def ledger: Ledger = state.ledger

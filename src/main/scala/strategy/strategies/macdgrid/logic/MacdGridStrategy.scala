@@ -105,11 +105,9 @@ final class MacdGridStrategy(
       if posCoin.abs >= minOrderQty then
         val side = if posCoin > Coin.Zero then Side.Short else Side.Long
         logger.info(f"[MacdGrid $symbol] DEA转向平仓 dea=$dea%.4f pos=$posCoin%.4f px=$price%.2f")
-        Vector(
-          ctx.place(
-            Order("", exchange, symbol, side, OrderType.Market, posCoin.abs, reduceOnly = true, ""),
-            f"macdgrid:flatten $side qty=${posCoin.abs.value}%.4f dea=$dea%.4f px=$price%.2f",
-          )
+        ctx.place(
+          Order("", exchange, symbol, side, OrderType.Market, posCoin.abs, reduceOnly = true, ""),
+          f"macdgrid:flatten $side qty=${posCoin.abs.value}%.4f dea=$dea%.4f px=$price%.2f",
         )
       else Vector.empty
     cancels ++ close
@@ -141,7 +139,7 @@ final class MacdGridStrategy(
   ): Unit =
     (desired, present) match
       case (Some(spec), None) if spec.qty >= minOrderQty.value =>
-        actions += ctx.place(
+        actions ++= ctx.place(
           Order("", exchange, symbol, spec.side, OrderType.Limit(Price(spec.price), TimeInForce.GTC), Coin(spec.qty), spec.reduceOnly, ""),
           f"macdgrid:$tag${if spec.trail then ":trail" else ""} ${spec.side} px=${spec.price}%.2f qty=${spec.qty}%.4f units=$posUnits mark=$price%.2f",
         )

@@ -2,10 +2,9 @@ package hft.exchange.okx
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{MarketDataStream, WsLoop}
-import hft.event.{Event, EventBus, Topics}
+import hft.exchange.{MarketFeed, WsLoop}
+import hft.event.{Event, Topics}
 import org.slf4j.LoggerFactory
-import ox.Ox
 import ox.channels.Channel
 import sttp.client4.WebSocketSyncBackend
 import sttp.ws.WebSocketFrame
@@ -23,12 +22,12 @@ import OkxCodec.given
   *
   * Fail-fast：连接断开、解析失败、错误事件 (event=error) 一律抛异常终止引擎作用域。
   */
-final class OkxMarketStream(
+final class OkxMarketFeed(
     client: OkxClient,
     backend: WebSocketSyncBackend,
     wsUrl: String = OkxClient.WsPublicUrl,
-) extends MarketDataStream:
-  private val logger = LoggerFactory.getLogger(classOf[OkxMarketStream])
+) extends MarketFeed:
+  private val logger = LoggerFactory.getLogger(classOf[OkxMarketFeed])
 
   /** 计价币与张<->币换算的 SymbolMeta 均取自 client (instruments 为公共端点，免凭证) */
   private val quote: String = client.quote
@@ -36,23 +35,19 @@ final class OkxMarketStream(
   override def exchange: Exchange = Exchange.Okx
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
-  private var bus: EventBus = scala.compiletime.uninitialized
-  /** symbol -> meta，用于把盘口数量从合约张数换算为币本位 (start 时一次性拉取) */
+  /** symbol -> meta，用于把盘口数量从合约张数换算为币本位 (装上总线时一次性拉取) */
   private var metas: Map[Symbol, SymbolMeta] = Map.empty
 
-  override def start(eventBus: EventBus)(using Ox): Unit =
-    bus = eventBus
+  override protected def connect(): Unit =
     metas = client.fetchAllSymbolMetas() match
       case Right(ms) => ms.map(m => m.symbol -> m).toMap
       case Left(e)   => throw IllegalStateException(s"OKX fetch symbol metas failed: ${e.message}")
-    WsLoop.run("okx/public", backend, () => wsUrl, outgoing, onPublicText)
+    WsLoop.run("okx/public", backend, () => wsUrl, outgoing, onPublicText, body => fork(body))
 
-  override def subscribe(kinds: Set[SubscriptionKind]): Unit =
-    if kinds.nonEmpty then
-      val args = kinds.map(argJson).mkString(",")
-      val message = s"""{"op":"subscribe","args":[$args]}"""
-      logger.info(s"subscribing on okx/public: ${kinds.map(_.subscribedSymbol)}")
-      outgoing.send(WebSocketFrame.text(message))
+  /** 基类已去重，这里收到的都是尚未订阅过的流 */
+  override protected def subscribeToExchange(kinds: Set[SubscriptionKind]): Unit =
+    val args = kinds.map(argJson).mkString(",")
+    outgoing.send(WebSocketFrame.text(s"""{"op":"subscribe","args":[$args]}"""))
 
   private def argJson(kind: SubscriptionKind): String = kind match
     case SubscriptionKind.BBO(s)         => s"""{"channel":"bbo-tbt","instId":"${toOkx(s, quote)}"}"""
@@ -99,23 +94,23 @@ final class OkxMarketStream(
       askQty = meta.toCoin(Contracts(ask(1).asDouble)),
       timestamp = ts,
     )
-    bus.publish(Event.at(Topics.Bbo, bbo, ts))
+    publish(Event.at(Topics.Bbo, bbo, ts))
 
   private def publishMark(d: MarkPriceData): Unit =
     val ts = d.ts.toLong
-    bus.publish(Event.at(Topics.MarkPrice, MarkPrice(Exchange.Okx, requireSymbol(d.instId), d.markPx.asPrice, ts), ts))
+    publish(Event.at(Topics.MarkPrice, MarkPrice(Exchange.Okx, requireSymbol(d.instId), d.markPx.asPrice, ts), ts))
 
   private def publishIndex(d: IndexTickerData): Unit =
     val sym = fromOkxIndex(d.instId).getOrElse(throw IllegalStateException(s"Unknown OKX index instId: '${d.instId}'"))
     val ts = d.ts.toLong
-    bus.publish(Event.at(Topics.IndexPrice, IndexPrice(Exchange.Okx, sym, d.idxPx.asPrice, ts), ts))
+    publish(Event.at(Topics.IndexPrice, IndexPrice(Exchange.Okx, sym, d.idxPx.asPrice, ts), ts))
 
   private def publishTrade(d: TradeData): Unit =
     val ts = d.ts.toLong
     // OKX side = taker 方向: side=sell -> 买方是挂单方 (isBuyerMaker=true)
     val sym = requireSymbol(d.instId)
     val trade = MarketTrade(Exchange.Okx, sym, d.px.asPrice, metas.getOrElse(sym, throw IllegalStateException(s"No SymbolMeta for OKX trade symbol: $sym")).toCoin(Contracts(d.sz.asDouble)), d.side == "sell", ts)
-    bus.publish(Event.at(Topics.Trade, trade, ts))
+    publish(Event.at(Topics.Trade, trade, ts))
 
   private def publishFunding(d: FundingRateData): Unit =
     val ts = nowMs
@@ -126,4 +121,4 @@ final class OkxMarketStream(
       nextSettleTime = d.fundingTime.toLongOption.getOrElse(0L),
       timestamp = ts,
     )
-    bus.publish(Event.at(Topics.FundingRate, fr, ts))
+    publish(Event.at(Topics.FundingRate, fr, ts))

@@ -2,8 +2,9 @@ package strategy.strategies.makerhedge.live
 import strategy.utils.option.*
 
 import hft.domain.{AccountId, Coin, Exchange}
-import hft.engine.{Engine, ExchangeGateway}
-import hft.exchange.okx.{OkxAccountStream, OkxClient, OkxCredentials, OkxMarketStream}
+import hft.engine.Engine
+import hft.exchange.okx.{OkxAccountFeed, OkxClient, OkxCredentials, OkxMarketFeed}
+import hft.exchange.RestTradingGateway
 import strategy.strategies.makerhedge.logic.{AsymHedgeBand, MakerHedgeStrategy}
 import org.slf4j.LoggerFactory
 import ox.supervised
@@ -47,11 +48,13 @@ import sttp.client4.DefaultSyncBackend
     val backend = DefaultSyncBackend()
     val perp = OkxClient.trading(backend, credentials.get, quote = conf.quote) // 永续 (SWAP) 下单/查仓
     val opt = OkxOptionsClient(backend, credentials, quote = conf.quote, optionCcy = Some(t.ccy), simulated = conf.simulated)
-    val market = OkxMarketStream(perp, backend)
-    // accountStream = 期权 greeks 注入流 (先, 同步发 ccy 余额兜底) + OKX 永续账户流 (持仓/订单回报/账户)
-    val account = CompositeAccountStream(Exchange.Okx, Seq(OptionGreeksStream(opt, Exchange.Okx, t.ccy, t.greeksPollMs), OkxAccountStream(perp, backend)))
 
-    val engine = Engine.start(gateways = Vector(ExchangeGateway.trading(perp, market, Some(account)))) // 实盘
+    // accountStream = 期权 greeks 注入流 (先, 同步发 ccy 余额兜底) + OKX 永续账户流 (持仓/订单回报/账户)
+    val feed = CompositeAccountFeed(Exchange.Okx, Seq(OptionGreeksStream(opt, Exchange.Okx, t.ccy, t.greeksPollMs), OkxAccountFeed(perp, backend)))
+
+    // 柜台在前、行情在后: 柜台既接下单指令也推回报 (消费者), 行情源是纯生产者。
+    val gateway = RestTradingGateway.load(perp, feed, AccountId.Live)
+    val engine = Engine.start(plugins = Vector(gateway, OkxMarketFeed(perp, backend))) // 实盘
 
     // greeks 陈旧阈值 = 4× 轮询间隔 (连续几次拉取失败即暂停对冲, 不按过期 delta 乱挂)
     val strategy = MakerHedgeStrategy(Exchange.Okx, t.symbol, t.ccy, AsymHedgeBand.byMa(t.tightAtr, t.looseAtr),

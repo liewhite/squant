@@ -2,11 +2,9 @@ package hft.exchange.okx
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.state.{StateManager}
-import hft.exchange.{AccountStream, WsLoop}
-import hft.event.{Event, EventBus, Topics}
+import hft.exchange.{AccountFeed, WsLoop}
+import hft.event.{AnyEvent, Event, Topics}
 import org.slf4j.LoggerFactory
-import ox.{Ox, fork}
 import ox.channels.Channel
 import sttp.client4.WebSocketSyncBackend
 import sttp.ws.WebSocketFrame
@@ -17,7 +15,7 @@ import scala.collection.mutable
 import OkxCodec.*
 import OkxCodec.given
 
-object OkxAccountStream:
+object OkxAccountFeed:
   /** Greeks REST 轮询间隔。OKX account-greeks WS 推送频率过低，改用 REST 轮询 (官方限速 10/2s) */
   val GreeksPollIntervalMs: Long = 1000
 
@@ -38,40 +36,43 @@ object OkxAccountStream:
   * Fail-fast：连接断开、解析失败、登录失败、错误事件一律抛异常终止引擎作用域。
   * Greeks 轮询失败是唯一例外 (记 warn 后下次重试)，不影响私有流主链路。
   */
-final class OkxAccountStream(
+final class OkxAccountFeed(
     client: OkxClient,
     backend: WebSocketSyncBackend,
     wsUrl: String = OkxClient.WsPrivateUrl,
-) extends AccountStream:
-  private val logger = LoggerFactory.getLogger(classOf[OkxAccountStream])
+) extends AccountFeed:
+  private val logger = LoggerFactory.getLogger(classOf[OkxAccountFeed])
   private val credentials = client.wsCredentials
 
   override def exchange: Exchange = Exchange.Okx
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
-  private var bus: EventBus = scala.compiletime.uninitialized
-  /** symbol -> meta，用于张<->币换算 (start 时一次性拉取) */
+  /** symbol -> meta，用于张<->币换算 (连接时一次性拉取) */
   private var metas: Map[Symbol, SymbolMeta] = Map.empty
   /** greeks 去重：ccy -> 上次 timestamp */
   private val lastGreeksTs: mutable.Map[String, Timestamp] = mutable.Map.empty
 
-  override def start(eventBus: EventBus)(using Ox): Unit =
-    bus = eventBus
+  /** 回报归属的账户与发布通道，由柜台在 [[connect]] 时注入，之后只读 */
+  @volatile private var account: AccountId = scala.compiletime.uninitialized
+  @volatile private var publish: AnyEvent => Unit = scala.compiletime.uninitialized
+
+  override def connect(acct: AccountId, sink: AnyEvent => Unit, spawn: (=> Unit) => Unit): Unit =
+    account = acct
+    publish = sink
     metas = client.fetchAllSymbolMetas() match
       case Right(ms) => ms.map(m => m.symbol -> m).toMap
       case Left(e)   => throw IllegalStateException(s"OKX fetch symbol metas failed: ${e.message}")
 
-    WsLoop.run("okx/private", backend, () => wsUrl, outgoing, onPrivateText)
+    WsLoop.run("okx/private", backend, () => wsUrl, outgoing, onPrivateText, spawn)
     // login 帧入队，连接建立后立即发送 (timestamp 在此刻生成；连接通常亚秒级，OKX 允许 ~30s 偏差)
     outgoing.send(WebSocketFrame.text(loginFrame()))
 
     // Greeks REST 轮询 (独立虚拟线程，与私有 WS 并行)
-    fork {
+    spawn {
       while true do
-        Thread.sleep(OkxAccountStream.GreeksPollIntervalMs)
+        Thread.sleep(OkxAccountFeed.GreeksPollIntervalMs)
         pollGreeks()
     }
-    ()
 
   private def loginFrame(): String =
     val ts = Instant.now().getEpochSecond.toString
@@ -89,7 +90,7 @@ final class OkxAccountStream(
           if lastGreeksTs.getOrElse(g.ccy, -1L) != g.timestamp then
             lastGreeksTs(g.ccy) = g.timestamp
             logger.debug(s"OKX greeks ${g.ccy}: delta=${g.delta} gamma=${g.gamma} theta=${g.theta} vega=${g.vega} ts=${g.timestamp}")
-            bus.publish(Event.at(Topics.Greeks, g, g.timestamp))
+            publish(Event.at(Topics.Greeks, g, g.timestamp))
         }
       case Left(e) =>
         logger.warn(s"OKX fetch greeks failed (will retry): ${e.message}")
@@ -127,23 +128,23 @@ final class OkxAccountStream(
       meta <- metaOf(sym)
     do
       val position = Position(
-        account = AccountId.Live,
+        account = account,
         exchange = Exchange.Okx,
         symbol = sym,
         size = meta.toCoin(Contracts(d.pos.asDouble)),
         entryPrice = Price(d.avgPx.asDoubleOrZero),
         unrealizedPnl = d.upl.asDoubleOrZero,
       )
-      bus.publish(Event.local(Topics.Position, position))
+      publish(Event.local(Topics.Position, position))
 
   private def publishAccount(d: AccountData): Unit =
     val ts = d.uTime.toLongOption.getOrElse(nowMs)
-    bus.publish(
-      Event.at(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, d.totalEq.asDouble, d.notionalUsd.asDouble), ts)
+    publish(
+      Event.at(Topics.AccountInfo, AccountInfo(account, Exchange.Okx, d.totalEq.asDouble, d.notionalUsd.asDouble), ts)
     )
     // 各币种现金余额：供 StateManager 修正 greeks delta 的现货敞口
     d.details.foreach { detail =>
-      bus.publish(Event.at(Topics.Balance, Balance(AccountId.Live, Exchange.Okx, detail.ccy, detail.cashBal.asDouble, ts), ts))
+      publish(Event.at(Topics.Balance, Balance(account, Exchange.Okx, detail.ccy, detail.cashBal.asDouble, ts), ts))
     }
 
   private def publishOrder(d: OrderPushData): Unit =
@@ -157,10 +158,10 @@ final class OkxAccountStream(
     val filledQty = meta.toCoin(Contracts(d.accFillSz.asDouble))
     // Fill 先于 OrderUpdate (确保乐观更新 position 后再处理订单终态)
     if fillSz.nonZero then
-      val fill = Fill(AccountId.Live, Exchange.Okx, sym, side, price = d.fillPx.asPrice, size = fillSz, timestamp = nowMs)
-      bus.publish(Event.local(Topics.Fill, fill))
+      val fill = Fill(account, Exchange.Okx, sym, side, price = d.fillPx.asPrice, size = fillSz, timestamp = nowMs)
+      publish(Event.local(Topics.Fill, fill))
     val update = OrderUpdate(
-      account = AccountId.Live,
+      account = account,
       orderId = d.ordId,
       clientOrderId = if d.clOrdId.nonEmpty then Some(d.clOrdId) else None,
       exchange = Exchange.Okx,
@@ -173,4 +174,4 @@ final class OkxAccountStream(
       fillSize = fillSz,
       timestamp = nowMs,
     )
-    bus.publish(Event.local(Topics.OrderUpdate, update))
+    publish(Event.local(Topics.OrderUpdate, update))
