@@ -11,10 +11,10 @@ import ox.supervised
 import sttp.client4.DefaultSyncBackend
 
 /** 永续 delta 对冲实盘启动器 (OKX, 引擎集成版)。与 [[PerpHedgeEngineLauncher]] (Bybit) 同构, 仅交易所实现不同:
-  * BBO 走引擎的 [[OkxMarketStream]] (不二次订阅), 永续持仓/订单回报走 [[OkxAccountStream]], 期权净 greeks 由
+  * BBO 走引擎的 [[OkxMarketFeed]] (不二次订阅), 永续持仓/订单回报走 [[OkxAccountFeed]], 期权净 greeks 由
   * [[OptionGreeksStream]] 经 [[OkxOptionsClient]] 注入同一条 事件总线; 对冲用引擎原生 [[MakerHedgeStrategy]]。
   *
-  * **OKX 特性**: [[OkxAccountStream]] 已原生轮询账户级 greeks, 这里的 [[OptionGreeksStream]] 主要保证
+  * **OKX 特性**: [[OkxAccountFeed]] 已原生轮询账户级 greeks, 这里的 [[OptionGreeksStream]] 主要保证
   * **ccy 余额兜底** (否则 StateManager.greeks 恒为 None -> 静默不对冲 -> 期权裸敞口), 并以 [[OptionsExchange]]
   * 抽象与 Bybit 路径保持一致; 二者 greeks 同源 (account/greeks), last-write-wins, 冗余轮询成本可忽略。
   *

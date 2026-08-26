@@ -47,7 +47,7 @@ final case class OptionExposure(
   *
   * **按交易所路由，币种在载荷里** —— 与框架内置的 `Topics.Greeks` 同一形状，消费侧自行判 ccy。
   *
-  * 为什么不复用 `Topics.Greeks`：那个 topic 在 OKX 上已经有一个发布者 (`OkxAccountStream` 轮询
+  * 为什么不复用 `Topics.Greeks`：那个 topic 在 OKX 上已经有一个发布者 (`OkxAccountFeed` 轮询
   * `/account/greeks`)。同一个 topic 两个发布者、两套算法、两个节奏，就是"最后写的赢"，而赢者
   * 随时序变化 —— 对冲会在两个不同的 delta 定义之间跳。各用自己的 topic，两条链互不干扰，
   * 装配时选订哪一条即可，也不必去动一个别的启动器还在依赖的框架组件。

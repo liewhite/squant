@@ -9,7 +9,7 @@ import org.slf4j.LoggerFactory
   *
   * ## 为什么是一个客户端实现，而不是一个 `dryRun` 开关
   *
-  * 从前这是 [[hft.engine.OutcomeProcessor]] 的构造参数，在下单和撤单两处 `if dryRun then ...`。
+  * 从前这是中心化下单出口的构造参数，在下单和撤单两处 `if dryRun then ...`。
   * 但"不真交易"在本框架里**已经有一个多态答案**：换掉 gateway（[[hft.sim.SimulatedExchange]]
   * 就是这么做的，策略对真假无感知）。同一个概念两套机制，其中一套还是布尔开关。
   *
@@ -42,7 +42,7 @@ final class DryRunClient(delegate: TradingClient) extends TradingClient:
     Left(ExchangeError.Http(400, "dry-run: order not placed"))
 
   /** dry-run 下没有真实挂单可撤，回 `OrderNotFound` —— 这既是事实，也正好落在
-    * [[hft.engine.OutcomeProcessor]] 既有的容忍分支上（撤一张已不存在的单非致命）。 */
+    * [[TradingGateway]] 既有的容忍分支上（撤一张已不存在的单非致命）。 */
   override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
     logger.warn(s"[DRY-RUN] 未撤单: $exchange $symbol ${ref.raw}")
     Left(ExchangeError.OrderNotFound("dry-run: no live order to cancel"))

@@ -19,7 +19,7 @@ import sttp.client4.DefaultSyncBackend
   *                                              └─> OptionExposure (1s) ─┐
   *                                                                       ↓
   *   永续 BBO ─> 引擎行情流 ──────────────────────> DeltaKamaHedgeStrategy ─> 框架下单通道 ─> 永续
-  *   永续持仓/回报 ─> OkxAccountStream ──────────↗
+  *   永续持仓/回报 ─> OkxAccountFeed ────────────↗
   * ```
   *
   * 两条腿的分工是刻意的：

@@ -12,7 +12,7 @@
                                            └─> OptionExposure (每秒) ─┐
                                                                       ↓
 永续 BBO ──> 引擎行情流 ─────────────────────> DeltaKamaHedgeStrategy ──> 框架下单通道 ──> 永续
-永续持仓/回报 ──> OkxAccountStream ─────────↗
+永续持仓/回报 ──> OkxAccountFeed ───────────↗
 ```
 
 分工是被架构决定的，不是取舍：

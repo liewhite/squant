@@ -16,7 +16,7 @@ trait ExchangeClient:
 /** 私有 REST —— **拿到这个类型本身就意味着凭证已经具备**。
   *
   * 从前只有一个 `ExchangeClient`，凭证有没有靠 `hasCredentials: Boolean` 问，三个
-  * `AccountStream` 各写一句 `require(client.hasCredentials)`，客户端内部再各写一句
+  * 各家账户流各写一句 `require(client.hasCredentials)`，客户端内部再各写一句
   * `if !hasCredentials then Left(Auth)` —— 同一个缺失的区分被复制成谓词 + 守卫 + 错误值三份。
   *
   * 更别扭的是"没有凭证"这个**构造时就已确定的静态事实**被塞进了错误通道：启动对齐要专门写

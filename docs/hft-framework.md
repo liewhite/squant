@@ -14,15 +14,37 @@
 
 ## 事件流
 
-只有**一条**总线。行情、账户回报、时钟、策略下单意图都是它上面的事件，区别只在 topic：
+进程 = **一条总线 + 若干插件**。行情、账户回报、时钟、下单指令、控制指令都是总线上的
+事件，区别只在 topic：
 
 ```
-Connector (WS) ──┐                    ┌─> Executor (Strategy + StateManager) ─┐
-Clock ───────────┼─> bus (topic 路由) ┤                                       │ OrderIntent
-执行回流 <────────┘                    └─> OutcomeProcessor ─> REST ────────────┘
+行情插件 ──┐                       ┌── Executor (Strategy + StateManager) ──┐
+柜台插件 ──┼──> bus (topic 路由) ──┤                                        │ 下单指令
+时钟插件 ──┘                       └── 观察者                               │
+     ▲                                                                      │
+     └──────────────────────────────────────────────────────────────────────┘
 ```
 
-下单意图不会回流给策略 —— 策略压根不订阅 `OrderIntent`，隔离由订阅关系保证，不靠总线拓扑。
+下单指令不会回流给策略 —— 策略压根不订阅它，隔离由订阅关系保证，不靠总线拓扑。
+
+**引擎不知道交易所**：它只发指令（行情订阅、账户对齐、下单撤单），谁接、有几个接、
+接的是真交易所还是虚拟柜台，一概不需要知道。完整设计见
+[插件式事件总线架构](plugin-bus-architecture.md)。
+
+### 数据面与指令面
+
+总线上流动两类事件，**校验规则不同**：
+
+| | 数据面 | 指令面 |
+|---|---|---|
+| 语义 | 发生了什么 | 请做什么 |
+| 例子 | 盘口、成交、持仓、回报、净值、时钟 | 订阅行情、启动对齐、下单撤单 |
+| 无人订阅 | 正常（某标的这刻没成交不是错误） | **致命**，且零症状 |
+| 校验 | 不校验 | 装配期：每条指令必须有接单者 |
+
+引擎在 `addStrategies` 时查一次总线"这条 (topic, key) 有没有订阅者"，没有就拒绝启动。
+查的是**订阅事实本身**，因此不需要任何插件声明"我提供什么" —— 订阅是它为了工作本来
+就必须做的事，多一份声明就多一处会漏写的事实。
 
 ### Topic: 事件的开放扩展点
 
@@ -74,17 +96,22 @@ object AlphaSignal extends Topic[Symbol, Score]("alphaSignal"):
 
 ### 影子盘：与实盘并行的虚拟柜台
 
-`PaperCounter` 是一个 actor，订阅自己那个 `Paper(n)` 的下单意图 + 公共行情，用与回测同一个
-撮合内核（`SimState`）成交，回报标自己的账户发回总线。它与 `SimulatedExchange` 的区别是
-**定位而非撮合**：后者替换整个 gateway（策略对真假无感知），前者与实盘同时存在。
+`PaperCounter` 是一个柜台插件，订阅自己那个 `Paper(n)` 的下单指令 + 公共行情，用与回测
+同一个撮合内核（`SimState`）成交，回报标自己的账户发回总线。它与 `SimulatedExchange` 的
+区别是**定位而非撮合**：后者替换掉真实交易所的两个插件（策略对真假无感知），
+前者与实盘同时存在。
 
 ```
-                    ┌─> Executor@Live    ─┐            ┌─> OutcomeProcessor@Live ─> REST
-真实行情 ─> bus ────┤   (同一份策略逻辑)   ├─ OrderIntent ┤
-                    └─> Executor@Paper(1) ┘            └─> PaperCounter@Paper(1) ─> 撮合
+                    ┌─> Executor@Live    ─┐            ┌─> 真实柜台@(Live, Binance)  ─> REST
+真实行情 ─> bus ────┤   (同一份策略逻辑)   ├─ 下单指令 ──┤
+                    └─> Executor@Paper(1) ┘            └─> PaperCounter@(Paper(1), Binance)
 ```
 
-两条出口互不知情 —— 分发由 `OrderIntent` 的账户路由完成。
+两个柜台互不知情 —— 分发由下单指令的 **(账户, 交易所)** 路由完成。少了交易所这一维，
+拆出多个柜台后两边都会收到同一条意图：静默双执行，没有任何症状。
+
+影子柜台**也按交易所精度对齐** —— 否则它的成交量与实盘系统性地差一个取整，
+而它存在的全部理由就是预测实盘。
 
 **建模延迟**：影子盘存在的理由是预测实盘表现，没有下单在途与回报回传的延迟就会系统性
 偏乐观，据此得出的结论无法外推。延迟用 `ActorContext.scheduleEvent` 表达：定时器只把发布
@@ -277,9 +304,10 @@ def handlers = StrategyHandlers.empty
 | `event` | `Topic`/`Event`/`Interest`/`Subscription`/`EventBus` — 事件与投递的全部基础设施 |
 | `actor` | `Actor`/`ActorContext`/`ActorSystem` — 组件的装配与生命周期树 |
 | `state` | `SymbolState`/`StateManager` (策略视角的聚合状态) |
-| `exchange` | 核心抽象: `ExchangeClient` (REST trait)、`ExchangeConnector` (WS trait)、`SubscriptionKind`、`WsLoop` (通用重连泵) |
-| `engine` | `Engine` (装配/生命周期)、`Executor` (策略运行器)、`OutcomeProcessor` (信号执行) |
-| `strategy` | `Strategy` / `StrategyHandlers` / `StrategyContext` + `OutcomeEvent` — 策略契约与能力面 |
+| `event` (指令面) | `Commands` — 行情订阅 / 账户对齐 / 下单撤单三条指令及其载荷 |
+| `exchange` | 插件形态 `MarketFeed` / `TradingGateway` / `RestTradingGateway` / `AccountFeed`；传输层 `ExchangeClient` / `TradingClient`；`WsLoop` (通用连接泵) |
+| `engine` | `Engine` (装配 + 契约校验 + 生命周期)、`Executor` (策略插件)、`StrategyRunner` (纯逻辑核心)、`Clock` |
+| `strategy` | `Strategy` / `StrategyHandlers` / `StrategyContext` — 策略契约与能力面 |
 | `sim` | `SimState` (撮合状态机) / `Ledger` / `Matcher` / `Counter` (柜台核心) / `SimulatedExchange` / `PaperCounter` |
 | `backtest` | `MarketDataProvider` 抽象 + `BacktestEngine` (虚拟时间驱动) + 各交易所数据实现 |
 | `perf` | `PerformanceTracker` / `PromotionPolicy` / `Supervisor` — 战绩统计与晋升调度 |
@@ -312,15 +340,27 @@ def handlers = StrategyHandlers.empty
 ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内的 fork，异常到达 fork
 边界即级联取消整个作用域并从 main 抛出，进程以非零码退出。
 
-### 两个核心 trait
+### 两种插件形态
 
-接入一个新交易所 = 实现 `ExchangeClient` + `ExchangeConnector`，框架其余部分零修改：
+接入一个新交易所 = 装两个插件，框架其余部分零修改：
 
-- `ExchangeClient`: 同步 REST (下单/撤单/查持仓/查挂单/元数据)，错误以 `Either[ExchangeError, A]` 显式返回。
-- `ExchangeConnector`: 维护 WS 长连接，把原始推送解析为统一 `Event` 发布到总线；
-  配置凭证时自动接入私有流；遵循 fail-fast 契约 (断线/解析失败即抛错终止)。
+- **`MarketFeed`**（行情插件）：接本所的行情订阅指令，把公共行情发布到总线。
+  订阅是**增量幂等**的 —— 策略动态添加，后来者声明的流集合与先前的必然重叠。
+  数据源不必是交易所：历史回放、第三方数据商、跨进程桥接都可以是它的实现。
+- **`TradingGateway`**（柜台插件）：**一个账户在一个交易所上的执行与汇报**。
+  接下单指令与对齐指令，产出回报，并周期刷新净值。
 
-编写一个新策略 = 实现 `Strategy` (声明订阅 + 纯函数式 `onEvent`)。
+柜台是"交易所侧知识"的唯一归属地 —— 精度、张数、最小下单量、账户当下什么样都在这里。
+三家交易所在执行面几乎一样，收进 `RestTradingGateway` 一个具体类；差异只剩私有推送解析，
+那是注入的 `AccountFeed`。
+
+**虚拟柜台与真实柜台在总线上完全同形**：订同样的指令、产出同样的回报，策略无法分辨。
+这是"同一份逻辑同时跑实盘与影子盘"的结构基础。
+
+**没有凭证就不装柜台** —— "这个所能不能下单"因此是装配期的事实（装没装柜台），
+由契约校验回答，不是运行时才发现的错误。
+
+编写一个新策略 = 实现 `Strategy` (声明订阅 + 纯函数式处理器)。
 
 ### Actor: 组件的统一形态
 
@@ -358,29 +398,44 @@ ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内
 - 每个策略一个 `Executor`，独占虚拟线程串行消费事件，策略与状态无锁。
 - `WsLoop` 每条连接两个虚拟线程: 发送线程是连接唯一写入者 (Pong 回应也经出站 channel)，
   接收线程重组分片文本帧后回调；任一侧出错即异常上抛终止 (不重连)。
-- `OutcomeProcessor` 每个 REST 调用 fork 独立虚拟线程，下单互不阻塞。
+- `RestTradingGateway` 每个 REST 调用 fork 独立虚拟线程，下单互不阻塞，也不阻塞柜台的事件循环。
 
 ### 订单生命周期
 
-1. 策略产出 `PlaceOrders` (币本位数量)
-2. Executor 生成 `clientOrderId`，以原始币本位登记 pending，按 `SymbolMeta` 转换精度后发布
-3. OutcomeProcessor 调 REST 下单；交易所明确拒绝 (4xx) 以 `OrderUpdate(Error)` 回流，
-   结果不确定 (网络/超时/5xx) 直接终止
+1. 策略产出 `PlaceOrders` (币本位数量)；跨所的一次决策由框架按交易所自动拆成多条指令
+2. `StrategyRunner` 生成 `clientOrderId` 并以币本位登记 pending —— **不做精度对齐**，
+   策略这一侧从头到尾只有币本位的意图
+3. 柜台按 `SymbolMeta` 对齐精度后调 REST 下单。三种确定性失败走**同一条**回流路径
+   (`OrderUpdate(Error)`)：精度收不下、交易所明确拒绝 (4xx)、dry-run；
+   结果不确定 (网络/超时/5xx) 与限频 (429/418) 直接终止
 4. 私有流推送 `OrderUpdate`/`Fill` 更新 pending 与仓位 (Fill 乐观更新)；
    撤单终态同样以私有流推送为准，框架不合成确认事件
 5. Clock 事件驱动超时校验: `Created` 状态超过 `orderTimeoutMs` 未获确认 = 结果不确定，
    抛错终止 (REST 超时更短，正常情况下到不了这里)
 
-### 启动顺序保证 (addStrategies)
+### 启动顺序：一条因果链，不是一串调用顺序
 
-1. Executor 按自己的 `Subscription` 订阅总线 (之后的事件不丢)
-2. REST 查初始持仓并发布 (未返回的 symbol 显式推 size=0)
-3. REST 查账户信息 (净值/名义价值) 并发布 (杠杆率等风控决策依赖)
-4. REST 查现有挂单并发布 (接管遗留订单)
-5. 向交易所订阅行情 (数据从此开始流动)
+```
+1. 标的独占检查        —— 冲突在策略启动之前拒绝
+2. 指令契约校验        —— 它要发的每条指令都有人接吗
+3. spawn, 订阅总线     —— 此后发布的事件不会丢
+4. 发对齐指令, 等应答  —— 柜台推 持仓 → 净值 → 既有挂单 → 完成应答
+5. 发行情订阅指令      —— 数据从此刻开始流动
+```
 
-账户净值随行情持续变动且无对应 WS 推送，Engine 以周期 REST 刷新
-(`accountRefreshMs`，默认 10s) 持续发布 `Topics.AccountInfo` 事件保证风控数据新鲜。
+第 4 步在第 5 步之前，保住的是：**策略在拿到初始仓位之前不会看到第一条行情**。
+否则它基于"仓位为空"这个错误前提做第一次决策 —— 可能重复开仓，可能对着不存在的敞口对冲。
+前两步都排在 spawn 之前：起来了再拒绝，就得再把它停回去。
+
+对齐是**柜台的职责**：它就是那个知道账户当下什么样的角色。交易所没返回的标的由框架
+显式推零仓 —— "没有推送"与"仓位为零"在策略看来无从分辨，它会一直等下去。
+**影子账户不对齐**（从零开始，没有历史可恢复）。
+
+请求—应答在发布订阅上通常别扭，因为失败无从表达。这里不别扭：对齐失败一律抛异常终止
+进程，"没人接"已被第 2 步挡在前面 —— 不存在"既没成功也没失败"的第三种结局。
+
+账户净值随行情持续变动且无对应 WS 推送，**柜台自己**周期 REST 刷新
+(`accountRefreshMs`，默认 10s) 发布 `Topics.AccountInfo` 保证风控数据新鲜。
 注意净值最多滞后一个刷新周期，临界风控阈值 (如杠杆率上限) 应自留余量。
 
 ## Binance 接入说明
