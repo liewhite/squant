@@ -166,18 +166,20 @@ final class RestTradingGateway(
     * 在订单终态与对账两处触发。只靠终态触发的话，一段时间没有订单终态就不清了。
     */
   private def evictSettled(now: Timestamp): Unit =
-    settled.filterInPlace { (orderId, s) =>
-      s.terminalAt match
-        case Some(_) => RestTradingGateway.retains(s, now)
-        case None    =>
-          if now - s.firstSeenAt > RestTradingGateway.StaleSettlementMs && !s.staleWarned then
-            settled(orderId) = s.copy(staleWarned = true) // 只报一次, 别每次对账都刷
-            logger.warn(
-              s"$target order=$orderId 有成交 ${s.cumulative.value} 却长期没等到终态回报 —— " +
-                "通常意味着丢了一条订单推送, 值得查。记账进度保留 (清掉会让下一条累计量从零重记, 仓位翻倍)"
-            )
-          true
+    // 先挑出要告警的, 再改、再清 —— 遍历一个 map 的同时改它是自找麻烦
+    val stale = settled.iterator.collect {
+      case (orderId, s)
+          if s.terminalAt.isEmpty && !s.staleWarned && now - s.firstSeenAt > RestTradingGateway.StaleSettlementMs =>
+        orderId -> s
+    }.toVector
+    stale.foreach { (orderId, s) =>
+      settled(orderId) = s.copy(staleWarned = true) // 只报一次, 别每次对账都刷屏
+      logger.warn(
+        s"$target order=$orderId 有成交 ${s.cumulative.value} 却长期没等到终态回报 —— " +
+          "通常意味着丢了一条订单推送, 值得查。记账进度保留 (清掉会让下一条累计量从零重记, 仓位翻倍)"
+      )
     }
+    settled.filterInPlace((_, s) => RestTradingGateway.retains(s, now))
 
   /** 视作零的量级 —— **币本位**。
     *
