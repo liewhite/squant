@@ -2,14 +2,14 @@ package hft.exchange.bybit
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{AccountFeed, WsLoop}
-import hft.event.{AnyEvent, Event, Topics}
+import hft.exchange.{AccountFeed, AccountReport, WsLoop}
 import org.slf4j.LoggerFactory
 import ox.channels.Channel
 import sttp.client4.WebSocketSyncBackend
 import sttp.ws.WebSocketFrame
 
 import java.time.Instant
+import scala.collection.mutable
 
 import BybitCodec.*
 import BybitCodec.given
@@ -44,14 +44,22 @@ final class BybitAccountFeed(
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
 
-  /** 回报归属的账户与发布通道，由柜台在 [[connect]] 时注入，之后只读 */
-  @volatile private var account: AccountId = scala.compiletime.uninitialized
-  @volatile private var publish: AnyEvent => Unit = scala.compiletime.uninitialized
+  /** 解析结果的去处，由柜台在 [[connect]] 时注入，之后只读。
+    * 本流不知道账户是谁 —— 那是柜台盖的章 */
+  @volatile private var report: AccountReport => Unit = scala.compiletime.uninitialized
   @volatile private var spawnThread: (=> Unit) => Unit = scala.compiletime.uninitialized
 
-  override def connect(acct: AccountId, sink: AnyEvent => Unit, spawn: (=> Unit) => Unit): Unit =
-    account = acct
-    publish = sink
+  /** 每张订单的累计成交量。
+    *
+    * Bybit 的 execution 频道只给**本次**成交量，而柜台的记账依据是累计量 (那样才对重复推送
+    * 与跨频道乱序免疫)，所以在这里把它累起来。只有 WS 接收线程一个访问者。
+    *
+    * 断线不重连、进程重启走启动对齐，因此这份累计不会跨越断线残留成错值。
+    */
+  private val executedByOrder = mutable.Map.empty[String, Double]
+
+  override def connect(sink: AccountReport => Unit, spawn: (=> Unit) => Unit): Unit =
+    report = sink
     spawnThread = spawn
     WsLoop.run("bybit/private", backend, () => wsUrl, outgoing, onPrivateText, spawn)
     // auth 帧入队，连接建立后立即发送 (expires 在此刻生成，留 10s 窗口)
@@ -64,7 +72,7 @@ final class BybitAccountFeed(
     s"""{"op":"auth","args":["${credentials.apiKey}",$expires,"$sign"]}"""
 
   private val subscribeFrame =
-    """{"op":"subscribe","args":["execution","order","wallet"]}"""
+    """{"op":"subscribe","args":["execution","order","wallet","position"]}"""
 
   // ==================== 私有流解析 (任何不理解的消息 -> 异常上抛终止) ====================
 
@@ -76,6 +84,7 @@ final class BybitAccountFeed(
         case "execution" => readFromString[WsList[ExecutionData]](text).data.foreach(publishExecution)
         case "order"     => readFromString[WsList[OrderData]](text).data.foreach(publishOrder)
         case "wallet"    => readFromString[WsList[WalletData]](text).data.foreach(publishWallet)
+        case "position"  => readFromString[WsList[PositionData]](text).data.foreach(publishPosition)
         case other       => throw IllegalStateException(s"Unexpected Bybit private topic '$other': $text")
 
   private def handleControl(msg: BybitWsMsg, text: String): Unit = msg.op match
@@ -89,50 +98,54 @@ final class BybitAccountFeed(
     case "ping" | "pong" => () // 心跳响应
     case other           => logger.warn(s"ignoring Bybit private op '$other': $text")
 
-  /** 单笔成交 -> Fill，即时维护仓位 (无论策略单还是手动单) */
+  /** 单笔成交 -> 累计成交量。本频道只给本次量，累计在这里攒 */
   private def publishExecution(d: ExecutionData): Unit =
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in execution: '${d.symbol}'"))
-    val fill = Fill(
-      account = account,
-      exchange = Exchange.Bybit,
+    val cumulative = executedByOrder.updateWith(d.orderId)(prev => Some(prev.getOrElse(0.0) + d.execQty.asDouble)).get
+    report(AccountReport.Executed(
+      orderId = d.orderId,
       symbol = sym,
       side = sideFromBybit(d.side),
       price = d.execPrice.asPrice,
-      size = Coin(d.execQty.asDouble),
+      cumulativeQty = Coin(cumulative),
       timestamp = d.execTime.toLongOption.getOrElse(nowMs),
-    )
-    publish(Event.local(Topics.Fill, fill))
+    ))
 
-  /** 订单状态 -> OrderUpdate，仅追踪挂单生命周期。
-    * 本频道只带累计成交、不带单笔增量，所以仓位不在这里维护 —— 柜台用 execution 推来的
-    * 成交记账 (见 [[hft.exchange.RestTradingGateway]])。 */
+  /** 订单状态。本频道带**累计**成交量 —— 柜台拿它补记账 (execution 先到时增量为零)，
+    * 于是两条频道谁先到都不影响账本。 */
   private def publishOrder(d: OrderData): Unit =
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in order: '${d.symbol}'"))
     val filled = Coin(d.cumExecQty.asDouble)
-    val update = OrderUpdate(
-      account = account,
+    val status = mapOrderStatus(d.orderStatus, filled)
+    // 终态之后不会再有新成交, 清掉本地累加器。**晚到的那条 execution 由柜台兜住**:
+    // 它的记账进度在终态后还留一分钟墓碑, 认得出"这笔已经记过了" (见 RestTradingGateway.settled)。
+    if status.isTerminal then executedByOrder.remove(d.orderId)
+    report(AccountReport.OrderStatusChanged(
       orderId = d.orderId,
       clientOrderId = if d.orderLinkId.nonEmpty then Some(d.orderLinkId) else None,
-      exchange = Exchange.Bybit,
       symbol = sym,
       side = sideFromBybit(d.side),
-      status = mapOrderStatus(d.orderStatus, filled),
+      status = status,
       price = Price(d.price.asDoubleOrZero),
       quantity = Coin(d.qty.asDouble),
       filledQuantity = filled,
       timestamp = nowMs,
-    )
-    publish(Event.local(Topics.OrderUpdate, update))
+    ))
+
+  /** 交易所报的仓位 -> 交给柜台对账。size 是绝对值, 方向在 side 里 */
+  private def publishPosition(d: PositionData): Unit =
+    val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in position: '${d.symbol}'"))
+    val magnitude = d.size.asDoubleOrZero
+    val signed = d.side match
+      case "Sell" => -magnitude
+      case _      => magnitude // Buy, 或空仓时的 "None"
+    report(AccountReport.PositionReported(sym, Coin(signed), nowMs))
 
   /** 钱包快照 -> 账户净值 + 各币种现金余额 */
   private def publishWallet(d: WalletData): Unit =
     val ts = nowMs
-    publish(
-      Event.at(Topics.AccountInfo, AccountInfo(account, Exchange.Bybit, d.totalEquity.asDouble, notional = 0.0), ts)
-    )
-    d.coin.foreach { c =>
-      publish(Event.at(Topics.Balance, Balance(account, Exchange.Bybit, c.coin, c.walletBalance.asDoubleOrZero, ts), ts))
-    }
+    report(AccountReport.EquityChanged(d.totalEquity.asDouble, notional = 0.0, ts))
+    d.coin.foreach(c => report(AccountReport.BalanceChanged(c.coin, c.walletBalance.asDoubleOrZero, ts)))
 
   /** 心跳发送线程：定期入队 ping 帧，维持私有连接 (无成交时也不致空闲被断) */
   private def startHeartbeat(): Unit =

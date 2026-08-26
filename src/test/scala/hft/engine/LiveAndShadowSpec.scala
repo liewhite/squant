@@ -3,7 +3,7 @@ package hft.engine
 import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
-import hft.exchange.{AccountFeed, RestTradingGateway, TradingClient}
+import hft.exchange.{AccountFeed, AccountReport, RestTradingGateway, TradingClient}
 import hft.sim.{PaperCounter, SimConfig}
 import hft.state.StateManager
 import hft.event.Commands.{OrderIntent, OutcomeEvent}
@@ -31,7 +31,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
   /** 不推送任何东西的汇报面 —— 实盘成交只能来自真实推送, 本测试不造 */
   private object SilentFeed extends AccountFeed:
     override def exchange: Exchange = ex
-    override def connect(account: AccountId, publish: AnyEvent => Unit, fork: (=> Unit) => Unit): Unit = ()
+    override def connect(sink: AccountReport => Unit, fork: (=> Unit) => Unit): Unit = ()
 
   /** 记录下单的假交易所 —— 代表实盘柜台的那一端 */
   private class RecordingClient(placed: ConcurrentLinkedQueue[ExchangeOrder]) extends TradingClient:

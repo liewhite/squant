@@ -4,7 +4,11 @@ import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.Commands.{AccountOutcome, OrderIntent, OutcomeEvent}
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
+import hft.exchange.AccountReport
 import ox.supervised
+
+import java.util.concurrent.ConcurrentLinkedQueue
+import scala.jdk.CollectionConverters.*
 import hft.TestUnits.given
 
 /** 柜台的执行语义:
@@ -18,7 +22,109 @@ class TradingGatewaySpec extends munit.FunSuite:
   /** 不推送任何东西的汇报面 —— 本测试只关心执行 */
   private object SilentFeed extends AccountFeed:
     override def exchange: Exchange = Exchange.Binance
-    override def connect(account: AccountId, publish: AnyEvent => Unit, fork: (=> Unit) => Unit): Unit = ()
+    override def connect(sink: AccountReport => Unit, fork: (=> Unit) => Unit): Unit = ()
+
+  /** 可手动喂报告的汇报面 —— 用来驱动柜台的记账与排序 */
+  private class ManualFeed extends AccountFeed:
+    @volatile private var sink: AccountReport => Unit = scala.compiletime.uninitialized
+    override def exchange: Exchange = Exchange.Binance
+    override def connect(s: AccountReport => Unit, fork: (=> Unit) => Unit): Unit = sink = s
+    def emit(report: AccountReport): Unit = sink(report)
+
+  /** 有求必应的桩客户端 —— 驱动汇报面路径时不该被执行面打扰 */
+  private class QuietClient extends TradingClient:
+    override def exchange: Exchange = Exchange.Binance
+    override def placeOrder(order: ExchangeOrder) = Right("ignored")
+    override def fetchAllSymbolMetas() = Right(Vector(meta))
+    override def cancelOrder(symbol: Symbol, ref: OrderRef) = Right(())
+    override def fetchPendingOrders(symbol: Symbol) = Right(Vector.empty)
+    override def setLeverage(symbol: Symbol, leverage: Int) = Right(())
+    override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, Exchange.Binance, 10_000.0, 0.0))
+    override def fetchPositions() = Right(Vector.empty)
+
+  private def eventually(what: => String)(cond: => Boolean): Unit =
+    val deadline = System.nanoTime() + 3_000_000_000L
+    while System.nanoTime() < deadline && !cond do Thread.sleep(5)
+    assert(cond, s"等待超时: $what")
+
+  /** 装一台真实形态的柜台, 用手动汇报面驱动它 */
+  private def withFeed(body: (ManualFeed, ConcurrentLinkedQueue[AnyEvent]) => Unit): Unit =
+    supervised:
+      val bus = EventBus()
+      val seen = ConcurrentLinkedQueue[AnyEvent]()
+      val mailbox = bus.subscribe(Set(Interest.All(Topics.Position), Interest.All(Topics.Fill), Interest.All(Topics.OrderUpdate)))
+      ox.forkDiscard { mailbox.events.foreach(seen.add) }
+      val feed = ManualFeed()
+      ActorSystem(bus).spawn(RestTradingGateway(QuietClient(), feed, AccountId.Live, metas))
+      body(feed, seen)
+
+  private def executed(orderId: String, cumulative: Double) =
+    AccountReport.Executed(orderId, "BTCUSDT", Side.Long, Price(100.0), Coin(cumulative), 1L)
+
+  private def statusChanged(orderId: String, status: OrderStatus, filled: Double) =
+    AccountReport.OrderStatusChanged(orderId, Some("c1"), "BTCUSDT", Side.Long, status, Price(100.0), Coin(1.0), Coin(filled), 1L)
+
+  private def kinds(seen: ConcurrentLinkedQueue[AnyEvent]): Vector[String] =
+    seen.asScala.toVector.map(ev =>
+      if ev.is(Topics.Position) then "position"
+      else if ev.is(Topics.Fill) then "fill"
+      else "orderUpdate"
+    )
+
+  private def positionSizes(seen: ConcurrentLinkedQueue[AnyEvent]): Vector[Double] =
+    seen.asScala.toVector.flatMap(_.as(Topics.Position)).map(_.size.value)
+
+  test("一笔成交出柜台的顺序: 仓位快照先于其余回报"):
+    // 顺序是**构造**出来的 —— 柜台先记账、立刻发仓位, 不依赖各家推送的到达次序。
+    withFeed { (feed, seen) =>
+      feed.emit(executed("o1", cumulative = 0.5))
+      feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.5))
+      eventually(kinds(seen).toString)(kinds(seen).size == 3)
+      assertEquals(kinds(seen), Vector("position", "fill", "orderUpdate"))
+      assertEquals(positionSizes(seen), Vector(0.5))
+    }
+
+  test("重复推送不重复记账 —— 累计量没涨就什么都不发"):
+    withFeed { (feed, seen) =>
+      feed.emit(executed("o1", cumulative = 0.5))
+      feed.emit(executed("o1", cumulative = 0.5)) // 同一条重放
+      eventually("首笔应已入账")(kinds(seen).size >= 2)
+      Thread.sleep(100)
+      assertEquals(kinds(seen), Vector("position", "fill"), "重放不该产生第二笔")
+      assertEquals(positionSizes(seen), Vector(0.5))
+    }
+
+  test("跨频道乱序: 订单回报先到也能记上账, 成交随后到达时不重复计"):
+    // Bybit 的成交与订单状态来自两条频道, 交易所不保证先后。柜台以累计量为准,
+    // 谁先报谁触发记账 —— 后到的那条增量为零。
+    withFeed { (feed, seen) =>
+      feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.5)) // 订单回报先到, 带累计量
+      eventually("订单回报应已触发记账")(kinds(seen).size == 3)
+      assertEquals(kinds(seen), Vector("position", "fill", "orderUpdate"), "先到的那条同样先发仓位")
+
+      feed.emit(executed("o1", cumulative = 0.5)) // 成交频道随后到达
+      Thread.sleep(100)
+      assertEquals(positionSizes(seen), Vector(0.5), "同一笔不该被记两次")
+    }
+
+  test("分批成交按增量入账, 每次都先发新仓位"):
+    withFeed { (feed, seen) =>
+      feed.emit(executed("o1", cumulative = 0.3))
+      feed.emit(executed("o1", cumulative = 0.8)) // 又成交 0.5
+      eventually(kinds(seen).toString)(kinds(seen).size == 4)
+      assertEquals(kinds(seen), Vector("position", "fill", "position", "fill"))
+      assertEquals(positionSizes(seen), Vector(0.3, 0.8))
+      val fills = seen.asScala.toVector.flatMap(_.as(Topics.Fill)).map(_.size.value)
+      assertEquals(fills, Vector(0.3, 0.5), "发出去的是增量, 不是累计")
+    }
+
+  test("交易所报的仓位不进总线 —— 总线上的仓位只有账本一个来源"):
+    withFeed { (feed, seen) =>
+      feed.emit(AccountReport.PositionReported("BTCUSDT", Coin(9.9), 1L))
+      Thread.sleep(100)
+      assert(seen.asScala.isEmpty, s"对账用的读数不该外流: ${kinds(seen)}")
+    }
+
 
   /** 只实现 placeOrder 的 stub，其余方法不应被触达 */
   private class StubClient(placeResult: Either[ExchangeError, OrderId]) extends TradingClient:

@@ -2,8 +2,7 @@ package hft.exchange.okx
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{AccountFeed, WsLoop}
-import hft.event.{AnyEvent, Event, Topics}
+import hft.exchange.{AccountFeed, AccountReport, WsLoop}
 import org.slf4j.LoggerFactory
 import ox.channels.Channel
 import sttp.client4.WebSocketSyncBackend
@@ -52,13 +51,12 @@ final class OkxAccountFeed(
   /** greeks 去重：ccy -> 上次 timestamp */
   private val lastGreeksTs: mutable.Map[String, Timestamp] = mutable.Map.empty
 
-  /** 回报归属的账户与发布通道，由柜台在 [[connect]] 时注入，之后只读 */
-  @volatile private var account: AccountId = scala.compiletime.uninitialized
-  @volatile private var publish: AnyEvent => Unit = scala.compiletime.uninitialized
+  /** 解析结果的去处，由柜台在 [[connect]] 时注入，之后只读。
+    * 本流不知道账户是谁 —— 那是柜台盖的章 */
+  @volatile private var report: AccountReport => Unit = scala.compiletime.uninitialized
 
-  override def connect(acct: AccountId, sink: AnyEvent => Unit, spawn: (=> Unit) => Unit): Unit =
-    account = acct
-    publish = sink
+  override def connect(sink: AccountReport => Unit, spawn: (=> Unit) => Unit): Unit =
+    report = sink
     metas = client.symbolMetas // 进程内只拉一次, 与柜台读的是同一份
 
     WsLoop.run("okx/private", backend, () => wsUrl, outgoing, onPrivateText, spawn)
@@ -88,7 +86,7 @@ final class OkxAccountFeed(
           if lastGreeksTs.getOrElse(g.ccy, -1L) != g.timestamp then
             lastGreeksTs(g.ccy) = g.timestamp
             logger.debug(s"OKX greeks ${g.ccy}: delta=${g.delta} gamma=${g.gamma} theta=${g.theta} vega=${g.vega} ts=${g.timestamp}")
-            publish(Event.at(Topics.Greeks, g, g.timestamp))
+            report(AccountReport.GreeksChanged(g.ccy, g.delta, g.gamma, g.theta, g.vega, g.timestamp))
         }
       case Left(e) =>
         logger.warn(s"OKX fetch greeks failed (will retry): ${e.message}")
@@ -120,30 +118,18 @@ final class OkxAccountFeed(
   /** 缺少 meta 的 symbol 无法做张->币换算，跳过 (非配置 quote 的品种) */
   private def metaOf(symbol: Symbol): Option[SymbolMeta] = metas.get(symbol)
 
+  /** 交易所报的仓位 —— 交给柜台对账, 不进总线 */
   private def publishPosition(d: PositionData): Unit =
     for
       sym <- fromOkx(d.instId)
       meta <- metaOf(sym)
-    do
-      val position = Position(
-        account = account,
-        exchange = Exchange.Okx,
-        symbol = sym,
-        size = meta.toCoin(Contracts(d.pos.asDouble)),
-        entryPrice = Price(d.avgPx.asDoubleOrZero),
-        unrealizedPnl = d.upl.asDoubleOrZero,
-      )
-      publish(Event.local(Topics.Position, position))
+    do report(AccountReport.PositionReported(sym, meta.toCoin(Contracts(d.pos.asDouble)), nowMs))
 
   private def publishAccount(d: AccountData): Unit =
     val ts = d.uTime.toLongOption.getOrElse(nowMs)
-    publish(
-      Event.at(Topics.AccountInfo, AccountInfo(account, Exchange.Okx, d.totalEq.asDouble, d.notionalUsd.asDouble), ts)
-    )
+    report(AccountReport.EquityChanged(d.totalEq.asDouble, d.notionalUsd.asDouble, ts))
     // 各币种现金余额：供 StateManager 修正 greeks delta 的现货敞口
-    d.details.foreach { detail =>
-      publish(Event.at(Topics.Balance, Balance(account, Exchange.Okx, detail.ccy, detail.cashBal.asDouble, ts), ts))
-    }
+    d.details.foreach(detail => report(AccountReport.BalanceChanged(detail.ccy, detail.cashBal.asDouble, ts)))
 
   private def publishOrder(d: OrderPushData): Unit =
     val sym = fromOkx(d.instId).getOrElse(throw IllegalStateException(s"Unknown OKX instId in order: '${d.instId}'"))
@@ -154,21 +140,18 @@ final class OkxAccountFeed(
       case other  => throw IllegalStateException(s"Unknown OKX side: '$other'")
     val fillSz = meta.toCoin(Contracts(d.fillSz.asDouble))
     val filledQty = meta.toCoin(Contracts(d.accFillSz.asDouble))
-    // Fill 先于 OrderUpdate (确保乐观更新 position 后再处理订单终态)
+    val ts = nowMs
+    // 报累计量而非本次增量 —— 柜台据它算增量, 于是重复推送与乱序都不会让账本走偏
     if fillSz.nonZero then
-      val fill = Fill(account, Exchange.Okx, sym, side, price = d.fillPx.asPrice, size = fillSz, timestamp = nowMs)
-      publish(Event.local(Topics.Fill, fill))
-    val update = OrderUpdate(
-      account = account,
+      report(AccountReport.Executed(d.ordId, sym, side, d.fillPx.asPrice, filledQty, ts))
+    report(AccountReport.OrderStatusChanged(
       orderId = d.ordId,
       clientOrderId = if d.clOrdId.nonEmpty then Some(d.clOrdId) else None,
-      exchange = Exchange.Okx,
       symbol = sym,
       side = side,
       status = mapOrderState(d.state, filledQty),
       price = Price(d.px.asDoubleOrZero),
       quantity = meta.toCoin(Contracts(d.sz.asDouble)),
       filledQuantity = filledQty,
-      timestamp = nowMs,
-    )
-    publish(Event.local(Topics.OrderUpdate, update))
+      timestamp = ts,
+    ))

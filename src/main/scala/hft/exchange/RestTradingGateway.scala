@@ -4,16 +4,6 @@ import hft.domain.*
 import hft.event.{AnyEvent, Event, Interest, Topic, Topics}
 import org.slf4j.LoggerFactory
 
-/** 私有推送到达柜台 —— 从汇报面的连接线程串行化回 actor 线程的那一跳。
-  *
-  * 走总线而不是直接调用：账本的写者必须只有 actor 线程一个，而 [[AccountFeed]] 在
-  * 自己的连接线程上解析推送。key 是 (账户, 交易所)，因此只有本柜台会收到自己的回报。
-  */
-private[exchange] final case class FeedReport(target: AccountExchange, event: AnyEvent)
-
-private[exchange] object FeedReports extends Topic[AccountExchange, FeedReport]("gatewayFeedReport"):
-  def keyOf(payload: FeedReport): AccountExchange = payload.target
-
 /** 真实交易所的柜台：REST 执行 + REST 对齐 + 私有推送汇报。
   *
   * 三家交易所在这一层几乎一样 —— 差异全在私有推送的解析上，那部分由注入的
@@ -45,35 +35,104 @@ final class RestTradingGateway(
   private val logger = LoggerFactory.getLogger(classOf[RestTradingGateway])
 
   /** 本柜台的账本 —— **仓位的唯一算处**。初值来自对齐，之后每笔成交进账。
-    * 唯一写者是 actor 线程 (推送经 [[FeedReports]] 串行化进来)。 */
+    * 唯一写者是 actor 线程 (推送经 [[hft.actor.ActorContext.tell]] 串行化进来)。 */
   private var ledger: Ledger = Ledger.empty(account, cash = 0.0)
+
+  /** 每张订单**已记进账本**的累计成交量 —— 增量记账的依据，也是去重的依据。
+    *
+    * 汇报面报的是累计量，柜台只记 `累计 − 已记账` 那部分。于是重复推送记不进第二次、
+    * 跨频道乱序谁先到谁记账、丢一条推送也能被下一条的累计量补回来。
+    *
+    * **终态之后不能立刻删**：订单状态与成交常走两条频道，"已成交"先到、那笔成交的推送
+    * 随后才到是常态。删了记账进度，晚到的那条就会被当成新成交记第二遍 —— 仓位凭空翻倍。
+    * 所以终态只立墓碑，过了 [[RestTradingGateway.SettledRetentionMs]] 再清。
+    */
+  private val settled = scala.collection.mutable.Map.empty[OrderId, RestTradingGateway.Settlement]
+
+  /** 已经对齐过的标的 —— 对账只在这些标的上做。
+    *
+    * 交易所推的是**整个账户**的仓位变动 (Binance 的 ACCOUNT_UPDATE、OKX 订阅即推全量 SWAP)，
+    * 里面有手动持仓、别的机器人的持仓。拿它们跟一本只装了本策略标的的账本比，
+    * 每一条推送都会报一次漂移 —— 告警一旦成了噪声就等于没有告警。
+    */
+  private var syncedSymbols: Set[Symbol] = Set.empty
+
+  /** 最后一笔成交入账的时刻 —— 对账要等安静下来再做，见 [[reconcile]] */
+  private var lastSettledAt: Timestamp = 0L
 
   override def exchange: Exchange = client.exchange
 
-  /** 汇报面推来的一切先进本柜台的邮箱，由 actor 线程处理后再出总线 ——
+  /** 汇报面解析出的每一条都排进本柜台的邮箱 (不经总线)，由 actor 线程按序消费 ——
     * 于是"柜台是回报的唯一发布者"成立，账本也只有一个写者。 */
-  override protected def extraInterests: Set[Interest] = Set(Interest.Keyed(FeedReports, Set(target)))
-
   override protected def connect(): Unit =
-    feed.connect(account, event => publish(Event.local(FeedReports, FeedReport(target, event))), body => fork(body))
+    feed.connect(report => tell(Event.local(GatewayInboxes, GatewayInbox(target, report))), body => fork(body))
 
   override protected def onOther(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-    event.as(FeedReports).map(report => handleReport(report.event, now)).getOrElse(Vector.empty)
+    event.as(GatewayInboxes).map(inbox => handle(inbox.report, now)).getOrElse(Vector.empty)
 
-  /** 处理一条私有推送。三条通道：
-    *   - **成交**：进账本，并在它**前面**发一份仓位快照 (顺序见 [[TradingGateway]])
-    *   - **交易所报的仓位**：只用来**对账**，不进总线 —— 总线上的仓位只有一个来源，就是本账本
-    *   - **其余** (订单回报 / 余额 / 净值 / 希腊值)：原样转发
+  /** 把一条账户变动翻译成总线上的回报。**顺序在这里构造**：账本一变就先发仓位快照。 */
+  private def handle(report: AccountReport, now: Timestamp): Vector[AnyEvent] = report match
+    case AccountReport.Executed(orderId, symbol, side, price, cumulativeQty, ts) =>
+      settleUpTo(orderId, symbol, side, price, cumulativeQty, ts)
+
+    case AccountReport.OrderStatusChanged(orderId, clientOrderId, symbol, side, status, price, quantity, filledQuantity, ts) =>
+      // 有些交易所只在订单回报里给得出累计成交量 (Bybit 的 order 频道)。先按它补记账，
+      // 增量为零就什么也不发生 —— 成交频道已经记过了。
+      val settlement =
+        if filledQuantity.isZero then Vector.empty
+        else settleUpTo(orderId, symbol, side, price, filledQuantity, ts)
+      if status.isTerminal then
+        settled.updateWith(orderId)(_.map(_.copy(terminalAt = Some(ts))))
+        evictSettled(ts)
+      val update = OrderUpdate(account, orderId, clientOrderId, exchange, symbol, side, status, price, quantity, filledQuantity, ts)
+      settlement :+ Event.stamped(Topics.OrderUpdate, update, ts, now)
+
+    case AccountReport.BalanceChanged(currency, amount, ts) =>
+      Vector(Event.stamped(Topics.Balance, Balance(account, exchange, currency, amount, ts), ts, now))
+
+    case AccountReport.EquityChanged(equity, notional, ts) =>
+      Vector(Event.stamped(Topics.AccountInfo, AccountInfo(account, exchange, equity, notional), ts, now))
+
+    case AccountReport.GreeksChanged(ccy, delta, gamma, theta, vega, ts) =>
+      Vector(Event.stamped(Topics.Greeks, Greeks(account, exchange, ccy, delta, gamma, theta, vega, ts), ts, now))
+
+    case AccountReport.PositionReported(symbol, size, _) =>
+      reconcile(symbol, size, now)
+      Vector.empty // 总线上的仓位只有一个来源: 本账本
+
+  /** 把某订单的账记到 `cumulativeQty` 为止，产出「仓位快照 → 成交」。
+    *
+    * 增量为零 (重复推送、乱序后到的那条) 时什么都不发 —— 幂等是这套记账的立身之本。
     */
-  private def handleReport(report: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-    report.as(Topics.Fill) match
-      case Some(fill) =>
-        ledger = ledger.applyFill(exchange, fill.symbol, fill.side, fill.price, fill.size)
-        Vector(TradingGateway.positionEvent(positionOf(fill.symbol), now), report)
-      case None =>
-        report.as(Topics.Position) match
-          case Some(reported) => reconcile(reported); Vector.empty
-          case None           => Vector(report)
+  private def settleUpTo(
+      orderId: OrderId,
+      symbol: Symbol,
+      side: Side,
+      price: Price,
+      cumulativeQty: Coin,
+      ts: Timestamp,
+  ): Vector[AnyEvent] =
+    val already = settled.get(orderId).map(_.cumulative).getOrElse(Coin.Zero)
+    val delta = cumulativeQty - already
+    if !(delta > Coin.Zero) then Vector.empty
+    else
+      settled(orderId) = settled.get(orderId) match
+        case Some(prev) => prev.copy(cumulative = cumulativeQty)
+        case None       => RestTradingGateway.Settlement(cumulativeQty, terminalAt = None)
+      lastSettledAt = ts
+      ledger = ledger.applyFill(exchange, symbol, side, price, delta)
+      val position = positionOf(symbol)
+      logger.info(
+        s"成交入账 $target $symbol $side ${delta.value} @ ${price.value} -> 仓位 ${position.size.value} (order=$orderId)"
+      )
+      Vector(
+        TradingGateway.positionEvent(position, ts),
+        Event.stamped(Topics.Fill, Fill(account, exchange, symbol, side, price, delta, ts), ts, ts),
+      )
+
+  /** 清掉早已终态、不会再有晚到成交的记账进度。只在订单进终态时扫一次，频率与终态同阶 */
+  private def evictSettled(now: Timestamp): Unit =
+    settled.filterInPlace((_, s) => !s.terminalAt.exists(now - _ > RestTradingGateway.SettledRetentionMs))
 
   private def positionOf(symbol: Symbol): Position =
     ledger.positions.getOrElse(symbol, Position.empty(account, exchange, symbol))
@@ -91,15 +150,21 @@ final class RestTradingGateway(
     * 触发漂移的是账本看不见的东西：强平、手动干预、资金费结算、以及任何一笔漏收的成交。
     * 不报出来的话，策略会一直按一个错的敞口对冲，而这没有任何外在症状。
     */
-  private def reconcile(reported: Position): Unit =
-    val mine = positionOf(reported.symbol).size
-    // 容差取一个最小变动单位: 更小的差异是浮点噪声, 不是漂移
-    val tolerance = metas.get(reported.symbol).map(_.sizeStep).getOrElse(0.0)
-    if (mine - reported.size).abs.value > tolerance then
+  private def reconcile(symbol: Symbol, reported: Coin, now: Timestamp): Unit =
+    // 三道闸, 每一道挡的都是一种会把真漂移淹掉的噪声:
+    //   1. 没对齐过的标的 —— 账本里压根没有它, 那是别人的仓位
+    //   2. 刚成交完 —— 成交与仓位走不同频道, 交易所先推仓位时账本还没记上那一笔
+    if !syncedSymbols.contains(symbol) then return
+    if now - lastSettledAt < RestTradingGateway.ReconcileQuietMs then return
+    val mine = positionOf(symbol).size
+    // 3. 容差取一个最小变动单位: 更小的差异是浮点噪声, 不是漂移
+    val tolerance = metas.get(symbol).map(_.sizeStep).getOrElse(0.0)
+    if (mine - reported).abs.value > tolerance then
       logger.error(
-        s"!!! 仓位漂移 $target ${reported.symbol}: 本地账本=${mine.value} 交易所=${reported.size.value} " +
+        s"!!! 仓位漂移 $target $symbol: 本地账本=${mine.value} 交易所=${reported.value} " +
           "(强平/手动干预/资金费/漏收成交都会造成)。策略正按本地账本决策, 需人工确认; " +
-          "确认后可发一条账户对齐指令让柜台按 REST 快照重置"
+          "确认后**先撤掉在途单**再发账户对齐指令让柜台按 REST 快照重置 —— " +
+          "有单在途时重置会把一笔既在快照里、推送又还在路上的成交记两遍"
       )
 
   override protected def metaOf(symbol: Symbol): SymbolMeta =
@@ -151,6 +216,8 @@ final class RestTradingGateway(
       case Right(positions) =>
         val mine = positions.filter(p => symbols.contains(p.symbol)).map(_.copy(account = account))
         ledger = Ledger(account, mine.map(p => p.symbol -> p).toMap, cash = 0.0)
+        settled.clear() // 账本重置, 记账进度跟着归零
+        syncedSymbols ++= symbols
         mine
       case Left(e) => throw IllegalStateException(s"$exchange 拉取初始持仓失败: ${e.message}")
 
@@ -167,6 +234,24 @@ final class RestTradingGateway(
       case Left(e)     => throw IllegalStateException(s"$exchange 拉取账户信息失败: ${e.message}")
 
 object RestTradingGateway:
+  /** 一张订单的记账进度。`terminalAt` 有值表示已终态，只等过保留期被清掉 */
+  private final case class Settlement(cumulative: Coin, terminalAt: Option[Timestamp])
+
+  /** 订单终态后，记账进度还要留多久。
+    *
+    * 留着是为了让晚到的成交推送认得出"这笔已经记过了"。跨频道的迟到在秒级，
+    * 取一分钟留足余量 —— 代价只是多占一会儿内存，而清早了就是仓位翻倍。
+    */
+  val SettledRetentionMs: Long = 60_000
+
+  /** 对账前要安静多久。
+    *
+    * 成交与仓位在多数交易所走的是两条频道，交易所先推仓位、后推那笔成交是常态。
+    * 那个窗口里账本必然落后一笔，此刻对账报出来的全是假漂移。跨频道的时间差在秒级以内，
+    * 取 5 秒留足余量 —— 对账本来就不是实时的事，它要抓的是持续存在的偏差。
+    */
+  val ReconcileQuietMs: Long = 5_000
+
   /** 装好柜台，合约规格取自客户端 (见 [[ExchangeClient.symbolMetas]]，进程内只拉一次)。
     *
     * 规格在**装配期**加载并且失败即终止：缺一个标的的规格就发不出它的单，

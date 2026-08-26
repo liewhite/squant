@@ -104,8 +104,9 @@ private[bybit] object BybitCodec:
 
   final case class ExecutionData(
       symbol: String = "",
+      orderId: String = "",    // 累计成交量按订单聚合, 故必须有它
       side: String = "",       // Buy/Sell
-      execQty: String = "0",   // 本次成交 (币本位)
+      execQty: String = "0",   // 本次成交 (币本位)；本频道不给累计量
       execPrice: String = "0",
       execTime: String = "0",
   )
@@ -174,6 +175,8 @@ private[bybit] object BybitCodec:
   given orderPush: JsonValueCodec[WsList[OrderData]] = JsonCodecMaker.make
   given execPush: JsonValueCodec[WsList[ExecutionData]] = JsonCodecMaker.make
   given walletPush: JsonValueCodec[WsList[WalletData]] = JsonCodecMaker.make
+  // 私有 position 频道与 REST 的持仓字段同名, 复用同一个 PositionData
+  given positionPush: JsonValueCodec[WsList[PositionData]] = JsonCodecMaker.make
   given JsonValueCodec[InstrumentsResp] = JsonCodecMaker.make
   given JsonValueCodec[OrderCreateResp] = JsonCodecMaker.make
   given JsonValueCodec[CancelResp] = JsonCodecMaker.make

@@ -63,6 +63,17 @@ final class ActorContext private[actor] (
   def scheduleEvent(ms: Long, event: AnyEvent): Unit =
     system.schedule(ms) { if handle.finished.getCount > 0 then system.bus.publish(event) }
 
+  /** 给自己发一条消息 —— 直接进本 actor 的邮箱，**不经总线**。
+    *
+    * 用途只有一个：把**外部线程**的输入串行化到 actor 线程。柜台的私有推送在 WS 连接
+    * 线程上解析出来，而账本的写者必须只有一个；`tell` 让它排进邮箱，与总线来的事件
+    * 一起被同一个线程按序消费。
+    *
+    * 与 [[publish]] 的区别是**可见性**：publish 的东西是给别人看的，tell 的东西是自己的
+    * 内部事务。一件纯内部的事没有理由在总线上流动。
+    */
+  def tell(event: AnyEvent): Unit = handle.mailbox.offer(event)
+
   /** 本 actor 所在的并发作用域。
     *
     * 限定 `private[hft]`：业务插件只该用 [[fork]] / [[spawn]]，够不着作用域本身。

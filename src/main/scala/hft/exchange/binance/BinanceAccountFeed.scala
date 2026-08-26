@@ -2,8 +2,7 @@ package hft.exchange.binance
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{AccountFeed, WsLoop}
-import hft.event.{AnyEvent, Event, Topics}
+import hft.exchange.{AccountFeed, AccountReport, WsLoop}
 import org.slf4j.LoggerFactory
 import ox.channels.Channel
 import sttp.client4.WebSocketSyncBackend
@@ -34,13 +33,12 @@ final class BinanceAccountFeed(
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
 
-  /** 回报归属的账户与发布通道，由柜台在 [[connect]] 时注入，之后只读 */
-  @volatile private var account: AccountId = scala.compiletime.uninitialized
-  @volatile private var publish: AnyEvent => Unit = scala.compiletime.uninitialized
+  /** 解析结果的去处，由柜台在 [[connect]] 时注入，之后只读。
+    * 本流不知道账户是谁 —— 那是柜台盖的章 */
+  @volatile private var report: AccountReport => Unit = scala.compiletime.uninitialized
 
-  override def connect(acct: AccountId, sink: AnyEvent => Unit, spawn: (=> Unit) => Unit): Unit =
-    account = acct
-    publish = sink
+  override def connect(sink: AccountReport => Unit, spawn: (=> Unit) => Unit): Unit =
+    report = sink
     WsLoop.run("binance/private", backend, privateStreamUrl, outgoing, onPrivateText, spawn)
     spawn {
       while true do
@@ -84,32 +82,27 @@ final class BinanceAccountFeed(
       case "REJECTED"         => OrderStatus.Rejected("rejected by exchange")
       // 未知状态意味着无法解释交易所的订单状态机，继续运行只会静默发散
       case other => throw IllegalStateException(s"Unknown order status '$other': $o")
-    val update = OrderUpdate(
-      account = account,
+    val filledQty = Coin(o.z.asDouble) // 累计成交
+    // 成交先报: 柜台据此记账并先发仓位快照, 订单状态随后。同一条推送里两件事,
+    // 顺序由这里决定 —— 不必依赖交易所各频道的到达次序。
+    if o.l.asDouble > 0 then
+      report(AccountReport.Executed(o.i.toString, o.s, side, o.L.asPrice, filledQty, o.T))
+    report(AccountReport.OrderStatusChanged(
       orderId = o.i.toString,
       clientOrderId = Some(o.c),
-      exchange = Exchange.Binance,
       symbol = o.s,
       side = side,
       status = status,
       price = o.p.asPrice,
       quantity = Coin(o.q.asDouble),
-      filledQuantity = Coin(o.z.asDouble),
+      filledQuantity = filledQty,
       timestamp = o.T,
-    )
-    publish(Event.at(Topics.OrderUpdate, update, msg.E))
-    // 本次有成交 -> 同步发布 Fill 事件，乐观更新仓位
-    if o.l.asDouble > 0 then
-      val fill = Fill(account, Exchange.Binance, o.s, side, price = o.L.asPrice, size = Coin(o.l.asDouble), timestamp = o.T)
-      publish(Event.at(Topics.Fill, fill, msg.E))
+    ))
 
   private def publishAccountUpdate(msg: AccountUpdateMsg): Unit =
-    msg.a.B.foreach { b =>
-      publish(
-        Event.at(Topics.Balance, Balance(account, Exchange.Binance, b.a, b.wb.asDouble, msg.E), msg.E)
-      )
-    }
+    msg.a.B.foreach(b => report(AccountReport.BalanceChanged(b.a, b.wb.asDouble, msg.E)))
+    // 交易所报的仓位 —— 交给柜台对账, 不进总线。推的是整个账户, 里面有本柜台不管的标的,
+    // 由柜台按"已对齐过的标的"过滤 (见 RestTradingGateway.reconcile)。
     msg.a.P.filter(_.ps == "BOTH").foreach { p =>
-      val position = Position(account, Exchange.Binance, p.s, Coin(p.pa.asDouble), p.ep.asPrice, p.up.asDouble)
-      publish(Event.at(Topics.Position, position, msg.E))
+      report(AccountReport.PositionReported(p.s, Coin(p.pa.asDouble), msg.E))
     }

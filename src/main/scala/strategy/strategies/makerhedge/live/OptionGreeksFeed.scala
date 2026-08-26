@@ -1,9 +1,8 @@
 package strategy.strategies.makerhedge.live
 import strategy.utils.option.*
 
-import hft.domain.{AccountId, Balance, Exchange, Greeks}
-import hft.exchange.AccountFeed
-import hft.event.{AnyEvent, Event, Topics}
+import hft.domain.Exchange
+import hft.exchange.{AccountFeed, AccountReport}
 import org.slf4j.LoggerFactory
 
 /** 把**期权账户净 greeks** 作为 [[AccountFeed]] 注入柜台的汇报面 (与私有推送同一条通道)：
@@ -18,9 +17,9 @@ final class OptionGreeksFeed(opt: OptionsExchange, exch: Exchange, ccy: String, 
   private val logger = LoggerFactory.getLogger(classOf[OptionGreeksFeed])
   override def exchange: Exchange = exch
 
-  override def connect(account: AccountId, publish: AnyEvent => Unit, spawn: (=> Unit) => Unit): Unit =
+  override def connect(report: AccountReport => Unit, spawn: (=> Unit) => Unit): Unit =
     // 同步兜底: 保证 cashBalances(ccy) 存在, 否则 StateManager.greeks 恒为 None -> 不对冲。真实现货余额(若有)随后覆盖。
-    publish(Event.local(Topics.Balance, Balance(account, exch, ccy, 0.0, System.currentTimeMillis)))
+    report(AccountReport.BalanceChanged(ccy, 0.0, System.currentTimeMillis))
     spawn {
       var fails = 0
       while true do
@@ -28,7 +27,7 @@ final class OptionGreeksFeed(opt: OptionsExchange, exch: Exchange, ccy: String, 
           opt.optionAccountGreeks() match
             case Right((delta, gamma)) =>
               fails = 0
-              publish(Event.local(Topics.Greeks, Greeks(account, exch, ccy, delta = delta, gamma = gamma, theta = 0.0, vega = 0.0, timestamp = System.currentTimeMillis)))
+              report(AccountReport.GreeksChanged(ccy, delta = delta, gamma = gamma, theta = 0.0, vega = 0.0, timestamp = System.currentTimeMillis))
             case Left(e) =>
               fails += 1
               if fails >= 3 then logger.error(s"!!! 期权 greeks 已连续 $fails 次轮询失败, 对冲在用陈旧 delta, 期权敞口可能失真, 请人工介入: $e")
@@ -42,5 +41,5 @@ final class OptionGreeksFeed(opt: OptionsExchange, exch: Exchange, ccy: String, 
 final class CompositeAccountFeed(exch: Exchange, feeds: Seq[AccountFeed]) extends AccountFeed:
   require(feeds.forall(_.exchange == exch), s"CompositeAccountFeed 的成员必须同属 $exch")
   override def exchange: Exchange = exch
-  override def connect(account: AccountId, publish: AnyEvent => Unit, spawn: (=> Unit) => Unit): Unit =
-    feeds.foreach(_.connect(account, publish, spawn))
+  override def connect(report: AccountReport => Unit, spawn: (=> Unit) => Unit): Unit =
+    feeds.foreach(_.connect(report, spawn))

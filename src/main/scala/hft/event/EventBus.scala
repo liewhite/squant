@@ -187,6 +187,16 @@ object EventBus:
     /** 本邮箱的事件流。消费到 [[done]] 之后排空为止 (`Source.foreach` 正是这个语义) */
     def events: Source[AnyEvent] = channel
 
+    /** 直接投一条进本邮箱，**不经总线**。
+      *
+      * 给的是"把外部线程的输入串行化到 actor 线程"这一件事 (见 [[hft.actor.ActorContext.tell]])：
+      * 柜台的私有推送在 WS 连接线程上解析出来，而账本的写者必须只有 actor 线程一个。
+      * 借道总线也能做到，但那会让一件纯内部的事在总线上流动 —— 不需要暴露的就不该暴露。
+      *
+      * 用 `sendOrClosed`：邮箱可能正在停机，向一个正在退出的 actor 投递失败是正常竞态。
+      */
+    private[hft] def offer(event: AnyEvent): Unit = channel.sendOrClosed(event): Unit
+
     /** 从总线摘除，不再有新事件进来。幂等 —— 停机路径上重复调用是常态。
       *
       * 与 [[done]] 是两件事：这一步只断开投递源，邮箱里已经排队的事件仍在。
