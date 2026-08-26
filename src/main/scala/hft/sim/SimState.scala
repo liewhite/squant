@@ -212,7 +212,16 @@ final case class SimState(
       val next = copy(ledger = ledger.applyFill(exchange, symbol, side, fillPrice, effectiveQty, fee))
       val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, effectiveQty, now)
       val f = Fill(account, exchange, symbol, side, fillPrice, effectiveQty, now)
-      (next, Vector(Event.stamped(Topics.OrderUpdate, update, now, now), Event.stamped(Topics.Fill, f, now, now)))
+      // 顺序是这三条的全部意义, 见 hft.exchange.TradingGateway 的"回报有固定顺序":
+      //   仓位快照 -> 成交 -> 订单终态
+      (next, Vector(next.positionEvent(exchange, symbol, now), Event.stamped(Topics.Fill, f, now, now), Event.stamped(Topics.OrderUpdate, update, now, now)))
+
+  /** 本账本当下这个标的的仓位快照 —— 构造与真实柜台同一份 */
+  private[sim] def positionEvent(exchange: Exchange, symbol: Symbol, now: Timestamp): AnyEvent =
+    hft.exchange.TradingGateway.positionEvent(
+      ledger.positions.getOrElse(symbol, Position.empty(account, exchange, symbol)),
+      now,
+    )
 
   private def statusEvent(exchange: Exchange, order: Order, orderId: OrderId, status: OrderStatus, price: Price, now: Timestamp): AnyEvent =
     Event.stamped(

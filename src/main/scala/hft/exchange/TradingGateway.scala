@@ -17,7 +17,7 @@ import org.slf4j.LoggerFactory
   *   2. **精度裁决**：对齐后交易所收不下的单 (低于最小下单量、被取整成零)，以**拒单回报**
   *      回流 —— 与"交易所明确拒绝"完全同一条路径，因此策略侧的挂单登记得到统一清理，
   *      不需要第二套机制。
-  *   3. **汇报**：把私有推送解析成回报事件 (见 [[AccountFeed]])。
+  *   3. **汇报**：把私有推送解析成回报事件 (见 [[AccountFeed]])，并**维护仓位**。
   *   4. **对齐**：接对齐指令，把当前持仓 / 净值 / 挂单推到总线，完成后发应答。
   *   5. **净值刷新**：净值随行情持续变动却没有推送，只能周期拉取 —— 这是柜台自己的
   *      常驻职责，不需要外部指令。
@@ -26,6 +26,23 @@ import org.slf4j.LoggerFactory
   *
   * 虚拟柜台与真实柜台在总线上完全一样：订同样的指令、产出同样的回报。策略无法分辨，
   * 这正是"同一份逻辑同时跑实盘与影子盘"的结构基础。
+  *
+  * ## 仓位由柜台算，回报有固定顺序
+  *
+  * 仓位是**柜台的账本**，不是策略自己累加出来的：初值来自启动对齐 (交易所真实持仓)，
+  * 之后每笔成交进 [[Ledger]]。策略只管读 [[Topics.Position]]。
+  *
+  * 从前这份账在策略侧 —— 每个策略实例各累加一份，而交易所持续推来的权威仓位被全部丢弃
+  * (只认第一条)，于是本地账一旦漂移就永远发现不了。搬到柜台之后，"我累加的"与
+  * "交易所报的"第一次落在同一个角色手里，对账才成为可能 (见 [[reconcile]])。
+  *
+  * **一笔成交产出三条回报，顺序固定**：
+  * {{{
+  *   仓位快照 (Position) -> 成交 (Fill) -> 订单终态 (OrderUpdate)
+  * }}}
+  * 仓位排第一是硬要求：策略普遍在成交回调里读 `ctx.state.positionSize` 决策，
+  * 顺序反了它读到的就是成交**前**的仓位 —— 对冲量从此一直差一笔，而没有任何症状。
+  * 三种柜台 (真实 / 替身 / 影子) 与回测都遵守这一条。
   *
   * ## 没有凭证就不装柜台
   *
@@ -183,6 +200,15 @@ abstract class TradingGateway extends Actor:
       s"reduceOnly=${order.reduceOnly} clientOrderId=${order.clientOrderId}"
 
 object TradingGateway:
+  /** 仓位快照事件 —— 真假柜台同一份构造。
+    *
+    * **不含未实现盈亏**（恒置 0）：那要估值价，而真实柜台不订阅行情、算不了。两边都留 0
+    * 是有意的 —— 一边有值一边没有，策略读到的东西就随部署形态而变。要盈亏读
+    * [[Topics.AccountInfo]] 的净值，那是柜台确实算得出的。
+    */
+  def positionEvent(position: Position, now: Timestamp): AnyEvent =
+    Event.stamped(Topics.Position, position.copy(unrealizedPnl = 0.0), now, now)
+
   /** 把一次对齐的结果组装成事件序列 —— **真假柜台同一份**。
     *
     * 顺序是它的全部意义: 持仓 -> 净值 -> 既有挂单 -> 完成应答。应答必须排在最后，
@@ -201,7 +227,7 @@ object TradingGateway:
     val account = request.account
     val bySymbol = positions.map(p => p.symbol -> p).toMap
     val positionEvents = request.symbols.toVector.sortBy(_.toString).map { symbol =>
-      Event.local(Topics.Position, bySymbol.getOrElse(symbol, Position.empty(account, exchange, symbol)))
+      positionEvent(bySymbol.getOrElse(symbol, Position.empty(account, exchange, symbol)), nowMs)
     }
     val orderEvents = pendingOrders.map(Event.local(Topics.OrderUpdate, _))
     val report = Event.local(AccountSynced, AccountSyncReport(account, exchange, request.requestId))

@@ -16,17 +16,25 @@ class StrategyRunnerSpec extends munit.FunSuite:
   private def subOf(interests: Set[Interest]): Subscription =
     StrategyRunner.subscriptionFor(interests, AccountId.Live)
 
-  test("补齐所声明标的的私有回报 —— 策略不该有机会漏订成交"):
+  test("补齐持仓与订单回报 —— 策略不该有机会漏订这两样"):
     val sub = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
-    val fill = Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, Coin(1.0), 0L))
     val position = Event.local(Topics.Position, Position(AccountId.Live, ex, "BTCUSDT", 1.0, 100.0, 0.0))
     val orderUpdate = Event.local(
       Topics.OrderUpdate,
       OrderUpdate(AccountId.Live, "1", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Filled, 100.0, Coin(1.0), Coin(1.0), Coin(1.0), 0L),
     )
-    assert(sub.accepts(fill), "Fill 必须自动补齐: 漏订会让本地仓位与交易所长期发散")
-    assert(sub.accepts(position))
-    assert(sub.accepts(orderUpdate))
+    assert(sub.accepts(position), "持仓必须补齐: 漏订就是拿着错的敞口决策")
+    assert(sub.accepts(orderUpdate), "订单回报必须补齐: 超时检测与停机撤单都靠它")
+
+  test("成交明细**不**补齐 —— 仓位归柜台算之后, 策略不再非它不可"):
+    // 少补一条不是省事: 成交是热路径, 多策略部署下每笔成交都要白投几份。
+    // 想看成交明细的策略自己声明 own(Topics.Fill), 那本来就是它该说的话。
+    val sub = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
+    val fill = Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 100.0, Coin(1.0), 0L))
+    assert(!sub.accepts(fill))
+
+    val declared = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc)), Interest.Keyed(Topics.Fill, Set(AccountInstrument(AccountId.Live, btc)))))
+    assert(declared.accepts(fill), "显式声明了就该收到")
 
   test("补齐所涉交易所的账户级读数, 但不越界到别的交易所"):
     val sub = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc))))

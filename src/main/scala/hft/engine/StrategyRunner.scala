@@ -87,9 +87,10 @@ final class StrategyRunner(
 object StrategyRunner:
   /** 策略声明 + 框架补齐 = 策略实际的订阅范围。
     *
-    * 补齐的三类订阅**不该由策略选择**，因此不留给策略声明 —— 漏订一条 Fill 就会让本地
-    * 仓位与交易所长期发散，而这种 bug 没有任何外在症状：
-    *   1. 所声明标的的私有回报 (持仓 / 订单回报 / 成交)；
+    * 补齐的三类订阅**不该由策略选择**，因此不留给策略声明 —— 漏订一条持仓或订单回报，
+    * 策略就会拿着错的敞口决策、或者永远清不掉一条幽灵挂单，而这些没有任何外在症状：
+    *   1. 所声明标的的持仓与订单回报 (见 [[Topics.essentialPrivate]]；
+    *      **成交明细不补** —— 仓位归柜台算之后策略不再非它不可，要就自己声明)；
     *   2. 所涉交易所的账户级读数 (余额 / 净值 / 希腊值)；
     *   3. 时钟 (驱动 [[hft.state.SymbolState.failOnTimedOutOrders]])。
     *
@@ -104,7 +105,7 @@ object StrategyRunner:
     // 两个实例声明的行情完全相同，靠这个维度才分得开谁的成交是谁的。
     val privateInterests: Set[Interest] =
       if instrumentKeys.isEmpty then Set.empty
-      else Topics.instrumentPrivate.map(t => Interest.Keyed(t, instrumentKeys.map(AccountInstrument(account, _))))
+      else Topics.essentialPrivate.map(t => Interest.Keyed(t, instrumentKeys.map(AccountInstrument(account, _))))
     val accountInterests: Set[Interest] =
       if exchangeKeys.isEmpty then Set.empty
       else Topics.account.map(t => Interest.Keyed(t, exchangeKeys.map(AccountExchange(account, _))))

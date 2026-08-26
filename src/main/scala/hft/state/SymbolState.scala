@@ -121,13 +121,16 @@ final class SymbolState(val symbol: Symbol) extends SymbolView:
     event.as(Topics.IndexPrice).foreach(i => indexPrices(i.exchange) = i)
     event.as(Topics.Position).foreach(applyPosition)
     event.as(Topics.OrderUpdate).foreach(applyOrderUpdate)
-    event.as(Topics.Fill).foreach(applyFill)
 
-  /** 仅用于初始加载: 本地无仓位时写入，之后完全由 Fill 事件维护 */
+  /** 仓位由**柜台**维护，本地只是接住它的快照。
+    *
+    * 从前这里只认第一条 (初始加载)，之后完全靠 Fill 自己累加 —— 那时仓位在策略侧算，
+    * 交易所持续推来的权威读数被全部丢弃，本地账一旦漂移就永远发现不了。现在账本在柜台
+    * (见 [[hft.exchange.TradingGateway]])，它发的每一条都比上一条新，直接覆盖即可：
+    * 同一个柜台的事件在总线上是 FIFO，不存在"后到的更旧"。
+    */
   private def applyPosition(position: Position): Unit =
-    if !positions.contains(position.exchange) then
-      logger.info(s"[$symbol] position initialized from poll: exchange=${position.exchange} size=${position.size}")
-      positions(position.exchange) = position
+    positions(position.exchange) = position
 
   private def applyOrderUpdate(update: OrderUpdate): Unit =
     logger.info(
@@ -159,19 +162,3 @@ final class SymbolState(val symbol: Symbol) extends SymbolView:
             )
             _pendingOrders(clientId) = PendingOrder(order, update.status, update.timestamp)
     }
-
-  /** Fill 事件即时更新仓位 (无论是策略订单还是手动订单) */
-  private def applyFill(fill: Fill): Unit =
-    val delta = fill.side match
-      case Side.Long  => fill.size
-      case Side.Short => -fill.size
-    val pos = positions.getOrElseUpdate(
-      fill.exchange,
-      Position(fill.account, fill.exchange, symbol, Coin.Zero, fill.price, 0.0),
-    )
-    val updated = pos.copy(size = pos.size + delta)
-    positions(fill.exchange) = updated
-    logger.info(
-      s"[$symbol] position updated on fill: exchange=${fill.exchange} side=${fill.side} " +
-        s"fillSize=${fill.size} fillPrice=${fill.price} newPositionSize=${updated.size}"
-    )

@@ -75,24 +75,23 @@ class SymbolStateSpec extends munit.FunSuite:
     state.failOnTimedOutOrders(t0 + 1000, timeoutMs = 5000) // 不抛
     state.failOnTimedOutOrders(t0 + 60000, timeoutMs = 0)   // 不抛
 
-  test("Fill 事件按方向乐观更新仓位，无仓位时创建"):
+  test("成交不再改仓位 —— 那本账在柜台, 这里只接住它的快照"):
+    // 从前这里靠 Fill 自己累加。改到柜台之后, 策略侧不再有第二份仓位算法:
+    // 两份实现迟早在某个边界 (反手、reduceOnly 截断) 上分叉, 而没有任何症状。
     val state = SymbolState(symbol)
     val fill = Fill(AccountId.Live, Exchange.Binance, symbol, Side.Long, price = 50000.0, size = 0.01, timestamp = t0)
     state.apply(Event.at(Topics.Fill, fill, t0))
-    assertEqualsDouble(state.positionSize(Exchange.Binance).value, 0.01, 1e-12)
+    assertEqualsDouble(state.positionSize(Exchange.Binance).value, 0.0, 1e-12, "成交不该被这里算进仓位")
 
-    state.apply(Event.at(Topics.Fill, fill.copy(side = Side.Short, size = 0.015), t0))
-    assertEqualsDouble(state.positionSize(Exchange.Binance).value, -0.005, 1e-12)
-
-  test("PositionUpdate 仅初始化一次，之后由 Fill 维护"):
+  test("仓位快照始终覆盖 —— 柜台发的每一条都比上一条新"):
     val state = SymbolState(symbol)
     val initial = Position(AccountId.Live, Exchange.Binance, symbol, size = 1.0, entryPrice = 50000.0, unrealizedPnl = 0.0)
     state.apply(Event.at(Topics.Position, initial, t0))
     assertEqualsDouble(state.positionSize(Exchange.Binance).value, 1.0, 1e-12)
 
-    // 第二次 PositionUpdate 被忽略
+    // 从前这条会被忽略 (只认第一条), 于是漂移永远修不回来
     state.apply(Event.at(Topics.Position, initial.copy(size = 9.0), t0))
-    assertEqualsDouble(state.positionSize(Exchange.Binance).value, 1.0, 1e-12)
+    assertEqualsDouble(state.positionSize(Exchange.Binance).value, 9.0, 1e-12)
 
   test("hasPendingSide 区分方向"):
     val state = SymbolState(symbol)

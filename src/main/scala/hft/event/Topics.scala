@@ -83,8 +83,24 @@ object Topics:
   /** 公共行情 topic：需要**向交易所订阅**才会有数据 */
   val market: Set[MarketTopic[?]] = Set(Bbo, Trade, MarkPrice, IndexPrice, FundingRate)
 
-  /** 归属某账户某标的的私有回报：由账户流推送，无需订阅 */
+  /** 归属某账户某标的的私有回报：由柜台推送，无需订阅。
+    *
+    * 用途是**判定"这个 topic 属于私有回报"**（据此从订阅声明反推交易标的），
+    * 与"框架该给策略补齐哪些"是两件事，见 [[essentialPrivate]]。 */
   val instrumentPrivate: Set[Topic[AccountInstrument, ?]] = Set(Position, OrderUpdate, Fill)
+
+  /** 框架**必定补齐**给策略的私有回报 —— 缺了它们策略无法正确工作：
+    *   - [[Position]]：敞口。由柜台维护并推送，策略读它决策
+    *   - [[OrderUpdate]]：挂单生命周期。超时检测与停机撤单都靠它
+    *
+    * [[Fill]] **不在其中**。它曾经是必修课，因为仓位靠策略自己累加成交得出；
+    * 现在仓位归柜台算（见 [[hft.exchange.TradingGateway]]），策略侧就没有任何东西
+    * 非它不可了。想看成交明细（滑点统计、成交记录）的策略自己声明 `own(Topics.Fill)`
+    * —— 那本来就是它该说的话。
+    *
+    * 少补一条不是省事：成交是热路径，多策略部署下每笔成交都要白投几份。
+    */
+  val essentialPrivate: Set[Topic[AccountInstrument, ?]] = Set(Position, OrderUpdate)
 
   /** 账户级读数 */
   val account: Set[Topic[AccountExchange, ?]] = Set(Balance, AccountInfo, Greeks)
