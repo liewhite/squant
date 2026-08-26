@@ -58,7 +58,7 @@ import sttp.client4.DefaultSyncBackend
     f"对冲: 判据=真实净敞口; 死区基准=${t.deltaThreshold}%.4f ${t.ccy} " +
       f"MACD逆势侧×${t.macdTightenRatio}%.2f 震荡×${t.chopWidenMult}%.2f 趋势×${t.trendTightenMult}%.2f " +
       f"-> **敞口上界 ${t.maxExposure}%.4f ${t.ccy}**%n" +
-      f"ER@${t.kamaBar}(${t.kamaErPeriod}/${t.kamaFast}/${t.kamaSlow}) " +
+      f"ER@${t.erBar}×${t.erPeriod}根 " +
       f"MACD@${t.macdBar} 单笔上限=${t.maxHedgeQty}%n" +
       f"报价: ER<${t.trendErThreshold}%.2f 平缓 -> 被动挂对手价外 ${t.passiveOffset * 100}%.3f%%, 给 ${t.passiveTtlMs}ms; " +
       f"ER>=${t.trendErThreshold}%.2f 单边 -> 跨价穿透 ${t.crossOffset * 100}%.3f%%, 只给 ${t.crossTtlMs}ms"
@@ -76,10 +76,8 @@ import sttp.client4.DefaultSyncBackend
     val hedge = DeltaHedgeStrategy(
       Exchange.Okx, t.symbol, t.ccy,
       band = t.deltaBand,
-      kamaBarMs = t.kamaBarMs,
-      kamaErBars = t.kamaErPeriod,
-      kamaFastBars = t.kamaFast,
-      kamaSlowBars = t.kamaSlow,
+      erBarMs = t.erBarMs,
+      erPeriodBars = t.erPeriod,
       macdBarMs = t.macdBarMs,
       macdFastPeriod = t.macdFast,
       macdSlowPeriod = t.macdSlow,
@@ -96,8 +94,8 @@ import sttp.client4.DefaultSyncBackend
     opt.linearKlines(t.symbol, t.macdBar, math.max(t.macdSlow + t.macdSignal + 8, 64)) match
       case Right(bars) => hedge.prewarmMacd(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.macdBar} K线 -> MACD 就绪")
       case Left(e)     => logger.error(s"prewarm 取 K 线失败 (MACD 将靠实时 BBO 慢热, 期间死区对称): $e")
-    opt.linearKlines(t.symbol, t.kamaBar, math.max(t.kamaErPeriod * 4, 64)) match
-      case Right(bars) => hedge.prewarmKama(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.kamaBar} K线 -> ER 就绪")
+    opt.linearKlines(t.symbol, t.erBar, math.max(t.erPeriod * 4, 64)) match
+      case Right(bars) => hedge.prewarmEr(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.erBar} K线 -> ER 就绪")
       case Left(e)     => logger.error(s"prewarm 取 K 线失败 (ER 将靠实时 BBO 慢热, 期间死区用基准阈值): $e")
 
     engine.addStrategy(hedge, AccountId.Live) // 先订阅总线

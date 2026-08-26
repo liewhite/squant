@@ -136,7 +136,7 @@ IV 取每腿各自的 `markVol`（OKX `opt-summary`）。中间计算全程保�
 
 | 信号 | 来源 | 作用 |
 |---|---|---|
-| **效率比 ER** | 1m 价格 K 线的 `Kama` | ER→0（震荡）阈值 ×`chopWidenMult`（默认 2.0，放宽 → 少对冲）；ER→1（趋势）×`trendTightenMult`（默认 0.5，收紧 → 尽快跟上）；中间线性插值 |
+| **效率比 ER** | 1m 价格 K 线的 `EfficiencyRatio` | ER→0（震荡）阈值 ×`chopWidenMult`（默认 2.0，放宽 → 少对冲）；ER→1（趋势）×`trendTightenMult`（默认 0.5，收紧 → 尽快跟上）；中间线性插值 |
 | **MACD 方向** | 1H 价格 K 线 | 逆势侧阈值 ×`macdTightenRatio`（默认 0.5）。看多时账户留着空头敞口是逆势的，那一侧收紧 = 更快对冲掉；顺势侧不动 = 小幅顺势敞口不值得对冲 |
 
 两者**相乘**叠加。ER 预热不足时体制系数取 1.0（用基准阈值，不猜体制）——这里可以安全地
@@ -152,17 +152,18 @@ ER 用线性插值而不是阈值切换，是为了避免在切换点附近抖�
 
 ### 两条 K 线都可预热
 
-ER 走 `kamaBar`（默认 `"1m"`），MACD 走 `macdBar`（默认 `"1H"`），都由永续 BBO 中间价逐笔聚合，
+ER 走 `erBar`（默认 `"1m"`）、回看 `erPeriod` 根（默认 10），MACD 走 `macdBar`（默认 `"1H"`），都由永续 BBO 中间价逐笔聚合，
 且启动时都用历史 K 线预热（launcher 从 `linearKlines` 取）——**开机即就绪**，没有"头几十分钟
 指标不可用"的窗口。这是把指标建在**标的价**上换来的：价格历史交易所有，敞口历史没有。
 
-`Kama` 的值是**含盘中根**的（`kama` / `efficiencyRatio` 逐笔更新；`kamaAtClose` /
-`efficiencyRatioAtClose` 是已收盘的确认值）。盘中试算走 `KamaCore.provisional`，与
-`KamaCore.step` 是同一份公式，所以盘中显示的和它收盘后定下的是同一个数。没有盘中形态的话，
+ER 是**含盘中根**的（`efficiencyRatio` 逐笔更新，`efficiencyRatioAtClose` 是已收盘的确认值）。
+盘中试算走 `EfficiencyRatioCore.provisional`，与 `step` 是同一份公式。没有盘中形态的话，
 1 分钟粒度下一次跳空最多要等 60 秒才反映到判据上。
 
-> 注意：判据只用 `efficiencyRatio`，**不用 KAMA 的值**。那个值曾被用来把敞口折算到平滑价上，
-> 正是上面说的那次设计错误。
+混入的是 `EfficiencyRatio` 而不是 `Kama`：判据只需要 ER 这个体制读数，不需要 KAMA 那条均线。
+混 `Kama` 会带进 `fast`/`slow` 两个**配了也不生效**的参数（它们只决定那条不被读取的均线走多快）
+——那种"看着能调、其实没用"的旋钮是陷阱。ER 的公式在 `EfficiencyRatioCore`，`KamaCore` 复用它，
+所以两处不会错开。
 
 ### 执行：报价方式随体制切换
 

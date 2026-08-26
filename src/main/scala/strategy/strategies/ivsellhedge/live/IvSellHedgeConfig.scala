@@ -39,8 +39,9 @@ import scala.util.control.NonFatal
  * @param chopWidenMult     ER→0 (震荡) 时死区阈值的放宽倍数 (>= 1)。**它同时是真实敞口的上界系数**:
  *                          阈值最宽 = deltaThreshold × 它, 超过必然对冲
  * @param trendTightenMult  ER→1 (趋势) 时死区阈值的收紧系数 ∈ (0,1]
-  * @param kamaBar           KAMA 的 K 线粒度 (OKX 粒度串, 默认 "1m")。KAMA 平滑的是**标的价**,
+  * @param erBar             效率比 ER 的 K 线粒度 (OKX 粒度串, 默认 "1m")。建在**标的价**上,
  *                          所以能用历史 K 线预热, 开机即就绪
+ * @param erPeriod          ER 的回看根数 (默认 10)。它与 erBar 一起决定体制判定的反应时间
   * @param macdBar           MACD 的 K 线粒度 (OKX 粒度串, 如 "1H")；预热与实时聚合共用这一个事实
   * @param offset            对冲挂单相对盘口的外移比例 (保证 PostOnly 不吃单)
   * @param requoteMs         对冲挂单未成交的重挂间隔
@@ -74,10 +75,8 @@ final case class IvSellTuning(
     macdTightenRatio: Double = 0.5,
     chopWidenMult: Double = 2.0,
     trendTightenMult: Double = 0.5,
-    kamaBar: String = "1m",
-    kamaErPeriod: Int = 10,
-    kamaFast: Int = 2,
-    kamaSlow: Int = 30,
+    erBar: String = "1m",
+    erPeriod: Int = 10,
     macdBar: String = "1H",
     macdFast: Int = 12,
     macdSlow: Int = 26,
@@ -100,8 +99,8 @@ final case class IvSellTuning(
     * 而症状只是"MACD 方向偶尔和图上不一样"。 */
   def macdBarMs: Long = IvSellTuning.barToMillis(macdBar)
 
-  /** KAMA 的 K 线粒度换算成毫秒 (同 [[macdBarMs]]: 粒度只配一处, 预热与实时聚合共用) */
-  def kamaBarMs: Long = IvSellTuning.barToMillis(kamaBar)
+  /** ER 的 K 线粒度换算成毫秒 (同 [[macdBarMs]]: 粒度只配一处, 预热与实时聚合共用) */
+  def erBarMs: Long = IvSellTuning.barToMillis(erBar)
 
   /** 敞口死区：基准阈值 + 两个信号的缩放 (判据始终是真实敞口) */
   def deltaBand: DeltaBand =

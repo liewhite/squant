@@ -4,7 +4,7 @@ import strategy.utils.hedge.{DeltaBand, DeltaCtx, QuoteLeg, QuotePolicy, QuoteSt
 
 import hft.domain.*
 import hft.event.{AnyEvent, Topics}
-import hft.indicator.{Kama, KlineSeries, Macd}
+import hft.indicator.{EfficiencyRatio, KlineSeries, Macd}
 import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
 
 /** **敞口轴的 delta 中性对冲** —— 判据是**真实净敞口**，MACD 与效率比只调阈值。
@@ -25,20 +25,21 @@ import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
   *
   * ## 两个信号
   *
-  *   - **效率比 ER** (1 分钟价格 K 线上的 [[Kama]] 给出)：震荡 (ER→0) 放宽阈值 -> 少对冲；
+  *   - **效率比 ER** (1 分钟价格 K 线, [[EfficiencyRatio]])：震荡 (ER→0) 放宽阈值 -> 少对冲；
   *     趋势 (ER→1) 收紧阈值 -> 尽快跟上。这正是"KAMA 仅用来在震荡时减少对冲次数、趋势时
   *     尽快跟上"的落地方式。
   *   - **MACD 方向** (1 小时价格 K 线)：逆势侧阈值减半。
   *
-  * 两条 K 线都由永续中间价逐笔聚合，且都能用**历史 K 线预热** ([[prewarmKama]] / [[prewarmMacd]])
-  * —— 开机即就绪。ER 还有盘中形态 (见 [[Kama]])，逐笔就有值，不存在"一根 bar 内指标冻结"的盲区。
+  * 两条 K 线都由永续中间价逐笔聚合，且都能用**历史 K 线预热** ([[prewarmEr]] / [[prewarmMacd]])
+  * —— 开机即就绪。ER 还有盘中形态 (见 [[EfficiencyRatio]])，逐笔就有值，不存在"一根 bar 内
+  * 指标冻结"的盲区。
   *
   * ER 预热不足时体制系数取 1.0 (用基准阈值)。这里可以安全地"不猜"，正因为判据是真实敞口 ——
   * 猜错只影响对冲的疏密，不会让敞口失去上界。
   *
   * ## 执行
   *
-  * 被动挂单 ([[MakerQuoteLeg]] 的后继 `QuoteLeg`)，报价方式按 ER 在"被动慢挂 / 跨价追单"之间
+  * 被动挂单 ([[QuoteLeg]])，报价方式按 ER 在"被动慢挂 / 跨价追单"之间
   * 切换 (见 [[QuotePolicy]])。onEvent 由框架单线程串行调用，内部可变状态无需同步。
   *
   * @param symbol             永续标的 (OKX 统一 symbol = 基础币, 如 ETH)
@@ -46,7 +47,8 @@ import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
   * @param band               敞口死区 (阈值如何随信号缩放, 见 [[DeltaBand.adaptive]])
   * @param quotes             报价方式的选择 —— 敞口平缓时被动慢挂、走单边时跨价追单,
   *                           见 [[QuotePolicy.byEfficiency]]
-  * @param kamaBarMs          ER 的 K 线粒度 (默认 1 分钟)
+  * @param erBarMs            ER 的 K 线粒度 (默认 1 分钟)
+  * @param erPeriodBars       ER 的回看根数 (默认 10)
   * @param macdBarMs          MACD 的 K 线粒度 (默认 1 小时)
   * @param maxExposureStaleMs 敞口读数陈旧阈值 (ms): 超过它暂停对冲。>0 才生效
   */
@@ -55,10 +57,8 @@ final class DeltaHedgeStrategy(
     symbol: Symbol,
     ccy: String,
     band: DeltaBand,
-    kamaBarMs: Long = 60_000L,
-    kamaErBars: Int = 10,
-    kamaFastBars: Int = 2,
-    kamaSlowBars: Int = 30,
+    erBarMs: Long = 60_000L,
+    erPeriodBars: Int = 10,
     macdBarMs: Long = 3_600_000L,
     macdFastPeriod: Int = 12,
     macdSlowPeriod: Int = 26,
@@ -85,13 +85,14 @@ final class DeltaHedgeStrategy(
       override protected def macdSlow: Int = macdSlowPeriod
       override protected def macdSignalPeriod: Int = macdSignal
 
-  /** 效率比 ER 的 K 线 (细粒度), 同样由中间价逐笔聚合。只用它的 [[Kama.efficiencyRatio]] ——
-    * KAMA 的**值**不参与判据 (那正是之前用错的地方)。 */
-  private val kamaKlines =
-    new KlineSeries(kamaBarMs, math.max(kamaErBars * 4, 64)) with Kama:
-      override protected def kamaErPeriod: Int = kamaErBars
-      override protected def kamaFast: Int = kamaFastBars
-      override protected def kamaSlow: Int = kamaSlowBars
+  /** 效率比 ER 的 K 线 (细粒度), 同样由中间价逐笔聚合。
+    *
+    * 混入的是 [[EfficiencyRatio]] 而不是 [[hft.indicator.Kama]]：判据只需要 ER 这个体制读数，
+    * 不需要 KAMA 那条均线。混 Kama 会带进 fast/slow 两个**配了也不生效**的参数
+    * (它们只决定那条我们不读的均线走多快) —— 那种"看着能调、其实没用"的旋钮是陷阱。 */
+  private val erKlines =
+    new KlineSeries(erBarMs, math.max(erPeriodBars * 4, 64)) with EfficiencyRatio:
+      override protected def erPeriod: Int = erPeriodBars
 
   private var exposure: Option[OptionExposure] = None
   private val leg = QuoteLeg(cancelConfirmMs)
@@ -100,10 +101,10 @@ final class DeltaHedgeStrategy(
     * 方向恒为 0, 死区退化为对称 —— 那条规则在最需要它的启动期缺席。 */
   def prewarmMacd(bars: Seq[(Double, Double, Double)]): Unit = feed(macdKlines, bars, macdBarMs)
 
-  /** ER 的启动预热 (历史 `kamaBarMs` 粒度 K 线, 最旧->最新)。
+  /** ER 的启动预热 (历史 `erBarMs` 粒度 K 线, 最旧->最新)。
     *
     * 这是把它建在**标的价**上换来的：价格历史交易所有，敞口历史没有。开机即就绪。 */
-  def prewarmKama(bars: Seq[(Double, Double, Double)]): Unit = feed(kamaKlines, bars, kamaBarMs)
+  def prewarmEr(bars: Seq[(Double, Double, Double)]): Unit = feed(erKlines, bars, erBarMs)
 
   private def feed(series: KlineSeries, bars: Seq[(Double, Double, Double)], barMs: Long): Unit =
     bars.zipWithIndex.foreach { case ((h, l, c), i) =>
@@ -121,7 +122,7 @@ final class DeltaHedgeStrategy(
     }
     .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, now) =>
       macdKlines.update(b.timestamp, b.midPrice.value)
-      kamaKlines.update(b.timestamp, b.midPrice.value) // ER 逐笔即时更新, 无"一根 bar 内冻结"的盲区
+      erKlines.update(b.timestamp, b.midPrice.value) // ER 逐笔即时更新, 无"一根 bar 内冻结"的盲区
       manage(b, now, ctx)
     }
     // 敞口读数按交易所路由, 币种在载荷里 -> 自行判别
@@ -142,7 +143,7 @@ final class DeltaHedgeStrategy(
     *     时间戳盖的就是本地墙钟，拿交易所时钟去减就是在测量两地的时钟偏斜。
     */
   private def manage(bbo: BBO, localNow: Timestamp, ctx: StrategyContext): Vector[AnyEvent] =
-    val style = quotes.styleFor(kamaKlines.efficiencyRatio)
+    val style = quotes.styleFor(erKlines.efficiencyRatio)
     leg.step(bbo.timestamp, style) match
       case QuoteLeg.Step.Blocked => Vector.empty
       case QuoteLeg.Step.Requote(ref, why) =>
@@ -173,7 +174,7 @@ final class DeltaHedgeStrategy(
           val perp = ss.positionSize(exchange)          // 自己的对冲仓位
           val net = e.delta + perp                       // 真实净敞口 —— 判据与下单量的唯一依据
           val macdDir = macdKlines.macdDirection         // 预热不足 = 0 -> 死区对称, 不猜方向
-          val er = kamaKlines.efficiencyRatio            // 预热不足 = None -> 体制系数 1.0, 不猜体制
+          val er = erKlines.efficiencyRatio            // 预热不足 = None -> 体制系数 1.0, 不猜体制
           val (upTh, downTh) = band.bands(DeltaCtx(net, macdDir, er))
           val breached = net > upTh || net < -downTh
           if !breached then Vector.empty

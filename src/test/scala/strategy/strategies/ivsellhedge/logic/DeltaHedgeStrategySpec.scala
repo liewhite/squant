@@ -29,13 +29,13 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
 
   private def strat(
       band: DeltaBand,
-      kamaEr: Int = 3,
+      erBars: Int = 3,
       minQty: Coin = Coin(0.001),
       maxQty: Coin = Coin(Double.MaxValue),
       staleMs: Long = 0L,
       quotes: QuotePolicy = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)),
   ) = DeltaHedgeStrategy(ex, sym, ccy, band,
-    kamaBarMs = minute, kamaErBars = kamaEr, macdBarMs = 3_600_000L,
+    erBarMs = minute, erPeriodBars = erBars, macdBarMs = 3_600_000L,
     quotes = quotes, minHedgeQty = minQty, maxHedgeQty = maxQty, maxExposureStaleMs = staleMs)
 
   private def feed(runner: StrategyRunner, ev: AnyEvent, localTs: Timestamp = -1): Vector[OutcomeEvent] =
@@ -69,7 +69,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
 
   /** 用历史 K 线把 KAMA 预热到给定价位 (每根 h=l=c), 再喂上盘口 */
   private def runnerPrewarmed(s: DeltaHedgeStrategy, px: Double = 3000.0, bars: Int = 40): StrategyRunner =
-    s.prewarmKama(Seq.fill(bars)((px, px, px)))
+    s.prewarmEr(Seq.fill(bars)((px, px, px)))
     runnerWith(s)
 
   test("敞口读数未到达 -> 不对冲 (不拿一个不存在的 delta 决策)"):
@@ -126,16 +126,16 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
     assert(math.abs(o.quantity.value - 0.6) < 1e-12, s"qty=${o.quantity.value}")
 
   test("对冲量超 maxHedgeQty 硬上限 -> 不下单 (疑似 delta 计算 bug)"):
-    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 50, maxQty = Coin(1.0)))
+    val r = runnerWith(strat(Fixed(0.1, 0.1), erBars = 50, maxQty = Coin(1.0)))
     assertEquals(feed(r, exposure(5.0, 10)), Vector.empty)
 
   test("敞口读数陈旧 -> 暂停对冲 (宁可不动也不按过期 delta 乱挂)"):
-    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 50, staleMs = 1000))
+    val r = runnerWith(strat(Fixed(0.1, 0.1), erBars = 50, staleMs = 1000))
     // 读数时间戳 10, 本地处理时刻 5000 -> 陈旧 4990ms > 1000ms
     assertEquals(feed(r, exposure(0.5, 10), localTs = 5000), Vector.empty)
 
   test("挂单未成交超 requoteMs -> 撤单 (下一 tick 按新价重挂)"):
-    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 50))
+    val r = runnerWith(strat(Fixed(0.1, 0.1), erBars = 50))
     feed(r, exposure(0.5, 10))
     feed(r, Event.stamped(Topics.OrderUpdate,
       OrderUpdate(AccountId.Live, "o1", Some("c1"), ex, sym, Side.Short, OrderStatus.Pending, 3030.0, 0.5, 0.0, 0.0, 1000),
@@ -146,12 +146,12 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
       case other                                       => fail(s"expected CancelOrder, got $other")
 
   test("下单到确认之间不重复下单"):
-    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 50))
+    val r = runnerWith(strat(Fixed(0.1, 0.1), erBars = 50))
     assert(feed(r, exposure(0.5, 10)).nonEmpty)
     assertEquals(feed(r, exposure(0.5, 11)), Vector.empty)
 
   test("被动挂单在盘口外侧 (PostOnly 不吃单)"):
-    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 50))
+    val r = runnerWith(strat(Fixed(0.1, 0.1), erBars = 50))
     placed(feed(r, exposure(0.5, 10))).orderType match
       case OrderType.Limit(px, tif) =>
         assertEquals(tif, TimeInForce.PostOnly)
@@ -159,7 +159,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
       case other => fail(s"expected Limit, got $other")
 
   test("别的币种的敞口读数不参与决策"):
-    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 50))
+    val r = runnerWith(strat(Fixed(0.1, 0.1), erBars = 50))
     val other = Event.stamped(OptionExposureTopic,
       OptionExposure(ex, "BTC", Coin(5.0), Coin(0.0), Coin(0.0), Price(60000), 1, 10), 10, 10)
     assertEquals(feed(r, other), Vector.empty)
@@ -202,7 +202,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
     case other                  => fail(s"expected Limit, got $other")
 
   test("价格来回折返 (ER 低) -> 被动挂在 ask 之上, PostOnly"):
-    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 3, quotes = byEr))
+    val r = runnerWith(strat(Fixed(0.1, 0.1), erBars = 3, quotes = byEr))
     val prices = (1 to 16).map(i => if i % 2 == 0 then 3010.0 else 2990.0)
     val orders = ordersOverPrices(r, prices)
     assert(orders.sizeIs >= 2, s"应触发多次, 实为 ${orders.size}")
@@ -211,7 +211,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
     assert(math.abs(pxOf(orders.last) - lastPx * 1.01) < 1e-6, s"被动卖价应在 ask 之上, 实为 ${pxOf(orders.last)}")
 
   test("价格单边走 (ER 高) -> 跨价挂在 bid 之下, GTC"):
-    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 3, quotes = byEr))
+    val r = runnerWith(strat(Fixed(0.1, 0.1), erBars = 3, quotes = byEr))
     val prices = (1 to 16).map(i => 3000.0 + i * 5.0)
     val orders = ordersOverPrices(r, prices)
     assert(orders.sizeIs >= 2, s"应触发多次, 实为 ${orders.size}")
@@ -219,18 +219,18 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
     assert(math.abs(pxOf(orders.last) - prices.last * 0.999) < 1e-6, s"跨价卖价应在 bid 之下, 实为 ${pxOf(orders.last)}")
 
   test("ER 未预热 -> 按单边处理 (裸着敞口比多付手续费贵)"):
-    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 50, quotes = byEr))
+    val r = runnerWith(strat(Fixed(0.1, 0.1), erBars = 50, quotes = byEr))
     assertEquals(tifOf(placed(feed(r, exposure(0.5, 10)))), TimeInForce.GTC)
 
   test("KAMA 用历史 K 线预热 -> 开机即就绪, 不再有头几十分钟的盲区"):
     // 预热成一段单边上行的历史 -> ER 高 -> 首单就按单边处理; 且平滑价已可用
-    val s1 = strat(Fixed(0.1, 0.1), kamaEr = 3, quotes = byEr)
-    s1.prewarmKama((1 to 20).map(i => { val p = 3000.0 + i * 5.0; (p, p, p) }))
+    val s1 = strat(Fixed(0.1, 0.1), erBars = 3, quotes = byEr)
+    s1.prewarmEr((1 to 20).map(i => { val p = 3000.0 + i * 5.0; (p, p, p) }))
     val trending = runnerWith(s1)
     assertEquals(tifOf(placed(feed(trending, exposure(2.0, 10, gamma = 0.0)))), TimeInForce.GTC)
     // 预热成来回折返的历史 -> ER 低 -> 首单就按平缓处理 (未预热时这里会是 GTC)
-    val s2 = strat(Fixed(0.1, 0.1), kamaEr = 3, quotes = byEr)
-    s2.prewarmKama((1 to 20).map(i => { val p = if i % 2 == 0 then 3010.0 else 2990.0; (p, p, p) }))
+    val s2 = strat(Fixed(0.1, 0.1), erBars = 3, quotes = byEr)
+    s2.prewarmEr((1 to 20).map(i => { val p = if i % 2 == 0 then 3010.0 else 2990.0; (p, p, p) }))
     val chopping = runnerWith(s2)
     assertEquals(tifOf(placed(feed(chopping, exposure(2.0, 10, gamma = 0.0)))), TimeInForce.PostOnly,
       "预热带来的就绪状态直接决定首单的报价方式")
@@ -245,9 +245,9 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
     val band = DeltaBand.adaptive(Coin(0.4), macdTighten = 1.0, chopWiden = 2.0, trendTighten = 0.5)
     def run(prewarmPrices: Seq[Double], exposureEth: Double): Vector[OutcomeEvent] =
       val st = DeltaHedgeStrategy(ex, sym, ccy, band,
-        kamaBarMs = minute, kamaErBars = 3, macdBarMs = 3_600_000L,
+        erBarMs = minute, erPeriodBars = 3, macdBarMs = 3_600_000L,
         quotes = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)))
-      st.prewarmKama(prewarmPrices.map(p => (p, p, p)))
+      st.prewarmEr(prewarmPrices.map(p => (p, p, p)))
       feed(runnerWith(st), exposure(exposureEth, 10))
     val chop = (1 to 20).map(i => if i % 2 == 0 then 3010.0 else 2990.0)  // ER≈0 -> 阈值 0.8
     val trend = (1 to 20).map(i => 3000.0 + i * 5.0)                      // ER≈1 -> 阈值 0.2
@@ -258,8 +258,8 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
   test("真实敞口有上界: 无论 ER 怎么走, 超过 base×chopWiden 必然对冲"):
     val band = DeltaBand.adaptive(Coin(0.4), macdTighten = 1.0, chopWiden = 2.0, trendTighten = 0.5)
     val st = DeltaHedgeStrategy(ex, sym, ccy, band,
-      kamaBarMs = minute, kamaErBars = 3, macdBarMs = 3_600_000L,
+      erBarMs = minute, erPeriodBars = 3, macdBarMs = 3_600_000L,
       quotes = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)))
-    st.prewarmKama((1 to 20).map(i => { val p = if i % 2 == 0 then 3010.0 else 2990.0; (p, p, p) })) // 最放宽的体制
+    st.prewarmEr((1 to 20).map(i => { val p = if i % 2 == 0 then 3010.0 else 2990.0; (p, p, p) })) // 最放宽的体制
     val o = placed(feed(runnerWith(st), exposure(0.81, 10)))
     assertEquals(o.quantity, Coin(0.81), "超过上界 0.8 -> 必然对冲, 且量是真实敞口")

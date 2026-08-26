@@ -10,9 +10,9 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
 
   test("K 线粒度只配一处, 毫秒由它派生 (MACD 与 KAMA 各一条)"):
     assertEquals(tuning.copy(macdBar = "1H").macdBarMs, 3_600_000L)
-    assertEquals(tuning.copy(kamaBar = "1m").kamaBarMs, 60_000L)
-    assertEquals(tuning.copy(kamaBar = "5m").kamaBarMs, 300_000L)
-    intercept[RuntimeException](tuning.copy(kamaBar = "7m").kamaBarMs)
+    assertEquals(tuning.copy(erBar = "1m").erBarMs, 60_000L)
+    assertEquals(tuning.copy(erBar = "5m").erBarMs, 300_000L)
+    intercept[RuntimeException](tuning.copy(erBar = "7m").erBarMs)
     assertEquals(tuning.copy(macdBar = "5m").macdBarMs, 300_000L)
     assertEquals(tuning.copy(macdBar = "1D").macdBarMs, 86_400_000L)
 
@@ -55,7 +55,7 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
         assertEquals(c.tuning.macdBar, "1H")
         assertEquals(c.tuning.enableOpen, false)
         assertEquals(c.tuning.macdFast, 12)  // 模板未列出 -> 默认值
-        assertEquals(c.tuning.kamaBar, "1m")
+        assertEquals(c.tuning.erBar, "1m")
         assertEquals(c.tuning.passiveTtlMs, 60_000L)
         assertEquals(c.tuning.crossTtlMs, 1000L)
         assertEquals(c.simulated, true)
