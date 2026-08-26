@@ -154,7 +154,7 @@ final case class MarketTrade(
     timestamp: Timestamp,
 )
 
-/** 成交事件 (用于乐观更新仓位) */
+/** 一笔成交的明细。仓位不由它维护 —— 那是柜台账本的事 */
 final case class Fill(
     account: AccountId,
     exchange: Exchange,

@@ -53,7 +53,11 @@ object Topics:
   object OrderUpdate extends Topic[AccountInstrument, hft.domain.OrderUpdate]("orderUpdate"):
     def keyOf(p: hft.domain.OrderUpdate): AccountInstrument = AccountInstrument(p.account, instrumentOf(p.exchange, p.symbol))
 
-  /** 本账户成交 (乐观更新仓位的依据) */
+  /** 本账户成交明细。
+    *
+    * **不是仓位的依据** —— 仓位由柜台的账本维护 (见 [[hft.exchange.TradingGateway]])，
+    * 这一条是给要看成交本身的人：绩效统计、成交记录、滑点分析。
+    * 框架不给策略补齐它，要就自己声明。 */
   object Fill extends Topic[AccountInstrument, hft.domain.Fill]("fill"):
     def keyOf(p: hft.domain.Fill): AccountInstrument = AccountInstrument(p.account, instrumentOf(p.exchange, p.symbol))
 

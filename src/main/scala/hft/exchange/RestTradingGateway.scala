@@ -205,11 +205,12 @@ final class RestTradingGateway(
           throw IllegalStateException(s"撤单结果不确定, 终止: $exchange $symbol ${ref.raw} ${e.message}")
     }
 
-  /** 账户归属由柜台盖章，不信客户端填的那个 —— 各家适配层历史上都硬编码成实盘，
-    * 而"这份回报属于哪个账户"是装配期的事实，只有柜台知道。 */
   /** 拉真实持仓并**据此重置账本** —— 对齐是账本唯一的权威初值来源。
     *
     * 这也是漂移之后的修复入口：REST 是快照，不参与推送的流竞争。
+    *
+    * 账户归属由柜台盖章，不信客户端填的那个 —— 各家适配层历史上都硬编码成实盘，
+    * 而"这份回报属于哪个账户"是装配期的事实，只有柜台知道。
     */
   override protected def syncPositions(symbols: Set[Symbol]): Vector[Position] =
     client.fetchPositions() match
