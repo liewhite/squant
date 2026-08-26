@@ -30,7 +30,12 @@ object Price:
     inline def >(o: Price): Boolean = (p: Double) > (o: Double)
     inline def >=(o: Price): Boolean = (p: Double) >= (o: Double)
     inline def isZero: Boolean = math.abs(p) < 1e-12
-    inline def isNaN: Boolean = (p: Double).isNaN
+    /** 是否 NaN。走 `java.lang.Double.isNaN` 而不是 `x.isNaN`：opaque type 在自己的伴生对象内部
+      * 是透明的 (就是 `Double`)，而 `Double.isNaN` 本身是经隐式转换到 `RichDouble` 拿到的 ——
+      * 本扩展方法在此处优先级更高，于是 `x.isNaN` 解析回它自己。因为是 `inline`，症状是调用点
+      * 报 "Maximal number of successive inlines exceeded"，即**这个方法压根调不动**。
+      * 静态方法没有接收者，不参与这场解析。 */
+    inline def isNaN: Boolean = java.lang.Double.isNaN(p)
     /** 按比例缩放（挂单偏移、滑点等），仍是价格。
       * 只接受裸 double 系数 —— 两个 Price 相乘没有意义，而 opaque 在外部不与 Double 兼容，
       * 所以 `price * price` 根本写不出来。 */
@@ -97,7 +102,8 @@ object Coin:
     inline def pnl(entry: Price, mark: Price): Notional = Notional(c * (mark - entry).value)
     /** 按比例缩放（杠杆、分档等），仍是数量 */
     inline def scaled(k: Double): Coin = c * k
-    inline def isNaN: Boolean = (c: Double).isNaN
+    /** 是否 NaN (为何不写 `c.isNaN`：见 [[Price.isNaN]]) */
+    inline def isNaN: Boolean = java.lang.Double.isNaN(c)
 
   extension (xs: IterableOnce[Coin]) def sumCoin: Coin = xs.iterator.foldLeft(Coin.Zero)(_ + _)
 
@@ -138,7 +144,8 @@ object Notional:
     inline def quantityAt(price: Price): Coin = Coin(n / price.value)
     /** 名义额 ÷ 数量 = 单价。用于加权平均成本一类的换算 */
     inline def pricePer(qty: Coin): Price = Price(n / qty.value)
-    inline def isNaN: Boolean = (n: Double).isNaN
+    /** 是否 NaN (为何不写 `n.isNaN`：见 [[Price.isNaN]]) */
+    inline def isNaN: Boolean = java.lang.Double.isNaN(n)
 
   extension (xs: IterableOnce[Notional]) def sumNotional: Notional = xs.iterator.foldLeft(Notional.Zero)(_ + _)
 
