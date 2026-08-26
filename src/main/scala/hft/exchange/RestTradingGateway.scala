@@ -73,7 +73,7 @@ final class RestTradingGateway(
   /** 把一条账户变动翻译成总线上的回报。**顺序在这里构造**：账本一变就先发仓位快照。 */
   private def handle(report: AccountReport, now: Timestamp): Vector[AnyEvent] = report match
     case AccountReport.Executed(orderId, symbol, side, price, cumulativeQty, ts) =>
-      settleUpTo(orderId, symbol, side, price, cumulativeQty, ts)
+      settleUpTo(orderId, symbol, side, price, cumulativeQty, ts, now)
 
     case AccountReport.OrderStatusChanged(orderId, clientOrderId, symbol, side, status, price, avgFillPrice, quantity, filledQuantity, ts) =>
       // 有些交易所只在订单回报里给得出累计成交量 (Bybit 的 order 频道)。先按它补记账，
@@ -82,10 +82,10 @@ final class RestTradingGateway(
       // 平仓时算出一笔巨额假亏损, 而净值从此失真、没有任何报错。
       val settlement =
         if filledQuantity.isZero then Vector.empty
-        else settleUpTo(orderId, symbol, side, avgFillPrice, filledQuantity, ts)
+        else settleUpTo(orderId, symbol, side, avgFillPrice, filledQuantity, ts, now)
       if status.isTerminal then
-        settled.updateWith(orderId)(_.map(_.copy(terminalAt = Some(ts))))
-        evictSettled(ts)
+        settled.updateWith(orderId)(_.map(_.copy(terminalAt = Some(now))))
+        evictSettled(now)
       val update = OrderUpdate(account, orderId, clientOrderId, exchange, symbol, side, status, price, quantity, filledQuantity, ts)
       settlement :+ Event.stamped(Topics.OrderUpdate, update, ts, now)
 
@@ -113,12 +113,13 @@ final class RestTradingGateway(
       price: Price,
       cumulativeQty: Coin,
       ts: Timestamp,
+      now: Timestamp,
   ): Vector[AnyEvent] =
     val already = settled.get(orderId).map(_.cumulative).getOrElse(Coin.Zero)
     val delta = cumulativeQty - already
     // 半个最小变动单位以下视作零: 本地累加出来的累计量会带浮点尾巴 (0.3 + 0.5 = 0.8000000000000001),
     // 严格比较会让它产出一笔量级 1e-17 的幻影成交, 连带一条幻影仓位事件和一行流水。
-    val dust = metas.get(symbol).map(_.sizeStep / 2).getOrElse(0.0)
+    val dust = dustOf(symbol)
     if delta.value <= dust then
       if delta.value < -dust then
         // 累计量倒退是不该发生的事。静默忽略等于放弃了发现它的机会 —— 它意味着
@@ -126,44 +127,66 @@ final class RestTradingGateway(
         logger.warn(s"累计成交量倒退 $target $symbol order=$orderId: 已记 ${already.value} 收到 ${cumulativeQty.value}, 本条不记账")
       Vector.empty
     else
+      if price.value <= 0.0 then
+        // 修过一次的 bug 值得一道守卫: 拿委托价 (市价单为空) 记账会把持仓均价记成 0,
+        // 平仓时算出巨额假亏损而毫无报错。以后任何适配层填错价格字段, 这里立刻可见。
+        logger.error(
+          s"!!! $target $symbol order=$orderId 成交价为 ${price.value}, 拒绝入账 —— " +
+            "记零价会污染持仓均价与已实现盈亏; 这多半是适配层填了委托价而非成交均价"
+        )
+        return Vector.empty
       settled(orderId) = settled.get(orderId) match
         case Some(prev) => prev.copy(cumulative = cumulativeQty)
-        case None       => RestTradingGateway.Settlement(cumulativeQty, firstSeenAt = nowMs, terminalAt = None)
-      // 用本地时钟: 它要跟 reconcile 里的本地 now 相减, 混用交易所时钟会让时钟偏斜
-      // 伸缩那个静默窗口
-      lastSettledAt = nowMs
+        case None       => RestTradingGateway.Settlement(cumulativeQty, firstSeenAt = now, terminalAt = None)
+      // 一律用**本地**时刻 now (由 actor 传入): 它要跟对账里的 now 相减, 混用交易所时钟
+      // 会让时钟偏斜伸缩那个静默窗口
+      lastSettledAt = now
       ledger = ledger.applyFill(exchange, symbol, side, price, delta)
       val position = positionOf(symbol)
       logger.info(
         s"成交入账 $target $symbol $side ${delta.value} @ ${price.value} -> 仓位 ${position.size.value} (order=$orderId)"
       )
-      // localTs 一律取本地时刻 —— 它是延迟度量的基准, 盖成交易所时间会让这批事件看起来零延迟
-      val local = nowMs
+      // localTs 取本地时刻 —— 它是延迟度量的基准, 盖成交易所时间会让这批事件看起来零延迟
       Vector(
-        Event.stamped(Topics.Position, position.copy(unrealizedPnl = 0.0), ts, local),
-        Event.stamped(Topics.Fill, Fill(account, exchange, symbol, side, price, delta, ts), ts, local),
+        TradingGateway.positionEvent(position, ts, now),
+        Event.stamped(Topics.Fill, Fill(account, exchange, symbol, side, price, delta, ts), ts, now),
       )
 
-  /** 清记账进度。两类各有理由：
-    *   - **已终态且过了保留期**：晚到的成交不会再来了，留着只是占地方
-    *   - **有成交却长期没等到终态**：只可能是终态推送丢了。清掉它，并**报出来** ——
-    *     丢推送这件事本身比那点内存重要得多
+  /** 清记账进度 —— **只清已终态且过了保留期的**。
+    *
+    * 非终态的条目**永远不清**，哪怕它看起来已经很久没动静：在累计量记账的体系里，
+    * 清掉一张还活着的订单的进度，下一条带真累计量的回报就会以"已记 0"重新记一遍，
+    * **此前入账的全部数量再记一次** —— 仓位近乎翻倍，且没有自愈路径。
+    * 而"部分成交之后继续挂着"是完全正常的形态 (GTC、冰山单)，按"存在多久"去判它是不是
+    * 僵尸，判据本身就不成立。
+    *
+    * 长期没动静的非终态条目只**告警**：那通常意味着丢了一条订单推送，值得查。
+    * 条目本身几十字节，真丢了推送的订单本就该人工介入，重启对齐时自然清零。
     *
     * 在订单终态与对账两处触发。只靠终态触发的话，一段时间没有订单终态就不清了。
     */
   private def evictSettled(now: Timestamp): Unit =
     settled.filterInPlace { (orderId, s) =>
       s.terminalAt match
-        case Some(at) => now - at <= RestTradingGateway.SettledRetentionMs
-        case None =>
-          val stale = now - s.firstSeenAt > RestTradingGateway.StaleSettlementMs
-          if stale then
+        case Some(_) => RestTradingGateway.retains(s, now)
+        case None    =>
+          if now - s.firstSeenAt > RestTradingGateway.StaleSettlementMs && !s.staleWarned then
+            settled(orderId) = s.copy(staleWarned = true) // 只报一次, 别每次对账都刷
             logger.warn(
-              s"$target order=$orderId 有成交 ${s.cumulative.value} 却始终没等到终态回报, " +
-                "清掉记账进度 —— 这通常意味着丢了一条订单推送, 值得查"
+              s"$target order=$orderId 有成交 ${s.cumulative.value} 却长期没等到终态回报 —— " +
+                "通常意味着丢了一条订单推送, 值得查。记账进度保留 (清掉会让下一条累计量从零重记, 仓位翻倍)"
             )
-          !stale
+          true
     }
+
+  /** 视作零的量级 —— **币本位**。
+    *
+    * `sizeStep` 是**张**，而这里比的是币 (见 [[SymbolMeta.minOrderSize]] 的说明)：
+    * 直接拿它当阈值，在 contractSize=0.01 的品种上会把阈值放大一百倍，
+    * 于是真实成交被静默丢弃 —— 不入账、不发回报、连告警都没有。
+    */
+  private def dustOf(symbol: Symbol): Double =
+    metas.get(symbol).map(meta => meta.toCoin(Contracts(meta.sizeStep)).value / 2).getOrElse(0.0)
 
   private def positionOf(symbol: Symbol): Position =
     ledger.positions.getOrElse(symbol, Position.empty(account, exchange, symbol))
@@ -189,8 +212,8 @@ final class RestTradingGateway(
     if !syncedSymbols.contains(symbol) then return
     if now - lastSettledAt < RestTradingGateway.ReconcileQuietMs then return
     val mine = positionOf(symbol).size
-    // 3. 容差取一个最小变动单位: 更小的差异是浮点噪声, 不是漂移
-    val tolerance = metas.get(symbol).map(_.sizeStep).getOrElse(0.0)
+    // 3. 容差取一个最小变动单位 (换到币本位域, 理由同 dustOf): 更小的差异是浮点噪声, 不是漂移
+    val tolerance = dustOf(symbol) * 2
     if (mine - reported).abs.value > tolerance then
       logger.error(
         s"!!! 仓位漂移 $target $symbol (交易所读数时刻 $reportedAt): 本地账本=${mine.value} 交易所=${reported.value} " +
@@ -268,7 +291,20 @@ final class RestTradingGateway(
 
 object RestTradingGateway:
   /** 一张订单的记账进度。`terminalAt` 有值表示已终态，只等过保留期被清掉 */
-  private final case class Settlement(cumulative: Coin, firstSeenAt: Timestamp, terminalAt: Option[Timestamp])
+  private[exchange] final case class Settlement(
+      cumulative: Coin,
+      firstSeenAt: Timestamp,
+      terminalAt: Option[Timestamp],
+      staleWarned: Boolean = false,
+  )
+
+  /** 这条记账进度此刻还该不该留着 —— [[RestTradingGateway.evictSettled]] 的判据。
+    *
+    * 提成纯函数是为了测得动：判据错了 (清掉活着的订单) 的后果是仓位翻倍，
+    * 而那要在实盘上跑一小时才看得见。
+    */
+  private[exchange] def retains(settlement: Settlement, now: Timestamp): Boolean =
+    settlement.terminalAt.forall(at => now - at <= SettledRetentionMs)
 
   /** 订单终态后，记账进度还要留多久。
     *
@@ -277,10 +313,10 @@ object RestTradingGateway:
     */
   val SettledRetentionMs: Long = 60_000
 
-  /** 一张单最久能停在"有成交、无终态"多长时间。
+  /** 一张单停在"有成交、无终态"多久之后值得报一句。
     *
-    * 超过它只可能是终态推送丢了 —— 那本身值得报出来，而条目也不能一直攒着。
-    * 取一小时：正常的挂单再久也会有状态回报，GTC 单挂着不动则压根不会进这张表 (没有成交)。
+    * **只报，不清** (见 [[RestTradingGateway.evictSettled]])。取一小时：分批成交的挂单
+    * 挂上几小时是正常的，所以这条告警是"值得看一眼"而不是"一定有问题"。
     */
   val StaleSettlementMs: Long = 60 * 60 * 1000
 

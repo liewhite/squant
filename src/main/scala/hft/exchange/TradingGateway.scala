@@ -211,8 +211,11 @@ object TradingGateway:
     * 是有意的 —— 一边有值一边没有，策略读到的东西就随部署形态而变。要盈亏读
     * [[Topics.AccountInfo]] 的净值，那是柜台确实算得出的。
     */
-  def positionEvent(position: Position, now: Timestamp): AnyEvent =
-    Event.stamped(Topics.Position, position.copy(unrealizedPnl = 0.0), now, now)
+  def positionEvent(position: Position, exchangeTs: Timestamp, localTs: Timestamp): AnyEvent =
+    Event.stamped(Topics.Position, position.copy(unrealizedPnl = 0.0), exchangeTs, localTs)
+
+  /** 两个时间戳同源的简写 —— 本地产生的仓位快照 (对齐、虚拟柜台撮合) 用它 */
+  def positionEvent(position: Position, now: Timestamp): AnyEvent = positionEvent(position, now, now)
 
   /** 把一次对齐的结果组装成事件序列 —— **真假柜台同一份**。
     *

@@ -107,6 +107,7 @@ private[bybit] object BybitCodec:
       symbol: String = "",
       orderId: String = "",    // 累计成交量按订单聚合, 故必须有它
       execId: String = "",     // 单笔成交的唯一标识 —— 本地累加前按它去重, 否则重复推送会多记一笔
+      execType: String = "",   // Trade/AdlTrade/Funding/BustTrade/Delivery/Settle —— 只有真成交才算
       side: String = "",       // Buy/Sell
       execQty: String = "0",   // 本次成交 (币本位)；本频道不给累计量
       execPrice: String = "0",

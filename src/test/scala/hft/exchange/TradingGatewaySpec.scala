@@ -149,6 +149,34 @@ class TradingGatewaySpec extends munit.FunSuite:
       assertEquals(kinds(seen), Vector("position", "fill"), "尾巴不该被当成一笔新成交")
     }
 
+  test("contractSize != 1: 容差换到币本位域, 小额真实成交不被吞掉"):
+    // sizeStep 是**张**, 而增量是币。直接拿 sizeStep 当阈值, 在 contractSize=0.01 的品种上
+    // 阈值被放大一百倍 —— 真实成交静默丢弃, 不入账、不发回报、连告警都没有。
+    val coarse = SymbolMeta(Exchange.Binance, "BTCUSDT", tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = 0.01)
+    supervised:
+      val bus = EventBus()
+      val seen = ConcurrentLinkedQueue[AnyEvent]()
+      val mailbox = bus.subscribe(Set(Interest.All(Topics.Fill)))
+      ox.forkDiscard { mailbox.events.foreach(seen.add) }
+      val feed = ManualFeed()
+      ActorSystem(bus).spawn(RestTradingGateway(QuietClient(), feed, AccountId.Live, Map("BTCUSDT" -> coarse)))
+
+      feed.emit(executed("o1", cumulative = 0.03)) // 3 张 = 0.03 币; 旧的错误阈值是 0.5 币
+      eventually("小额成交应照常入账")(seen.size == 1)
+      assertEqualsDouble(seen.asScala.head.as(Topics.Fill).get.size.value, 0.03, 1e-12)
+
+  test("清理判据: 活着的订单永不清, 终态过了保留期才清"):
+    // 清掉一张还活着的订单的记账进度, 下一条累计量会以"已记 0"重新记一遍 ——
+    // 此前入账的全部数量再记一次, 仓位近乎翻倍且没有自愈路径。
+    val active = RestTradingGateway.Settlement(Coin(0.5), firstSeenAt = 0L, terminalAt = None)
+    val justDone = RestTradingGateway.Settlement(Coin(0.5), firstSeenAt = 0L, terminalAt = Some(1_000L))
+    val longDone = RestTradingGateway.Settlement(Coin(0.5), firstSeenAt = 0L, terminalAt = Some(1_000L))
+
+    val muchLater = 1_000L + RestTradingGateway.StaleSettlementMs * 2
+    assert(RestTradingGateway.retains(active, muchLater), "非终态的永远留着, 哪怕很久没动静")
+    assert(RestTradingGateway.retains(justDone, 1_000L + RestTradingGateway.SettledRetentionMs), "保留期内还要留着接晚到的成交")
+    assert(!RestTradingGateway.retains(longDone, 1_000L + RestTradingGateway.SettledRetentionMs + 1), "过了保留期就该清")
+
   test("交易所报的仓位不进总线 —— 总线上的仓位只有账本一个来源"):
     withFeed { (feed, seen) =>
       feed.emit(AccountReport.PositionReported("BTCUSDT", Coin(9.9), 1L))

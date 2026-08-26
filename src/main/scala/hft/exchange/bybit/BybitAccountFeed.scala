@@ -20,9 +20,11 @@ object BybitAccountFeed:
   private object OrderExecutions:
     def empty(now: Long): OrderExecutions = OrderExecutions(0.0, Set.empty, now)
 
-  /** 本地累加器最久留多久 —— 终态推送丢了的话没人来清它。
-    * 柜台侧同样会发现并告警 (见 RestTradingGateway.StaleSettlementMs)，这里只管不泄漏。 */
-  private val ExecutionRetentionMs: Long = 60 * 60 * 1000
+  /** 算作真实成交的执行类型。其余 (资金费、结算) 不进账本 */
+  private val TradeExecTypes: Set[String] = Set("Trade", "AdlTrade", "BustTrade", "Delivery", "BlockTrade", "")
+
+  /** 明确不是成交的执行类型 —— 见到它们静默跳过，不必告警 */
+  private val NonTradeExecTypes: Set[String] = Set("Funding", "Settle", "SessionSettlePnl", "MovePosition")
 
   /** auth 帧 expires 相对当前时间的前移量 (ms)，给握手留出窗口 */
   val AuthExpiresBufferMs: Long = 10_000
@@ -113,8 +115,18 @@ final class BybitAccountFeed(
     case "ping" | "pong" => () // 心跳响应
     case other           => logger.warn(s"ignoring Bybit private op '$other': $text")
 
-  /** 单笔成交 -> 累计成交量。本频道只给本次量，累计在这里攒 (按 execId 去重) */
+  /** 单笔成交 -> 累计成交量。本频道只给本次量，累计在这里攒 (按 execId 去重)。
+    *
+    * **先按 execType 筛**：本频道推的不只是成交 —— 资金费结算 (Funding) 与交割结算 (Settle)
+    * 也走这里，而它们的 execQty 是仓位量不是成交量。把它们累进去，账本会凭空多出
+    * 一整笔仓位大小的"成交"。
+    */
   private def publishExecution(d: ExecutionData): Unit =
+    if !BybitAccountFeed.TradeExecTypes.contains(d.execType) then
+      // 未知类型也报出来: 交易所加了新的执行类型时, 宁可看见也别默默当成交算进去
+      if d.execType.nonEmpty && !BybitAccountFeed.NonTradeExecTypes.contains(d.execType) then
+        logger.warn(s"Bybit 未知 execType '${d.execType}', 不计入成交 (order=${d.orderId} qty=${d.execQty})")
+      return
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in execution: '${d.symbol}'"))
     val now = nowMs
     val prior = executedByOrder.getOrElse(d.orderId, BybitAccountFeed.OrderExecutions.empty(now))
@@ -140,11 +152,10 @@ final class BybitAccountFeed(
     val status = mapOrderStatus(d.orderStatus, filled)
     // 终态之后不会再有新成交, 清掉本地累加器。**晚到的那条 execution 由柜台兜住**:
     // 它的记账进度在终态后还留一分钟墓碑, 认得出"这笔已经记过了" (见 RestTradingGateway.settled)。
-    if status.isTerminal then
-      executedByOrder.remove(d.orderId)
-      // 顺带清掉终态推送丢了、没人来收的那些
-      val cutoff = nowMs - BybitAccountFeed.ExecutionRetentionMs
-      executedByOrder.filterInPlace((_, e) => e.lastSeenAt > cutoff)
+    // 只在**终态**清。非终态的绝不能清: 清掉本地累计, 下一笔成交会从零重攒, 报给柜台的
+    // 累计量就倒退了 —— 那一笔成交从此记不进账 (柜台只认增量为正的)。
+    // 分批成交的挂单挂上几小时是正常形态, 按"多久没动"去判它是不是僵尸, 判据本身不成立。
+    if status.isTerminal then executedByOrder.remove(d.orderId)
     report(AccountReport.OrderStatusChanged(
       orderId = d.orderId,
       clientOrderId = if d.orderLinkId.nonEmpty then Some(d.orderLinkId) else None,
