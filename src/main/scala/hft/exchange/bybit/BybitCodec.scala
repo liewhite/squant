@@ -100,11 +100,13 @@ private[bybit] object BybitCodec:
       price: String = "",      // 市价单为空
       qty: String = "0",
       cumExecQty: String = "0", // 累计成交 (币本位)
+      avgPrice: String = "0",   // 累计成交均价；未成交时为空。**记账用它, 不能用 price** (市价单 price 为空)
   )
 
   final case class ExecutionData(
       symbol: String = "",
       orderId: String = "",    // 累计成交量按订单聚合, 故必须有它
+      execId: String = "",     // 单笔成交的唯一标识 —— 本地累加前按它去重, 否则重复推送会多记一笔
       side: String = "",       // Buy/Sell
       execQty: String = "0",   // 本次成交 (币本位)；本频道不给累计量
       execPrice: String = "0",

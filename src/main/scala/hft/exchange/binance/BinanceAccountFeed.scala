@@ -94,6 +94,7 @@ final class BinanceAccountFeed(
       side = side,
       status = status,
       price = o.p.asPrice,
+      avgFillPrice = o.ap.asPrice, // 记账用它 —— 市价单的 o.p 是 0
       quantity = Coin(o.q.asDouble),
       filledQuantity = filledQty,
       timestamp = o.T,

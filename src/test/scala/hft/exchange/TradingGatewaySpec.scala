@@ -61,8 +61,18 @@ class TradingGatewaySpec extends munit.FunSuite:
   private def executed(orderId: String, cumulative: Double) =
     AccountReport.Executed(orderId, "BTCUSDT", Side.Long, Price(100.0), Coin(cumulative), 1L)
 
-  private def statusChanged(orderId: String, status: OrderStatus, filled: Double) =
-    AccountReport.OrderStatusChanged(orderId, Some("c1"), "BTCUSDT", Side.Long, status, Price(100.0), Coin(1.0), Coin(filled), 1L)
+  /** `orderPrice` 是委托价, `avgFill` 是成交均价 —— 两者刻意不同, 记账只能用后者 */
+  private def statusChanged(
+      orderId: String,
+      status: OrderStatus,
+      filled: Double,
+      orderPrice: Double = 100.0,
+      avgFill: Double = 100.0,
+  ) =
+    AccountReport.OrderStatusChanged(
+      orderId, Some("c1"), "BTCUSDT", Side.Long, status,
+      Price(orderPrice), Price(avgFill), Coin(1.0), Coin(filled), 1L,
+    )
 
   private def kinds(seen: ConcurrentLinkedQueue[AnyEvent]): Vector[String] =
     seen.asScala.toVector.map(ev =>
@@ -116,6 +126,27 @@ class TradingGatewaySpec extends munit.FunSuite:
       assertEquals(positionSizes(seen), Vector(0.3, 0.8))
       val fills = seen.asScala.toVector.flatMap(_.as(Topics.Fill)).map(_.size.value)
       assertEquals(fills, Vector(0.3, 0.5), "发出去的是增量, 不是累计")
+    }
+
+  test("订单回报触发的记账用**成交均价**, 不是委托价"):
+    // 市价单的委托价是空的 (多家给 0)。拿它记账会把持仓均价记成 0, 平仓时算出一笔
+    // 巨额假亏损 —— 净值从此失真, 而没有任何报错。
+    withFeed { (feed, seen) =>
+      feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.5, orderPrice = 0.0, avgFill = 101.5))
+      eventually(kinds(seen).toString)(kinds(seen).size == 3)
+      val fill = seen.asScala.toVector.flatMap(_.as(Topics.Fill)).head
+      assertEqualsDouble(fill.price.value, 101.5, 1e-12, "成交价必须来自成交侧, 不能是委托价")
+    }
+
+  test("本地累加的浮点尾巴不产生幻影成交"):
+    // 0.3 + 0.5 在浮点里是 0.8000000000000001。严格比较会让它产出一笔 1e-16 的成交,
+    // 连带一条幻影仓位事件和一行流水。
+    withFeed { (feed, seen) =>
+      feed.emit(executed("o1", cumulative = 0.8))
+      eventually("首笔应入账")(kinds(seen).size == 2)
+      feed.emit(executed("o1", cumulative = 0.3 + 0.5)) // = 0.8000000000000001
+      Thread.sleep(100)
+      assertEquals(kinds(seen), Vector("position", "fill"), "尾巴不该被当成一笔新成交")
     }
 
   test("交易所报的仓位不进总线 —— 总线上的仓位只有账本一个来源"):

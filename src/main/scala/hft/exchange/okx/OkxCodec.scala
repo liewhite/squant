@@ -108,6 +108,7 @@ private[okx] object OkxCodec:
       fillSz: String = "0", // 本次成交 (张)
       fillPx: String = "0",
       accFillSz: String = "0", // 累计成交 (张)
+      avgPx: String = "0",     // 累计成交均价；未成交时为空
   )
 
   // ==================== REST 响应 ====================

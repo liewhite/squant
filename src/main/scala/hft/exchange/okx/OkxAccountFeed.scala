@@ -151,6 +151,7 @@ final class OkxAccountFeed(
       side = side,
       status = mapOrderState(d.state, filledQty),
       price = Price(d.px.asDoubleOrZero),
+      avgFillPrice = Price(d.avgPx.asDoubleOrZero), // 记账用它 —— 市价单的 px 为空
       quantity = meta.toCoin(Contracts(d.sz.asDouble)),
       filledQuantity = filledQty,
       timestamp = ts,

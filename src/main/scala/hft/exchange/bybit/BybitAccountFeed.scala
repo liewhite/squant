@@ -15,6 +15,15 @@ import BybitCodec.*
 import BybitCodec.given
 
 object BybitAccountFeed:
+  /** 一张订单在本地累出来的累计成交量，以及已经计入的成交 id (去重用) */
+  private final case class OrderExecutions(cumulative: Double, seen: Set[String], lastSeenAt: Long)
+  private object OrderExecutions:
+    def empty(now: Long): OrderExecutions = OrderExecutions(0.0, Set.empty, now)
+
+  /** 本地累加器最久留多久 —— 终态推送丢了的话没人来清它。
+    * 柜台侧同样会发现并告警 (见 RestTradingGateway.StaleSettlementMs)，这里只管不泄漏。 */
+  private val ExecutionRetentionMs: Long = 60 * 60 * 1000
+
   /** auth 帧 expires 相对当前时间的前移量 (ms)，给握手留出窗口 */
   val AuthExpiresBufferMs: Long = 10_000
 
@@ -49,14 +58,20 @@ final class BybitAccountFeed(
   @volatile private var report: AccountReport => Unit = scala.compiletime.uninitialized
   @volatile private var spawnThread: (=> Unit) => Unit = scala.compiletime.uninitialized
 
-  /** 每张订单的累计成交量。
+  /** 每张订单的累计成交量，以及已经计入的那些成交的 id。
     *
     * Bybit 的 execution 频道只给**本次**成交量，而柜台的记账依据是累计量 (那样才对重复推送
-    * 与跨频道乱序免疫)，所以在这里把它累起来。只有 WS 接收线程一个访问者。
+    * 与跨频道乱序免疫)，所以在这里把它累起来。
     *
-    * 断线不重连、进程重启走启动对齐，因此这份累计不会跨越断线残留成错值。
+    * **累加前必须按 `execId` 去重**：柜台的幂等建立在"汇报面报的是真累计量"之上，
+    * 这里盲目累加的话，一条重复的 execution 推送就会把累计量推高一笔 —— 柜台看到累计上涨
+    * 就记账，仓位凭空多出一笔，而随后 order 频道更小的累计量只会得到负增量被忽略，
+    * 账本没有自愈路径，只能等对账告警。Bybit 官方也建议按 execId 去重。
+    *
+    * 只有 WS 接收线程一个访问者。断线不重连、进程重启走启动对齐，
+    * 因此这份累计不会跨越断线残留成错值。
     */
-  private val executedByOrder = mutable.Map.empty[String, Double]
+  private val executedByOrder = mutable.Map.empty[String, BybitAccountFeed.OrderExecutions]
 
   override def connect(sink: AccountReport => Unit, spawn: (=> Unit) => Unit): Unit =
     report = sink
@@ -98,18 +113,24 @@ final class BybitAccountFeed(
     case "ping" | "pong" => () // 心跳响应
     case other           => logger.warn(s"ignoring Bybit private op '$other': $text")
 
-  /** 单笔成交 -> 累计成交量。本频道只给本次量，累计在这里攒 */
+  /** 单笔成交 -> 累计成交量。本频道只给本次量，累计在这里攒 (按 execId 去重) */
   private def publishExecution(d: ExecutionData): Unit =
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in execution: '${d.symbol}'"))
-    val cumulative = executedByOrder.updateWith(d.orderId)(prev => Some(prev.getOrElse(0.0) + d.execQty.asDouble)).get
-    report(AccountReport.Executed(
-      orderId = d.orderId,
-      symbol = sym,
-      side = sideFromBybit(d.side),
-      price = d.execPrice.asPrice,
-      cumulativeQty = Coin(cumulative),
-      timestamp = d.execTime.toLongOption.getOrElse(nowMs),
-    ))
+    val now = nowMs
+    val prior = executedByOrder.getOrElse(d.orderId, BybitAccountFeed.OrderExecutions.empty(now))
+    if prior.seen.contains(d.execId) then
+      logger.debug(s"Bybit execution 重放, 已计入: order=${d.orderId} exec=${d.execId}")
+    else
+      val next = BybitAccountFeed.OrderExecutions(prior.cumulative + d.execQty.asDouble, prior.seen + d.execId, now)
+      executedByOrder(d.orderId) = next
+      report(AccountReport.Executed(
+        orderId = d.orderId,
+        symbol = sym,
+        side = sideFromBybit(d.side),
+        price = d.execPrice.asPrice,
+        cumulativeQty = Coin(next.cumulative),
+        timestamp = d.execTime.toLongOption.getOrElse(nowMs),
+      ))
 
   /** 订单状态。本频道带**累计**成交量 —— 柜台拿它补记账 (execution 先到时增量为零)，
     * 于是两条频道谁先到都不影响账本。 */
@@ -119,7 +140,11 @@ final class BybitAccountFeed(
     val status = mapOrderStatus(d.orderStatus, filled)
     // 终态之后不会再有新成交, 清掉本地累加器。**晚到的那条 execution 由柜台兜住**:
     // 它的记账进度在终态后还留一分钟墓碑, 认得出"这笔已经记过了" (见 RestTradingGateway.settled)。
-    if status.isTerminal then executedByOrder.remove(d.orderId)
+    if status.isTerminal then
+      executedByOrder.remove(d.orderId)
+      // 顺带清掉终态推送丢了、没人来收的那些
+      val cutoff = nowMs - BybitAccountFeed.ExecutionRetentionMs
+      executedByOrder.filterInPlace((_, e) => e.lastSeenAt > cutoff)
     report(AccountReport.OrderStatusChanged(
       orderId = d.orderId,
       clientOrderId = if d.orderLinkId.nonEmpty then Some(d.orderLinkId) else None,
@@ -127,6 +152,7 @@ final class BybitAccountFeed(
       side = sideFromBybit(d.side),
       status = status,
       price = Price(d.price.asDoubleOrZero),
+      avgFillPrice = Price(d.avgPrice.asDoubleOrZero), // 记账用它 —— 市价单的 price 为空
       quantity = Coin(d.qty.asDouble),
       filledQuantity = filled,
       timestamp = nowMs,

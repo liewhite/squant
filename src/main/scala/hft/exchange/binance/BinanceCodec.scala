@@ -60,6 +60,7 @@ private[binance] object BinanceCodec:
       l: String = "0", // last filled qty
       z: String = "0", // cumulative filled qty
       L: String = "0", // last filled price
+      ap: String = "0", // average filled price —— 记账用它, 不能用 p (市价单为 0)
       T: Long = 0,     // transaction time
   )
 

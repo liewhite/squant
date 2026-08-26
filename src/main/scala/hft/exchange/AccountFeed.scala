@@ -39,7 +39,13 @@ enum AccountReport:
       timestamp: Timestamp,
   )
 
-  /** 订单状态变化。带累计成交量 —— 有些交易所 (Bybit 的 order 频道) 只在这里给得出它 */
+  /** 订单状态变化。带累计成交量 —— 有些交易所 (Bybit 的 order 频道) 只在这里给得出它。
+    *
+    * **两个价格不能混**：`price` 是**委托价** (市价单没有，多家给空串)，只用于回报给策略看；
+    * `avgFillPrice` 是**累计成交均价**，柜台从这条补记账时用的是它。
+    * 拿委托价去记账，市价单会把持仓均价记成 0，平仓时算出一笔巨额假亏损 —— 而净值从此失真，
+    * 没有任何报错。
+    */
   case OrderStatusChanged(
       orderId: OrderId,
       clientOrderId: Option[String],
@@ -47,6 +53,7 @@ enum AccountReport:
       side: Side,
       status: OrderStatus,
       price: Price,
+      avgFillPrice: Price,
       quantity: Coin,
       filledQuantity: Coin,
       timestamp: Timestamp,
@@ -90,7 +97,9 @@ trait AccountFeed:
   *
   * 包成事件只是为了搭邮箱那趟车 (邮箱里流的是事件)；没有任何人订阅这个 topic。
   */
-private[exchange] final case class GatewayInbox(target: AccountExchange, report: AccountReport)
+private[exchange] final case class GatewayInbox(report: AccountReport)
 
-private[exchange] object GatewayInboxes extends Topic[AccountExchange, GatewayInbox]("gatewayInbox"):
-  def keyOf(payload: GatewayInbox): AccountExchange = payload.target
+private[exchange] object GatewayInboxes extends Topic[Unit, GatewayInbox]("gatewayInbox"):
+  // 没有路由键: 它从不经总线, 直投邮箱的那一条不需要被谁挑出来。
+  // 上一版留了个 target 字段, 那是绕总线时代的遗迹 —— 留着会让人以为存在按 key 分发。
+  def keyOf(payload: GatewayInbox): Unit = ()
