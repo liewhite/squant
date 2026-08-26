@@ -4,7 +4,7 @@ import strategy.utils.hedge.{DeltaBand, DeltaCtx, QuoteLeg, QuotePolicy, QuoteSt
 
 import hft.domain.*
 import hft.event.{AnyEvent, Topics}
-import hft.indicator.{BucketedKama, KlineSeries, Macd}
+import hft.indicator.{Kama, KlineSeries, Macd}
 import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
 
 /** **敞口轴的 delta 中性对冲** —— 死区判在 KAMA 平滑后的净敞口上，方向与数量按**真实**敞口。
@@ -14,15 +14,25 @@ import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
   *   - **外生敞口 O** = 期权 delta + 现货余额，由 [[OptionExposure]] 按秒送来。这是被行情推着
   *     走的、带噪声的量。
   *   - **对冲仓位 P** = 本策略的永续净持仓 (框架私有流的事实)。这是我们自己的动作。
-  *   - **判据信号** = `KAMA(O) + P`。
+  *   - **判据信号** = 把敞口重算在 `KAMA(标的价)` 上，再加 `P`。
   *
-  * ## 为什么只平滑 O，不平滑 O+P
+  * ## 平滑的是价，不是敞口
   *
-  * 需要被平滑的是**噪声**，而 P 是我们自己刚做的决定，不是噪声。若把 O+P 整体喂进 KAMA，
-  * 每次对冲造成的仓位跳变也会被平滑掉 —— 于是对冲完成后信号仍停在越界值上好几个桶，
-  * 死区形同失效 (只剩 [[minHedgeQty]] 在挡)。把 P 以原值加进去，对冲一执行信号就立刻回落，
-  * 死区**自动复位**：残留的偏离恰好是 `KAMA(O) − O` 这个滞后量，而死区宽度本来就是为吸收
-  * 这个量级的抖动设的。
+  * 敞口是标的价的函数，所以"平滑敞口"与"把敞口算在平滑价上"到一阶是同一件事。
+  * 后者好在三点：
+  *
+  *   1. **价格历史交易所有，敞口历史没有** —— 于是可以用历史 K 线预热 ([[prewarmKama]])，
+  *      开机即就绪。平滑敞口序列则必须现场攒够窗口，重启后头几十分钟指标不可用。
+  *   2. **卖出新腿的 delta 跳变不被平滑** —— 那不是噪声，而是一份真实的新敞口，该立刻进判据。
+  *      平滑敞口序列会把它和"价格动了"混在一起一起滤掉，于是刚卖出的腿要等好几个窗口才被看见。
+  *   3. **`KlineSeries` 现成** —— 收盘固定 + 盘中动态 (见 [[Kama]])，逐笔就有值，
+  *      不存在"一根 bar 内指标冻结"的盲区。
+  *
+  * 具体走 gamma 一阶修正：`delta(S) ≈ delta(S₀) + gamma·(S − S₀)`，S 取 KAMA 价、
+  * S₀ 取敞口读数当时的现价。二阶误差是 gamma 的曲率 × 平滑残差，对"要不要对冲"这个判断无关紧要。
+  *
+  * `P` 与现货余额都以**原值**入信号，不参与平滑：前者是我们自己刚做的决定、不是噪声
+  * (于是对冲一执行信号就立刻回落，死区**自动复位**)；后者只在收权利金/交割时变，本来就不抖。
   *
   * 两种行情下的行为正是想要的：
   *   - **震荡**：O 来回折返，ER→0，KAMA 几乎不动、贴在均值上；真实 O 反复越界而信号不越界
@@ -51,7 +61,7 @@ import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
   * @param band               敞口死区 (MACD 顺势侧收紧见 [[DeltaBand.macdTightened]])
   * @param quotes             报价方式的选择 —— 敞口平缓时被动慢挂、走单边时跨价追单,
   *                           见 [[QuotePolicy.byEfficiency]]
-  * @param kamaBucketMs       KAMA 的一步 = 多长时间 (默认 5 分钟)
+  * @param kamaBarMs          KAMA 的 K 线粒度 (默认 1 分钟)
   * @param macdBarMs          MACD 的 K 线粒度 (默认 1 小时)
   * @param maxExposureStaleMs 敞口读数陈旧阈值 (ms): 超过它暂停对冲。>0 才生效
   */
@@ -60,10 +70,10 @@ final class DeltaKamaHedgeStrategy(
     symbol: Symbol,
     ccy: String,
     band: DeltaBand,
-    kamaBucketMs: Long = 300_000L,
-    kamaErPeriod: Int = 10,
-    kamaFast: Int = 2,
-    kamaSlow: Int = 30,
+    kamaBarMs: Long = 60_000L,
+    kamaErBars: Int = 10,
+    kamaFastBars: Int = 2,
+    kamaSlowBars: Int = 30,
     macdBarMs: Long = 3_600_000L,
     macdFastPeriod: Int = 12,
     macdSlowPeriod: Int = 26,
@@ -83,25 +93,37 @@ final class DeltaKamaHedgeStrategy(
     if n % DeltaKamaHedgeStrategy.WarnEvery == 0 then logger.warn(s"[DeltaKamaHedge $symbol] $msg")
     warnCounts(kind) = n + 1
 
-  /** MACD 的 K 线由永续中间价逐笔聚合 (与既有对冲策略同一手法) */
-  private val klines =
+  /** MACD 的 K 线 (粗粒度趋势过滤), 由永续中间价逐笔聚合 */
+  private val macdKlines =
     new KlineSeries(macdBarMs, math.max(macdSlowPeriod + macdSignal + 8, 64)) with Macd:
       override protected def macdFast: Int = macdFastPeriod
       override protected def macdSlow: Int = macdSlowPeriod
       override protected def macdSignalPeriod: Int = macdSignal
 
-  /** 外生敞口 O 的时间桶 KAMA */
-  private val kama = BucketedKama(kamaBucketMs, kamaErPeriod, kamaFast, kamaSlow)
+  /** KAMA 的 K 线 (细粒度, 平滑**标的价**), 同样由中间价逐笔聚合 */
+  private val kamaKlines =
+    new KlineSeries(kamaBarMs, math.max(kamaErBars * 4, 64)) with Kama:
+      override protected def kamaErPeriod: Int = kamaErBars
+      override protected def kamaFast: Int = kamaFastBars
+      override protected def kamaSlow: Int = kamaSlowBars
 
   private var exposure: Option[OptionExposure] = None
   private val leg = QuoteLeg(cancelConfirmMs)
 
-  /** 启动预热: 用历史 (high, low, close) 喂 K 线, 使 MACD 开机即就绪 (否则要等数十根 bar
-    * 才有方向, 那期间死区退化为对称)。最旧->最新。 */
-  def prewarm(bars: Seq[(Double, Double, Double)]): Unit =
+  /** MACD 的启动预热 (历史 `macdBarMs` 粒度 K 线, 最旧->最新)。不预热的话开机后数十根 bar 内
+    * 方向恒为 0, 死区退化为对称 —— 那条规则在最需要它的启动期缺席。 */
+  def prewarmMacd(bars: Seq[(Double, Double, Double)]): Unit = feed(macdKlines, bars, macdBarMs)
+
+  /** KAMA 的启动预热 (历史 `kamaBarMs` 粒度 K 线, 最旧->最新)。
+    *
+    * 这是把 KAMA 建在**标的价**上换来的：价格历史交易所有，敞口历史没有。开机即就绪，
+    * 不再有"头几十分钟指标不可用"的窗口。 */
+  def prewarmKama(bars: Seq[(Double, Double, Double)]): Unit = feed(kamaKlines, bars, kamaBarMs)
+
+  private def feed(series: KlineSeries, bars: Seq[(Double, Double, Double)], barMs: Long): Unit =
     bars.zipWithIndex.foreach { case ((h, l, c), i) =>
-      val t = i.toLong * macdBarMs
-      klines.update(t, h); klines.update(t, l); klines.update(t, c)
+      val t = i.toLong * barMs
+      series.update(t, h); series.update(t, l); series.update(t, c)
     }
 
   // 订单超时需 > requote, 否则框架会先把正常挂单当超时清理
@@ -113,7 +135,8 @@ final class DeltaKamaHedgeStrategy(
       Vector.empty
     }
     .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, now) =>
-      klines.update(b.timestamp, b.midPrice.value)
+      macdKlines.update(b.timestamp, b.midPrice.value)
+      kamaKlines.update(b.timestamp, b.midPrice.value) // KAMA 平滑的是**价**, 逐笔即时更新
       manage(b, now, ctx)
     }
     // 敞口读数按交易所路由, 币种在载荷里 -> 自行判别
@@ -121,7 +144,6 @@ final class DeltaKamaHedgeStrategy(
       if e.ccy != ccy then Vector.empty
       else
         exposure = Some(e)
-        kama.update(e.timestamp, e.delta.value) // 只把**外生**敞口喂进平滑器
         ctx.state.symbolState(symbol).flatMap(_.bbo(exchange)).map(manage(_, now, ctx)).getOrElse {
           warnThrottled("盘口未就绪", "盘口未就绪 -> 本次敞口更新不对冲 (检查永续 BBO 订阅)")
           Vector.empty
@@ -135,7 +157,7 @@ final class DeltaKamaHedgeStrategy(
     *     时间戳盖的就是本地墙钟，拿交易所时钟去减就是在测量两地的时钟偏斜。
     */
   private def manage(bbo: BBO, localNow: Timestamp, ctx: StrategyContext): Vector[AnyEvent] =
-    val style = quotes.styleFor(kama.efficiencyRatio)
+    val style = quotes.styleFor(kamaKlines.efficiencyRatio)
     leg.step(bbo.timestamp, style) match
       case QuoteLeg.Step.Blocked => Vector.empty
       case QuoteLeg.Step.Requote(ref, why) =>
@@ -165,9 +187,15 @@ final class DeltaKamaHedgeStrategy(
         yield
           val perp = ss.positionSize(exchange)          // P: 自己的对冲仓位
           val raw = e.delta + perp                       // 真实净敞口 (下单量的唯一依据)
-          // 判据信号: 平滑外生敞口 + 原值仓位。KAMA 预热不足 -> 回退真实值 (降级但不裸奔)
-          val signal = Coin(kama.value.getOrElse(e.delta.value)) + perp
-          val macdDir = klines.macdDirection             // 预热不足 = 0 -> 死区对称, 不猜方向
+          // 判据信号: 把敞口重算在**平滑后的标的价**上, 再加原值仓位。
+          // gamma 一阶修正: delta(S) ≈ delta(S₀) + gamma·(S − S₀), 这里 S=KAMA 价、S₀=读数当时的现价。
+          // 平滑作用在**价**而不是敞口上, 于是卖出新腿带来的 delta 跳变**不被平滑** ——
+          // 那不是噪声, 而是一份真实的新敞口, 该立刻进判据。
+          val smoothedOption = kamaKlines.kama.fold(e.optionDelta) { px =>
+            e.optionDelta + e.optionGamma.scaled(px - e.spot.value)
+          }
+          val signal = smoothedOption + e.coinBalance + perp
+          val macdDir = macdKlines.macdDirection         // 预热不足 = 0 -> 死区对称, 不猜方向
           val (upTh, downTh) = band.bands(DeltaCtx(signal, macdDir))
           val breached = signal > upTh || signal < -downTh
           if !breached then Vector.empty
@@ -186,8 +214,8 @@ final class DeltaKamaHedgeStrategy(
                     reduceOnly = false, clientOrderId = ""),
                   f"delta_kama_hedge | $side qty=${qty.value}%.4f ${style.label} limit=${limitPx.value}%.2f " +
                     f"raw=${raw.value}%.4f signal=${signal.value}%.4f 带=(+${upTh.value}%.4f,-${downTh.value}%.4f) " +
-                    f"macd=$macdDir kama=${kama.value.map(v => f"$v%.4f").getOrElse("预热中")} " +
-                    f"er=${kama.efficiencyRatio.map(v => f"$v%.2f").getOrElse("预热中")} " +
+                    f"macd=$macdDir kamaPx=${kamaKlines.kama.map(v => f"$v%.2f").getOrElse("预热中")} " +
+                    f"er=${kamaKlines.efficiencyRatio.map(v => f"$v%.2f").getOrElse("预热中")} " +
                     f"期权=${e.optionDelta.value}%.4f 现货=${e.coinBalance.value}%.4f 永续=${perp.value}%.4f",
                 )
               )

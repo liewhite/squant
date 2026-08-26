@@ -56,7 +56,7 @@ import sttp.client4.DefaultSyncBackend
   )
   logger.warn(
     f"对冲: 死区基准=${t.deltaThreshold}%.4f ${t.ccy} MACD逆势侧×${t.macdTightenRatio}%.2f " +
-      f"KAMA(${t.kamaBucketMs / 1000}s桶, ER${t.kamaErPeriod}/${t.kamaFast}/${t.kamaSlow}) " +
+      f"KAMA@${t.kamaBar}(ER${t.kamaErPeriod}/${t.kamaFast}/${t.kamaSlow}, 平滑标的价) " +
       f"MACD@${t.macdBar} 单笔上限=${t.maxHedgeQty}%n" +
       f"报价: ER<${t.trendErThreshold}%.2f 平缓 -> 被动挂对手价外 ${t.passiveOffset * 100}%.3f%%, 给 ${t.passiveTtlMs}ms; " +
       f"ER>=${t.trendErThreshold}%.2f 单边 -> 跨价穿透 ${t.crossOffset * 100}%.3f%%, 只给 ${t.crossTtlMs}ms"
@@ -74,10 +74,10 @@ import sttp.client4.DefaultSyncBackend
     val hedge = DeltaKamaHedgeStrategy(
       Exchange.Okx, t.symbol, t.ccy,
       band = DeltaBand.macdTightened(Coin(t.deltaThreshold), t.macdTightenRatio),
-      kamaBucketMs = t.kamaBucketMs,
-      kamaErPeriod = t.kamaErPeriod,
-      kamaFast = t.kamaFast,
-      kamaSlow = t.kamaSlow,
+      kamaBarMs = t.kamaBarMs,
+      kamaErBars = t.kamaErPeriod,
+      kamaFastBars = t.kamaFast,
+      kamaSlowBars = t.kamaSlow,
       macdBarMs = t.macdBarMs,
       macdFastPeriod = t.macdFast,
       macdSlowPeriod = t.macdSlow,
@@ -88,11 +88,15 @@ import sttp.client4.DefaultSyncBackend
       maxHedgeQty = Coin(t.maxHedgeQty),
       maxExposureStaleMs = t.exposureStaleMs,
     )
-    // MACD 预热: 不预热的话开机后数十根 bar 内 macdDirection 恒为 0, 死区退化为对称 —— 能跑,
-    // 但"顺势侧收紧"这条规则在最需要它的启动期是缺席的。
+    // 两条序列都用历史 K 线预热, 开机即就绪:
+    //   MACD 不预热 -> 数十根 bar 内方向恒为 0, 死区退化为对称 (那条规则在启动期缺席);
+    //   KAMA 不预热 -> 判据退化为真实敞口 + 报价按单边处理 (对冲更频繁、更贵)。
     opt.linearKlines(t.symbol, t.macdBar, math.max(t.macdSlow + t.macdSignal + 8, 64)) match
-      case Right(bars) => hedge.prewarm(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.macdBar} K线 -> MACD 就绪")
+      case Right(bars) => hedge.prewarmMacd(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.macdBar} K线 -> MACD 就绪")
       case Left(e)     => logger.error(s"prewarm 取 K 线失败 (MACD 将靠实时 BBO 慢热, 期间死区对称): $e")
+    opt.linearKlines(t.symbol, t.kamaBar, math.max(t.kamaErPeriod * 4, 64)) match
+      case Right(bars) => hedge.prewarmKama(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.kamaBar} K线 -> KAMA 就绪")
+      case Left(e)     => logger.error(s"prewarm 取 K 线失败 (KAMA 将靠实时 BBO 慢热, 期间按真实敞口判越界): $e")
 
     engine.addStrategy(hedge, AccountId.Live) // 先订阅总线
     engine.spawn(OptionSellerActor(opt, Exchange.Okx, sellerCfg)) // 再开始发敞口读数

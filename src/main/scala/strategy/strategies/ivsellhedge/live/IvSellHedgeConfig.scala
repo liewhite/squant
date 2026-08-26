@@ -35,7 +35,8 @@ import scala.util.control.NonFatal
  * @param settleRounds      提交过卖单后强制静默的轮数 (给持仓落地留时间, 防同一缺口被连卖两轮)
   * @param deltaThreshold    对冲死区基准阈值 (币本位, 如 0.3 ETH)
   * @param macdTightenRatio  MACD 逆势侧的收紧系数 (0.5 = 减半; 1.0 = 不收紧)
-  * @param kamaBucketMs      KAMA 的一步多长 (默认 5 分钟)
+  * @param kamaBar           KAMA 的 K 线粒度 (OKX 粒度串, 默认 "1m")。KAMA 平滑的是**标的价**,
+ *                          所以能用历史 K 线预热, 开机即就绪
   * @param macdBar           MACD 的 K 线粒度 (OKX 粒度串, 如 "1H")；预热与实时聚合共用这一个事实
   * @param offset            对冲挂单相对盘口的外移比例 (保证 PostOnly 不吃单)
   * @param requoteMs         对冲挂单未成交的重挂间隔
@@ -48,17 +49,17 @@ final case class IvSellTuning(
     baseCoin: String,
     ccy: String,
     // ---- 卖出腿 ----
-    targetDays: Int = 3,
-    minTtlDays: Int = 1,
-    minStrikeDistance: Double = 0.02,
-    ivStart: Double,
-    ivQtyStart: Double = 1.0,
+    targetDays: Int = 14,
+    minTtlDays: Int = 7,
+    minStrikeDistance: Double = 0.0,
+    ivStart: Double = 0.35,
+    ivQtyStart: Double = 3.0,
     ivQtySlope: Double = 1.0,
     ivQtyMax: Double = 10.0,
-    minPremium: Double = 0.0,
+    minPremium: Double = 0.01,
     maxSpreadRatio: Double = 1.1,
-    maxOptionLeverage: Double = 1.0,
-    enableOpen: Boolean = false,
+    maxOptionLeverage: Double = 2.0,
+    enableOpen: Boolean = true,
     publishExposureMs: Long = 1000,
     refreshMarksMs: Long = 5000,
     sellIntervalMs: Long = 5000,
@@ -67,7 +68,7 @@ final case class IvSellTuning(
     // ---- 对冲腿 ----
     deltaThreshold: Double = 0.3,
     macdTightenRatio: Double = 0.5,
-    kamaBucketMs: Long = 300_000,
+    kamaBar: String = "1m",
     kamaErPeriod: Int = 10,
     kamaFast: Int = 2,
     kamaSlow: Int = 30,
@@ -92,6 +93,9 @@ final case class IvSellTuning(
     * 所以只配一处、这里派生。分两个字段配的话，预热用的粒度与实时聚合的粒度可以配得不一致，
     * 而症状只是"MACD 方向偶尔和图上不一样"。 */
   def macdBarMs: Long = IvSellTuning.barToMillis(macdBar)
+
+  /** KAMA 的 K 线粒度换算成毫秒 (同 [[macdBarMs]]: 粒度只配一处, 预热与实时聚合共用) */
+  def kamaBarMs: Long = IvSellTuning.barToMillis(kamaBar)
 
   /** 报价方式的选择：敞口平缓 -> 被动慢挂；走单边 -> 跨价追单 */
   def quotePolicy: QuotePolicy = QuotePolicy.byEfficiency(

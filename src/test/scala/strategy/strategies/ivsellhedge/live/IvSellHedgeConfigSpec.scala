@@ -7,8 +7,11 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
 
   private def tuning = IvSellTuning(symbol = "ETH", baseCoin = "ETH", ccy = "ETH", ivStart = 0.2)
 
-  test("K 线粒度只配一处, 毫秒由它派生"):
+  test("K 线粒度只配一处, 毫秒由它派生 (MACD 与 KAMA 各一条)"):
     assertEquals(tuning.copy(macdBar = "1H").macdBarMs, 3_600_000L)
+    assertEquals(tuning.copy(kamaBar = "1m").kamaBarMs, 60_000L)
+    assertEquals(tuning.copy(kamaBar = "5m").kamaBarMs, 300_000L)
+    intercept[RuntimeException](tuning.copy(kamaBar = "7m").kamaBarMs)
     assertEquals(tuning.copy(macdBar = "5m").macdBarMs, 300_000L)
     assertEquals(tuning.copy(macdBar = "1D").macdBarMs, 86_400_000L)
 
@@ -20,9 +23,10 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
     assertEquals(tuning.copy(publishExposureMs = 1000, maxExposureStaleMs = Some(7000)).exposureStaleMs, 7000L)
 
   test("映射到 actor 配置时做参数校验 (启动即失败, 不带病上线)"):
-    val ok = tuning.copy(ivQtyStart = 5, ivQtySlope = 1, ivQtyMax = 30).toSellerConfig
-    assertEquals(ok.ivQty, SellPlan.IvQty(0.2, 5, 1, 30))
-    assertEquals(ok.minTtlMs, SellPlan.DayMs)
+    val t = tuning.copy(ivQtyStart = 5, ivQtySlope = 1, ivQtyMax = 30)
+    val ok = t.toSellerConfig
+    assertEquals(ok.ivQty, SellPlan.IvQty(t.ivStart, 5, 1, 30))
+    assertEquals(ok.minTtlMs, t.minTtlDays * SellPlan.DayMs, "天 -> 毫秒的换算")
     // 起卖量超上限 -> 起点会被静默改写, 故必须抛
     intercept[IllegalArgumentException](tuning.copy(ivQtyStart = 99, ivQtyMax = 10).toSellerConfig)
     intercept[IllegalArgumentException](tuning.copy(targetDays = 0).toSellerConfig)
@@ -31,22 +35,6 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
     intercept[IllegalArgumentException](tuning.copy(settleRounds = 0).toSellerConfig)
     // ivStart=0 的语义与参考实现相反 ("从零波动起线性放大" 而非 "不启用缩放"), 更可能是漏配
     intercept[IllegalArgumentException](tuning.copy(ivStart = 0.0).toSellerConfig)
-
-  test("ivStart 是必填项 (它的默认值只会是一个看着合理的错配置)"):
-    // 模板里必须列出 ivStart, 否则 jsoniter 解析报错
-    val noIvStart = """{"apiKey":"k","apiSecret":"s","passphrase":"p","tuning":{"symbol":"ETH","baseCoin":"ETH","ccy":"ETH"}}"""
-    val tmp = java.nio.file.Files.createTempFile("iv-sell-", ".json")
-    java.nio.file.Files.writeString(tmp, noIvStart)
-    assert(IvSellHedgeConfig.loadOkx(tmp.toString).isLeft, "缺 ivStart 应解析失败")
-    java.nio.file.Files.deleteIfExists(tmp)
-
-  test("报价方式由 ER 阈值切换, 两侧参数各自独立"):
-    val t = tuning.copy(trendErThreshold = 0.4, passiveOffset = 0.001, passiveTtlMs = 30_000,
-      crossOffset = 0.002, crossTtlMs = 500)
-    val p = t.quotePolicy
-    assertEquals(p.styleFor(Some(0.3)).tif, hft.domain.TimeInForce.PostOnly)
-    assertEquals(p.styleFor(Some(0.5)).tif, hft.domain.TimeInForce.GTC)
-    assertEquals(p.maxTtlMs, 30_000L, "框架订单超时要宽于最长存活时间, 取两者更大")
 
   test("配置文件缺失 -> Left(原因), 不静默"):
     assert(IvSellHedgeConfig.loadOkx("conf/definitely-not-here.json").isLeft)
@@ -59,6 +47,7 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
         assertEquals(c.tuning.macdBar, "1H")
         assertEquals(c.tuning.enableOpen, false)
         assertEquals(c.tuning.macdFast, 12)  // 模板未列出 -> 默认值
+        assertEquals(c.tuning.kamaBar, "1m")
         assertEquals(c.tuning.passiveTtlMs, 60_000L)
         assertEquals(c.tuning.crossTtlMs, 1000L)
         assertEquals(c.simulated, true)

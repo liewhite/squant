@@ -45,6 +45,33 @@ final class KamaCore(erPeriod: Int = 10, fast: Int = 2, slow: Int = 30):
       val sc = math.pow(lastEr * (fastSc - slowSc) + slowSc, 2)
       kamaValue = kamaValue + sc * (x - kamaValue)
 
+  /** **不推进状态**地试算"如果下一步是 x"的结果 —— 供盘中动态值使用。
+    *
+    * 与 [[step]] 是同一套算术（同一份公式，只是不落地），所以盘中值与该值真正收盘后的值
+    * 在同一个输入上完全一致。分两份写就会出现"盘中显示的和收盘定下的不是一个数"，
+    * 而这种偏差没有任何症状 —— 只是判据在收盘那一刻莫名跳一下。
+    *
+    * @return (KAMA, ER)；试算窗口不足 erPeriod+1 个点时 None
+    */
+  def provisional(x: Double): Option[(Double, Double)] =
+    if !seeded then None
+    else
+      // 试算窗口 = 现有窗口 (超长则丢最旧) ++ [x]
+      val n = recent.size
+      val from = if n + 1 > erPeriod + 1 then 1 else 0
+      if (n - from) + 1 < erPeriod + 1 then None
+      else
+        val change = math.abs(x - recent(from))
+        var volatility = 0.0
+        var i = from + 1
+        while i < n do
+          volatility += math.abs(recent(i) - recent(i - 1))
+          i += 1
+        volatility += math.abs(x - recent(n - 1))
+        val er = if volatility == 0.0 then 0.0 else change / volatility
+        val sc = math.pow(er * (fastSc - slowSc) + slowSc, 2)
+        Some((kamaValue + sc * (x - kamaValue), er))
+
   /** 是否已预热 (推进次数 ≥ erPeriod+1) */
   def ready: Boolean = recent.size >= erPeriod + 1
 
