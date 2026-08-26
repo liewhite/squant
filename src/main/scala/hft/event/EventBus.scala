@@ -92,6 +92,14 @@ final class EventBus:
     */
   def hasSubscriber[K](topic: Topic[K, ?], key: K): Boolean = subscriberCount(topic, key) > 0
 
+  /** 擦除了 key 类型的同一个查询 —— 只给"从一份 [[Interest]] 声明反查"用
+    * (那里的 key 类型已被擦除)。限定 `private[hft]`: 公开面留给类型安全的那一个,
+    * 免得业务代码拿一个类型对不上的 key 查出个永远为假的答案。 */
+  private[hft] def hasAnySubscriber(topic: Topic[?, ?], key: Any): Boolean =
+    Option(topics.get(topic)).exists { idx =>
+      !idx.all.isEmpty || Option(idx.byKey.get(key)).exists(!_.isEmpty)
+    }
+
   /** 把一条 channel 从它登记过的每个槽里摘除。
     *
     * 只摘自己登记过的位置 (而不是遍历全索引)，因此代价与本订阅者的声明规模成正比，

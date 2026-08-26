@@ -132,3 +132,12 @@ object Commands:
     */
   object OrderIntent extends Topic[AccountExchange, AccountOutcome]("orderIntent"):
     def keyOf(payload: AccountOutcome): AccountExchange = payload.target
+
+  // ==================== 分组 ====================
+
+  /** 全部指令 topic —— "这是不是一条指令"的唯一判据。
+    *
+    * 应答 ([[AccountSynced]]) 不在其中: 它是**回答**不是请求, 没有"必须有人接"的要求
+    * (发出时等待方可能已经收够了)。
+    */
+  val all: Set[Topic[?, ?]] = Set(MarketSubscription, AccountSync, OrderIntent)

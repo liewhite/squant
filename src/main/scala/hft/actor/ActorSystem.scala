@@ -1,7 +1,7 @@
 package hft.actor
 
 import hft.domain.nowMs
-import hft.event.{AnyEvent, EventBus}
+import hft.event.{AnyEvent, EventBus, Interest}
 import org.slf4j.LoggerFactory
 import ox.{Ox, forkDiscard, uninterruptible}
 
@@ -15,6 +15,9 @@ import scala.jdk.CollectionConverters.*
   */
 final class ActorHandle private[actor] (
     val name: String,
+    /** 本 actor 声明的订阅 —— 停它之前, 监督者据此知道它接的是哪些信道。
+      * 挂在句柄上而不是另建一张登记表: 句柄本身就是身份, 表要维护、会不同步。 */
+    val interests: Set[Interest],
     private[actor] val mailbox: EventBus.Mailbox,
     /** 叫醒自驱动循环的定时等待 (事件循环由 mailbox 的关闭叫醒，见 [[ActorSystem.stop]]) */
     private[actor] val stopRequested: CountDownLatch,
@@ -130,7 +133,7 @@ final class ActorSystem(private[actor] val bus: EventBus)(using Ox):
     // 订阅排在 onStart 之前 —— onStart 里可能立刻发事件 (子 actor 的启动对齐)，
     // 那时本 actor 的邮箱必须已经挂在总线上，否则这批事件对它就丢了。
     val mailbox = bus.subscribe(actor.interests)
-    val handle = ActorHandle(actor.name, mailbox, CountDownLatch(1), CountDownLatch(1))
+    val handle = ActorHandle(actor.name, actor.interests, mailbox, CountDownLatch(1), CountDownLatch(1))
     parent.fold(roots.add(handle).discardValue)(_.children.add(handle).discardValue)
 
     actor.onStart(ActorContext(handle, this))

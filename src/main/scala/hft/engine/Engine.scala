@@ -3,7 +3,7 @@ package hft.engine
 import hft.actor.{Actor, ActorHandle, ActorSystem}
 import hft.domain.*
 import hft.event.Commands.*
-import hft.event.{Event, EventBus, Interest, MarketTopic, Subscription, Topics}
+import hft.event.{Commands, Event, EventBus, Interest, MarketTopic, Subscription, Topic, Topics}
 import hft.strategy.Strategy
 import org.slf4j.LoggerFactory
 import ox.{Ox, forkDiscard}
@@ -71,9 +71,31 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
     * 时候停。生命周期依赖走的是另一条路 —— 谁装的谁负责停，那是棵树。
     */
   def stop(handle: ActorHandle): Unit = synchronized {
+    // 先记下它接的是哪些指令信道 —— 停完之后才查得出"这条信道还有没有别人接"
+    val served = handle.interests.toVector.collect {
+      case Interest.Keyed(topic, keys) if Commands.all.exists(_ eq topic) => keys.toVector.map(topic -> _)
+    }.flatten
     system.stop(handle)
     claims.release(handle)
+    warnOrphanedCommands(handle, served)
   }
+
+  /** 被停掉的插件若是某条指令的最后一个接单者，把它说出来。
+    *
+    * **只告警，不级联停止依赖方**：数据依赖天然成环 (策略依赖柜台的回报、柜台依赖策略的
+    * 下单)，拿它定停机顺序无解；而"要不要把依赖它的一起停掉"是运维决定，框架替人决定
+    * 会在不该停的时候停。生命周期依赖走的是另一条路 —— 谁装的谁负责停，那是棵树。
+    *
+    * 不说出来的后果是最难查的那一类：策略还在跑、日志一切正常，只是订单再也发不出去。
+    */
+  private def warnOrphanedCommands(handle: ActorHandle, served: Vector[(Topic[?, ?], Any)]): Unit =
+    val orphaned = served.filterNot((topic, key) => bus.hasAnySubscriber(topic, key))
+    if orphaned.nonEmpty then
+      logger.warn(
+        s"${handle.name} 停止后, 这些指令信道已无人接单: " +
+          orphaned.map((topic, key) => s"$topic@$key").mkString(", ") +
+          " —— 仍在发这些指令的组件会静默失效 (指令发出去没有下文), 按需一并停掉或补装插件"
+      )
 
   def addStrategy(strategy: Strategy, account: AccountId): ActorHandle = addStrategies(Vector(strategy), account).head
 

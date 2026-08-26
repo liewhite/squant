@@ -115,6 +115,20 @@ class EngineContractSpec extends munit.FunSuite:
       eventually(log.asScala.toVector.toString)(log.size == 1)
       assertEquals(log.asScala.toVector, Vector(s"market:$ex:$sym"), "影子账户只订行情, 不对齐")
 
+  test("停掉柜台后, 那条指令信道确实空了 —— 再加策略会被同一道闸拦下"):
+    // 校验查的是**当下**的订阅事实, 不是启动时的一张快照。插件被撤下之后,
+    // 同一道闸自然而然地开始拦人 —— 这正是"订阅本身就是声明"的好处。
+    supervised:
+      val log = ConcurrentLinkedQueue[String]()
+      val engine = Engine.start(plugins = Vector(RecordingFeed(ex, log)))
+      val gateway = engine.install(RecordingGateway(ex, AccountId.Live, log))
+      val strategy = engine.addStrategy(Watcher(), AccountId.Live)
+
+      engine.removeStrategy(strategy) // 先撤策略, 否则拦下它的会是标的独占那道闸
+      engine.stop(gateway)
+      val e = intercept[IllegalStateException](engine.addStrategy(Watcher(), AccountId.Live))
+      assert(e.getMessage.contains("下单指令"), e.getMessage)
+
   test("watchMarket 同样要校验 —— 扫描器订了个空是一样的静默失效"):
     supervised:
       val engine = Engine.start()
