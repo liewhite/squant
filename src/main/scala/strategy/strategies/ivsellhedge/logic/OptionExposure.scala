@@ -21,7 +21,9 @@ import hft.event.Topic
   * @param optionDelta 期权组合 delta (币本位)
   * @param optionGamma 期权组合 gamma
   * @param coinBalance 该币现金余额 (裸多头)
-  * @param spot        本次计算用的标的价 (诊断用：delta 是它的函数)
+  * @param spot        本次计算用的标的价 (delta 是它的函数; 死区的波动范围也用它)
+  * @param markVol     组合的代表性年化 IV (按 |gamma| 加权, 见 [[PortfolioDelta.weightedMarkVol]])；
+  *                    无持仓时 None
   * @param legs        参与计算的持仓腿数 (诊断用：突然变 0 说明持仓拉取或 IV 匹配出了问题)
   */
 final case class OptionExposure(
@@ -31,6 +33,7 @@ final case class OptionExposure(
     optionGamma: Coin,
     coinBalance: Coin,
     spot: Price,
+    markVol: Option[Double],
     legs: Int,
     timestamp: Timestamp,
 ):

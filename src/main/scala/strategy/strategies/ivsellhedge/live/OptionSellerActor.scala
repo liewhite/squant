@@ -98,11 +98,12 @@ final class OptionSellerActor(
                 val at = nowMs
                 fails = 0
                 val (delta, gamma) = PortfolioDelta.greeks(resolved.legs, spot, at, cfg.riskFreeRate)
+                val iv = PortfolioDelta.weightedMarkVol(resolved.legs, spot, at, cfg.riskFreeRate)
                 // Event.local: 这条读数是 REST 派生的, 没有交易所时间戳可言 (框架对这类事件的约定)
                 ctx.publish(
                   Event.local(
                     OptionExposureTopic,
-                    OptionExposure(exchange, cfg.ccy, delta, gamma, Coin(s.cash.coinBalance), Price(spot), resolved.legs.size, at),
+                    OptionExposure(exchange, cfg.ccy, delta, gamma, Coin(s.cash.coinBalance), Price(spot), iv, resolved.legs.size, at),
                   )
                 )
 

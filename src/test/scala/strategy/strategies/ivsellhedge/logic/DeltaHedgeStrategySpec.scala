@@ -23,7 +23,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
   private val metas = Map((ex, sym) -> SymbolMeta(ex, sym, 0.01, 0.0001, 0.0001, 1.0))
   private val minute = 60_000L
 
-  /** 固定阈值的死区 —— 把 MACD 那一维隔离掉, 单独测触发/定量 */
+  /** 固定阈值的死区 —— 把波动率/方向那两维隔离掉, 单独测触发与定量 */
   private final class Fixed(up: Coin, down: Coin) extends DeltaBand:
     def bands(ctx: DeltaCtx): (Coin, Coin) = (up, down)
 
@@ -35,7 +35,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
       staleMs: Long = 0L,
       quotes: QuotePolicy = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)),
   ) = DeltaHedgeStrategy(ex, sym, ccy, band,
-    erBarMs = minute, erPeriodBars = erBars, macdBarMs = 3_600_000L,
+    fastBarMs = minute, erPeriodBars = erBars, rvBars = 3, macdBarMs = 3_600_000L,
     quotes = quotes, minHedgeQty = minQty, maxHedgeQty = maxQty, maxExposureStaleMs = staleMs)
 
   private def feed(runner: StrategyRunner, ev: AnyEvent, localTs: Timestamp = -1): Vector[OutcomeEvent] =
@@ -51,8 +51,9 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
       coin: Double = 0.0,
       gamma: Double = 0.0,
       spot: Double = 3000.0,
+      iv: Option[Double] = Some(0.6),
   ) = Event.stamped(OptionExposureTopic,
-    OptionExposure(ex, ccy, Coin(optionDelta), Coin(gamma), Coin(coin), Price(spot), 2, ts), ts, ts)
+    OptionExposure(ex, ccy, Coin(optionDelta), Coin(gamma), Coin(coin), Price(spot), iv, 2, ts), ts, ts)
 
   private def position(size: Double, ts: Timestamp) =
     Event.stamped(Topics.Position, Position(AccountId.Live, ex, sym, Coin(size), 3000.0, 0.0), ts, ts)
@@ -69,7 +70,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
 
   /** 用历史 K 线把 KAMA 预热到给定价位 (每根 h=l=c), 再喂上盘口 */
   private def runnerPrewarmed(s: DeltaHedgeStrategy, px: Double = 3000.0, bars: Int = 40): StrategyRunner =
-    s.prewarmEr(Seq.fill(bars)((px, px, px)))
+    s.prewarmFast(Seq.fill(bars)((px, px, px)))
     runnerWith(s)
 
   test("敞口读数未到达 -> 不对冲 (不拿一个不存在的 delta 决策)"):
@@ -161,7 +162,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
   test("别的币种的敞口读数不参与决策"):
     val r = runnerWith(strat(Fixed(0.1, 0.1), erBars = 50))
     val other = Event.stamped(OptionExposureTopic,
-      OptionExposure(ex, "BTC", Coin(5.0), Coin(0.0), Coin(0.0), Price(60000), 1, 10), 10, 10)
+      OptionExposure(ex, "BTC", Coin(5.0), Coin(0.0), Coin(0.0), Price(60000), Some(0.6), 1, 10), 10, 10)
     assertEquals(feed(r, other), Vector.empty)
     assertEquals(feed(r, bbo(3000.0, 11)), Vector.empty, "BTC 那条不该被存下来当本策略的敞口")
 
@@ -225,12 +226,12 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
   test("KAMA 用历史 K 线预热 -> 开机即就绪, 不再有头几十分钟的盲区"):
     // 预热成一段单边上行的历史 -> ER 高 -> 首单就按单边处理; 且平滑价已可用
     val s1 = strat(Fixed(0.1, 0.1), erBars = 3, quotes = byEr)
-    s1.prewarmEr((1 to 20).map(i => { val p = 3000.0 + i * 5.0; (p, p, p) }))
+    s1.prewarmFast((1 to 20).map(i => { val p = 3000.0 + i * 5.0; (p, p, p) }))
     val trending = runnerWith(s1)
     assertEquals(tifOf(placed(feed(trending, exposure(2.0, 10, gamma = 0.0)))), TimeInForce.GTC)
     // 预热成来回折返的历史 -> ER 低 -> 首单就按平缓处理 (未预热时这里会是 GTC)
     val s2 = strat(Fixed(0.1, 0.1), erBars = 3, quotes = byEr)
-    s2.prewarmEr((1 to 20).map(i => { val p = if i % 2 == 0 then 3010.0 else 2990.0; (p, p, p) }))
+    s2.prewarmFast((1 to 20).map(i => { val p = if i % 2 == 0 then 3010.0 else 2990.0; (p, p, p) }))
     val chopping = runnerWith(s2)
     assertEquals(tifOf(placed(feed(chopping, exposure(2.0, 10, gamma = 0.0)))), TimeInForce.PostOnly,
       "预热带来的就绪状态直接决定首单的报价方式")
@@ -239,27 +240,58 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
     val s = strat(Fixed(0.1, 0.1), quotes = byEr)
     assert(s.orderTimeoutMs > calmStyle.ttlMs, s"orderTimeoutMs=${s.orderTimeoutMs} 须 > ${calmStyle.ttlMs}")
 
-  // ---------- ER 只调阈值宽窄, 不替换判据 ----------
+  // ---------- 阈值随预测波动范围走 (ER 已退出死区) ----------
 
-  test("同一个净敞口: 震荡里被放宽的阈值挡住, 趋势里被收紧的阈值放行"):
-    val band = DeltaBand.adaptive(Coin(0.4), macdTighten = 1.0, chopWiden = 2.0, trendTighten = 0.5)
-    def run(prewarmPrices: Seq[Double], exposureEth: Double): Vector[OutcomeEvent] =
-      val st = DeltaHedgeStrategy(ex, sym, ccy, band,
-        erBarMs = minute, erPeriodBars = 3, macdBarMs = 3_600_000L,
-        quotes = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)))
-      st.prewarmEr(prewarmPrices.map(p => (p, p, p)))
-      feed(runnerWith(st), exposure(exposureEth, 10))
-    val chop = (1 to 20).map(i => if i % 2 == 0 then 3010.0 else 2990.0)  // ER≈0 -> 阈值 0.8
-    val trend = (1 to 20).map(i => 3000.0 + i * 5.0)                      // ER≈1 -> 阈值 0.2
-    // 敞口 0.5: 落在 0.2 与 0.8 之间 —— 唯一的区别就是阈值
-    assertEquals(run(chop, 0.5), Vector.empty, "震荡: 阈值放宽到 0.8 -> 0.5 在带内, 不对冲")
-    assert(run(trend, 0.5).nonEmpty, "趋势: 阈值收紧到 0.2 -> 0.5 越界, 对冲")
+  private def volBand = DeltaBand.volScaled(
+    tightMult = 0.5, looseMult = 2.0, horizonMs = 30 * minute, minTheta = Coin(0.001), maxTheta = Coin(100.0))
 
-  test("真实敞口有上界: 无论 ER 怎么走, 超过 base×chopWiden 必然对冲"):
-    val band = DeltaBand.adaptive(Coin(0.4), macdTighten = 1.0, chopWiden = 2.0, trendTighten = 0.5)
-    val st = DeltaHedgeStrategy(ex, sym, ccy, band,
-      erBarMs = minute, erPeriodBars = 3, macdBarMs = 3_600_000L,
+  private def volStrat(prewarmPrices: Seq[Double], src: SigmaSource = SigmaSource.Realized) =
+    val st = DeltaHedgeStrategy(ex, sym, ccy, volBand,
+      fastBarMs = minute, erPeriodBars = 3, rvBars = 5, sigmaSource = src, macdBarMs = 3_600_000L,
       quotes = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)))
-    st.prewarmEr((1 to 20).map(i => { val p = if i % 2 == 0 then 3010.0 else 2990.0; (p, p, p) })) // 最放宽的体制
-    val o = placed(feed(runnerWith(st), exposure(0.81, 10)))
-    assertEquals(o.quantity, Coin(0.81), "超过上界 0.8 -> 必然对冲, 且量是真实敞口")
+    st.prewarmFast(prewarmPrices.map(p => (p, p, p)))
+    st
+
+  /** 低波动/高波动两段历史 (同一均值, 只有幅度不同) */
+  private val calmHistory = (1 to 30).map(i => 3000.0 + (if i % 2 == 0 then 1.0 else -1.0))
+  private val wildHistory = (1 to 30).map(i => 3000.0 + (if i % 2 == 0 then 60.0 else -60.0))
+
+  test("同一敞口: 低波动下越界对冲, 高波动下阈值被放宽而不动"):
+    // 唯一的差别是历史波动 —— 敞口、gamma、现价、方向全都一样
+    val fired = feed(runnerWith(volStrat(calmHistory)), exposure(0.5, 10, gamma = -0.01))
+    val held = feed(runnerWith(volStrat(wildHistory)), exposure(0.5, 10, gamma = -0.01))
+    assert(fired.nonEmpty, "低波动 -> 阈值小 -> 0.5 越界, 对冲")
+    assertEquals(held, Vector.empty, "高波动 -> 阈值大 -> 0.5 在带内, 不动")
+
+  test("gamma 越大阈值越宽 (敞口扩散更快, 按比例放宽以控成本)"):
+    val small = feed(runnerWith(volStrat(wildHistory)), exposure(0.5, 10, gamma = -0.0001))
+    val large = feed(runnerWith(volStrat(wildHistory)), exposure(0.5, 10, gamma = -0.05))
+    assert(small.nonEmpty, "gamma 极小 -> 阈值趋下限 -> 对冲")
+    assertEquals(large, Vector.empty, "gamma 大 -> 阈值宽 -> 不动")
+
+  test("maxTheta 咬住: 极端波动下敞口仍有硬上界"):
+    val capped = DeltaBand.volScaled(0.5, 2.0, 30 * minute, Coin(0.001), Coin(0.4))
+    val st = DeltaHedgeStrategy(ex, sym, ccy, capped,
+      fastBarMs = minute, erPeriodBars = 3, rvBars = 5, macdBarMs = 3_600_000L,
+      quotes = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)))
+    st.prewarmFast(wildHistory.map(p => (p, p, p)))
+    val o = placed(feed(runnerWith(st), exposure(0.41, 10, gamma = -0.05)))
+    assertEquals(o.quantity, Coin(0.41), "超过上界 0.4 -> 必然对冲, 量是真实敞口")
+
+  test("σ 来源可切换: 取期权 IV 时不看历史波动"):
+    // 历史是高波动的, 但 IV 给一个很小的值 -> 阈值小 -> 对冲
+    val st = volStrat(wildHistory, SigmaSource.ImpliedVol)
+    assert(feed(runnerWith(st), exposure(0.5, 10, gamma = -0.01, iv = Some(0.01))).nonEmpty)
+    // 同一历史, IV 给大值 -> 阈值大 -> 不动
+    val st2 = volStrat(wildHistory, SigmaSource.ImpliedVol)
+    assertEquals(feed(runnerWith(st2), exposure(0.5, 10, gamma = -0.01, iv = Some(5.0))), Vector.empty)
+
+  test("σ 未就绪 -> 阈值取下限 (宁可对冲频繁, 不按不存在的波动率放宽敞口)"):
+    val st = DeltaHedgeStrategy(ex, sym, ccy, volBand,
+      fastBarMs = minute, erPeriodBars = 3, rvBars = 100, macdBarMs = 3_600_000L, // RV 远未就绪
+      quotes = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)))
+    assert(feed(runnerWith(st), exposure(0.5, 10, gamma = -0.05)).nonEmpty, "下限 0.001 -> 必然对冲")
+
+  test("订单超时宽于最长存活时间, 否则框架会把正常挂单当丢单清理"):
+    val s = strat(Fixed(0.1, 0.1), quotes = byEr)
+    assert(s.orderTimeoutMs > calmStyle.ttlMs, s"orderTimeoutMs=${s.orderTimeoutMs} 须 > ${calmStyle.ttlMs}")

@@ -56,6 +56,25 @@ object PortfolioDelta:
     val ok = legs.iterator.map(_.inst.symbol).toSet
     Resolved(legs, held.iterator.map(_.symbol).filterNot(ok.contains).toVector.distinct)
 
+  /** 组合的**代表性年化 IV**，按 `|每腿 gamma 贡献|` 加权。
+    *
+    * 按 gamma 加权而不是按张数：对冲关心的是**敞口扩散得多快**，而那由 gamma 大的腿主导 ——
+    * 一条深度价外、gamma 近零的腿，它的 IV 对"敞口下一分钟会漂多少"几乎没有发言权。
+    *
+    * 权重全为 0 (无持仓 / 全部到期) -> None。
+    */
+  def weightedMarkVol(legs: Seq[PricedLeg], spot: Double, nowMs: Timestamp, rate: Double = DefaultRate): Option[Double] =
+    var wSum = 0.0
+    var vSum = 0.0
+    legs.foreach { l =>
+      val tYears = (l.inst.expiryMs - nowMs).toDouble / BlackScholes.MillisPerYear
+      val g = BlackScholes.greeks(l.inst.right, spot, l.inst.strike, tYears, l.markVol, rate)
+      val w = math.abs(l.inst.toCoin(l.contracts) * g.gamma)
+      wSum += w
+      vSum += w * l.markVol
+    }
+    if wSum > 0.0 then Some(vSum / wSum) else None
+
   /** 组合的 (delta, gamma)，币本位。已到期/剩余期限 ≤ 0 的腿由 [[BlackScholes]] 退化为内在价值，
     * delta 取 0/±1、gamma 取 0 —— 那正是到期时的真实敞口形态。 */
   def greeks(legs: Seq[PricedLeg], spot: Double, nowMs: Timestamp, rate: Double = DefaultRate): (Coin, Coin) =

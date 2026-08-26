@@ -1,6 +1,6 @@
 package strategy.strategies.ivsellhedge.live
 
-import strategy.strategies.ivsellhedge.logic.SellPlan
+import strategy.strategies.ivsellhedge.logic.{SellPlan, SigmaSource}
 import strategy.utils.hedge.{DeltaBand, QuotePolicy, QuoteStyle}
 import hft.domain.Coin
 
@@ -39,9 +39,10 @@ import scala.util.control.NonFatal
  * @param chopWidenMult     ER→0 (震荡) 时死区阈值的放宽倍数 (>= 1)。**它同时是真实敞口的上界系数**:
  *                          阈值最宽 = deltaThreshold × 它, 超过必然对冲
  * @param trendTightenMult  ER→1 (趋势) 时死区阈值的收紧系数 ∈ (0,1]
-  * @param erBar             效率比 ER 的 K 线粒度 (OKX 粒度串, 默认 "1m")。建在**标的价**上,
- *                          所以能用历史 K 线预热, 开机即就绪
- * @param erPeriod          ER 的回看根数 (默认 10)。它与 erBar 一起决定体制判定的反应时间
+  * @param fastBar           细粒度序列的 K 线粒度 (OKX 粒度串, 默认 "1m")。σ 与 ER 都建在它上面,
+ *                          所以都能用历史 K 线预热, 开机即就绪
+ * @param erPeriod          ER 的回看根数 (默认 10)。ER **只用于选报价方式**, 不再参与死区
+ * @param rvBars            实现波动的回看根数 (默认 30)
   * @param macdBar           MACD 的 K 线粒度 (OKX 粒度串, 如 "1H")；预热与实时聚合共用这一个事实
   * @param offset            对冲挂单相对盘口的外移比例 (保证 PostOnly 不吃单)
   * @param requoteMs         对冲挂单未成交的重挂间隔
@@ -71,12 +72,15 @@ final case class IvSellTuning(
     settleRounds: Int = 1,
     riskFreeRate: Double = 0.0,
     // ---- 对冲腿 ----
-    deltaThreshold: Double = 0.3,
-    macdTightenRatio: Double = 0.5,
-    chopWidenMult: Double = 2.0,
-    trendTightenMult: Double = 0.5,
-    erBar: String = "1m",
+    tightMult: Double = 0.5,
+    looseMult: Double = 2.0,
+    hedgeHorizonMinutes: Int = 30,
+    minTheta: Double = 0.02,
+    maxTheta: Double = 1.0,
+    sigmaSource: String = "realized",
+    fastBar: String = "1m",
     erPeriod: Int = 10,
+    rvBars: Int = 30,
     macdBar: String = "1H",
     macdFast: Int = 12,
     macdSlow: Int = 26,
@@ -99,15 +103,19 @@ final case class IvSellTuning(
     * 而症状只是"MACD 方向偶尔和图上不一样"。 */
   def macdBarMs: Long = IvSellTuning.barToMillis(macdBar)
 
-  /** ER 的 K 线粒度换算成毫秒 (同 [[macdBarMs]]: 粒度只配一处, 预热与实时聚合共用) */
-  def erBarMs: Long = IvSellTuning.barToMillis(erBar)
+  /** 细粒度序列的 K 线粒度换算成毫秒 (同 [[macdBarMs]]: 粒度只配一处, 预热与实时聚合共用) */
+  def fastBarMs: Long = IvSellTuning.barToMillis(fastBar)
 
-  /** 敞口死区：基准阈值 + 两个信号的缩放 (判据始终是真实敞口) */
-  def deltaBand: DeltaBand =
-    DeltaBand.adaptive(Coin(deltaThreshold), macdTightenRatio, chopWidenMult, trendTightenMult)
+  /** 敞口死区：阈值按预测波动范围定, 方向决定两侧不对称 (判据始终是真实敞口) */
+  def deltaBand: DeltaBand = DeltaBand.volScaled(
+    tightMult, looseMult, hedgeHorizonMinutes.toLong * 60_000L, Coin(minTheta), Coin(maxTheta))
 
-  /** 真实敞口的上界 (阈值最宽的那一档) —— 装配期日志里报出来, 便于核对风险敞口 */
-  def maxExposure: Double = deltaThreshold * chopWidenMult
+  /** σ 来源。未知取值**抛错**而不是静默回退 —— 配错了只表现为对冲疏密不对, 没有别的症状 */
+  def sigma: SigmaSource = sigmaSource.toLowerCase match
+    case "realized" => SigmaSource.Realized
+    case "iv"       => SigmaSource.ImpliedVol
+    case "max"      => SigmaSource.MaxOfBoth
+    case other      => sys.error(s"未知的 sigmaSource '$other' (支持 realized / iv / max)")
 
   /** 报价方式的选择：价格平缓 -> 被动慢挂；走单边 -> 跨价追单 */
   def quotePolicy: QuotePolicy = QuotePolicy.byEfficiency(

@@ -1,7 +1,8 @@
 package strategy.strategies.ivsellhedge.live
 
-import strategy.strategies.ivsellhedge.logic.SellPlan
+import strategy.strategies.ivsellhedge.logic.{SellPlan, SigmaSource}
 import strategy.utils.hedge.DeltaCtx
+import hft.domain.{Coin, Price}
 
 /** 配置单测：JSON 解析 + 默认回填、K 线粒度换算 (SSOT)、越界即抛。 */
 class IvSellHedgeConfigSpec extends munit.FunSuite:
@@ -10,9 +11,9 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
 
   test("K 线粒度只配一处, 毫秒由它派生 (MACD 与 KAMA 各一条)"):
     assertEquals(tuning.copy(macdBar = "1H").macdBarMs, 3_600_000L)
-    assertEquals(tuning.copy(erBar = "1m").erBarMs, 60_000L)
-    assertEquals(tuning.copy(erBar = "5m").erBarMs, 300_000L)
-    intercept[RuntimeException](tuning.copy(erBar = "7m").erBarMs)
+    assertEquals(tuning.copy(fastBar = "1m").fastBarMs, 60_000L)
+    assertEquals(tuning.copy(fastBar = "5m").fastBarMs, 300_000L)
+    intercept[RuntimeException](tuning.copy(fastBar = "7m").fastBarMs)
     assertEquals(tuning.copy(macdBar = "5m").macdBarMs, 300_000L)
     assertEquals(tuning.copy(macdBar = "1D").macdBarMs, 86_400_000L)
 
@@ -37,12 +38,29 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
     // ivStart=0 的语义与参考实现相反 ("从零波动起线性放大" 而非 "不启用缩放"), 更可能是漏配
     intercept[IllegalArgumentException](tuning.copy(ivStart = 0.0).toSellerConfig)
 
-  test("死区阈值随两个信号缩放, 且给出真实敞口的上界"):
-    val t = tuning.copy(deltaThreshold = 0.4, macdTightenRatio = 0.5, chopWidenMult = 2.0, trendTightenMult = 0.5)
-    assertEquals(t.maxExposure, 0.8, "上界 = 基准 × 震荡放宽倍数")
+  test("死区阈值按预测波动范围定, 方向决定两侧不对称"):
+    val t = tuning.copy(tightMult = 0.5, looseMult = 2.0, hedgeHorizonMinutes = 30,
+      minTheta = 0.001, maxTheta = 100.0)
     val b = t.deltaBand
-    assertEquals(b.bands(DeltaCtx(hft.domain.Coin.Zero, 0, Some(0.0))), (hft.domain.Coin(0.8), hft.domain.Coin(0.8)))
-    assertEquals(b.bands(DeltaCtx(hft.domain.Coin.Zero, 0, Some(1.0))), (hft.domain.Coin(0.2), hft.domain.Coin(0.2)))
+    // range = |gamma| × spot × σ × √(30分/一年)
+    val gamma = 0.01; val spot = 3000.0; val sigma = 0.6
+    val range = gamma * spot * sigma * math.sqrt(30 * 60_000.0 / hft.option.BlackScholes.MillisPerYear)
+    val (up, down) = b.bands(DeltaCtx(Coin.Zero, 1, Coin(gamma), Price(spot), Some(sigma)))
+    assert(math.abs(down.value - range * 0.5) < 1e-12, s"空头侧应 = 0.5×range, 实为 ${down.value}")
+    assert(math.abs(up.value - range * 2.0) < 1e-12, s"多头侧应 = 2.0×range, 实为 ${up.value}")
+
+  test("maxTheta 是敞口硬上界, 与波动率无关"):
+    val t = tuning.copy(minTheta = 0.001, maxTheta = 0.5)
+    val b = t.deltaBand
+    val (up, down) = b.bands(DeltaCtx(Coin.Zero, 0, Coin(1.0), Price(3000.0), Some(5.0))) // 极端波动
+    assertEquals(up, Coin(0.5))
+    assertEquals(down, Coin(0.5))
+
+  test("σ 来源可切换; 未知取值抛错而不是静默回退"):
+    assertEquals(tuning.copy(sigmaSource = "realized").sigma, SigmaSource.Realized)
+    assertEquals(tuning.copy(sigmaSource = "iv").sigma, SigmaSource.ImpliedVol)
+    assertEquals(tuning.copy(sigmaSource = "MAX").sigma, SigmaSource.MaxOfBoth)
+    intercept[RuntimeException](tuning.copy(sigmaSource = "vix").sigma)
 
   test("配置文件缺失 -> Left(原因), 不静默"):
     assert(IvSellHedgeConfig.loadOkx("conf/definitely-not-here.json").isLeft)
@@ -55,7 +73,7 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
         assertEquals(c.tuning.macdBar, "1H")
         assertEquals(c.tuning.enableOpen, false)
         assertEquals(c.tuning.macdFast, 12)  // 模板未列出 -> 默认值
-        assertEquals(c.tuning.erBar, "1m")
+        assertEquals(c.tuning.fastBar, "1m")
         assertEquals(c.tuning.passiveTtlMs, 60_000L)
         assertEquals(c.tuning.crossTtlMs, 1000L)
         assertEquals(c.simulated, true)
