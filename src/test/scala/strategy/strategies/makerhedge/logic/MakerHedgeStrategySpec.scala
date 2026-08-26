@@ -82,7 +82,7 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
     (0 to 7).foreach(i => feed(runner, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
     assertEquals(feed(runner, bbo(104.0, 8 * hour)), Vector.empty) // netDelta 0.5 > maxHedge 0.3 -> 不下
 
-  test("无 ccy 余额 -> greeks()=None -> 不对冲 (实盘由 OptionGreeksStream 同步兜底余额)"):
+  test("无 ccy 余额 -> greeks()=None -> 不对冲 (实盘由 OptionGreeksFeed 同步兜底余额)"):
     val runner = StrategyRunner(strat(ConstantBand(2.0, 2.0)), AccountId.Live)
     // 只 greeks, 无 Balance
     feed(runner, Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, 0.5, 0.01, -0.5, 1.0, 0), 0, 0))

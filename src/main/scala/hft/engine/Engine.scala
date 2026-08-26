@@ -61,12 +61,36 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
     * 与 [[addStrategy]] 的区别：不绑账户、不占标的、不做启动对齐、不校验指令契约。
     * 插件装上即开始工作：柜台开始接下单指令，行情源开始接订阅指令。
     */
-  def install(plugin: Actor): ActorHandle = system.spawn(plugin)
+  def install(plugin: Actor): ActorHandle = synchronized {
+    rejectDuplicateGateway(plugin)
+    system.spawn(plugin)
+  }
+
+  /** 同一条独占指令上已经有人接了，就别再装第二个。
+    *
+    * 检查排在 spawn **之前** —— 装上了再拒绝就得再把它停回去，而它可能已经建好了连接。
+    *
+    * 挡的是装配笔误：把真实柜台与虚拟柜台同时装在 `(Live, Okx)` 上，两台都会收到同一条
+    * 下单意图，各下一次单。契约校验只查"有没有人接"，查不出"接的人太多"；而这种错误在
+    * 运行期唯一的症状就是仓位莫名其妙翻倍。
+    */
+  private def rejectDuplicateGateway(plugin: Actor): Unit =
+    plugin.interests.foreach {
+      case Interest.Keyed(topic, keys) if Commands.exclusive.exists(_ eq topic) =>
+        keys.foreach { key =>
+          if bus.hasAnyDirectSubscriber(topic, key) then
+            throw IllegalStateException(
+              s"${plugin.name} 要接 $topic@$key, 但那条指令已经有接单者了: " +
+                "同一条独占指令只能有一个接单者, 两个柜台接同一个 (账户, 交易所) 会静默双执行"
+            )
+        }
+      case _ => ()
+    }
 
   /** 停一个组件（连同它的整棵子树），并释放它可能占用的 (账户, 标的)。返回时收尾已跑完。
     *
-    * 若它是某条指令的最后一个接单者，记录告警并列出还在发这条指令的组件 ——
-    * 但**不级联停止**它们：数据依赖天然成环 (策略依赖柜台的回报、柜台依赖策略的下单)，
+    * 若它是某条指令的最后一个接单者，记录告警并列出**空掉的信道** ——
+    * 但**不级联停止**依赖方：数据依赖天然成环 (策略依赖柜台的回报、柜台依赖策略的下单)，
     * 拿它定停机顺序无解；"要不要把依赖它的一起停掉"是运维决定，框架替人决定会在不该停的
     * 时候停。生命周期依赖走的是另一条路 —— 谁装的谁负责停，那是棵树。
     */
@@ -193,13 +217,15 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
     missing ++= unservedMarketFeeds(subscription)
     subscription.exchanges.toVector.sortBy(_.toString).foreach { exchange =>
       val target = AccountExchange(account, exchange)
-      if !bus.hasSubscriber(OrderIntent, target) then
+      // 只数**定向**订阅者: 一个订了 Interest.All(OrderIntent) 的意图记录器是旁观者,
+      // 把它算作接单者的话, 柜台没装也能通过校验, 而订单永远发不出去。
+      if bus.directSubscriberCount(OrderIntent, target) == 0 then
         missing += s"下单指令 $target 无人接单: 没有装载该账户在 $exchange 的柜台, 订单永远发不出去"
       // 只有会发对齐指令的账户才需要有人接 —— 影子账户从零开始, 不对齐
       val needsSync = account match
         case AccountId.Live     => true
         case _: AccountId.Paper => false
-      if needsSync && !bus.hasSubscriber(AccountSync, target) then
+      if needsSync && bus.directSubscriberCount(AccountSync, target) == 0 then
         missing += s"账户对齐指令 $target 无人接单: 启动对齐永远不会完成, 策略会一直等下去"
     }
     if missing.nonEmpty then

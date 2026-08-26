@@ -221,7 +221,7 @@ final class BacktestEngine(
                         enqueue(Counter.inbound(config, CounterInput.OrderArrived(aligned, orderIdGen.toString)))
                       case Left(reason) =>
                         logger.warn(s"下单被交易所精度拒绝: $reason")
-                        schedule(now, Action.Deliver(TradingGateway.rejection(account, exchange, o, reason)))
+                        schedule(now, Action.Deliver(TradingGateway.rejection(account, exchange, o, reason, now)))
                   }
                 case OutcomeEvent.CancelOrder(_, _, ref) =>
                   enqueue(Counter.inbound(config, CounterInput.CancelArrived(ref)))

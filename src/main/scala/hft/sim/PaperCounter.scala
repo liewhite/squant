@@ -96,8 +96,8 @@ final class PaperCounter(
   override protected def cancelOrder(symbol: Symbol, ref: OrderRef, now: Timestamp): Unit =
     enqueue(Counter.inbound(config, CounterInput.CancelArrived(ref)))
 
-  /** 影子账户从零开始, 没有历史可对齐 —— 引擎也不会给它发对齐指令 (见 Engine.addStrategies)。
-    * 这两个实现只在有人手工发指令时才会被用到, 如实返回"什么都没有"。 */
+  /** 影子账户从零开始, 引擎不会给它发对齐指令 (见 Engine.addStrategies)。
+    * 真收到指令时如实报告当下的账本 —— 撤下策略再装回来时它确实可能已经有仓位了。 */
   override protected def syncPositions(symbols: Set[Symbol]): Vector[Position] =
     state.ledger.openPositions(state.markOf)
 

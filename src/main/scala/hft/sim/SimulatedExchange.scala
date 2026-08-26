@@ -2,6 +2,8 @@ package hft.sim
 
 import hft.actor.ActorSystem
 import hft.domain.*
+import hft.actor.ActorHandle
+import hft.event.Commands
 import hft.event.Commands.{MarketSubscription, MarketSubscriptionRequest}
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topic, Topics}
 import hft.exchange.{MarketFeed, TradingGateway}
@@ -83,6 +85,10 @@ final class SimulatedExchange(
   /** 上游行情源专属的私有总线：主总线上看不见它发的行情 */
   private val rawBus = EventBus()
 
+  /** 私有总线上的子系统 —— 停机时要连它一起停 (见 [[onStop]]) */
+  @volatile private var rawSystem: ActorSystem = scala.compiletime.uninitialized
+  @volatile private var upstreamHandle: ActorHandle = scala.compiletime.uninitialized
+
   /** 除下单与对齐之外，本柜台还要接**行情订阅指令** —— 它扮演的是整个交易所，
     * 行情面归它管。指令原样转给私有总线上的上游。 */
   override protected def extraInterests: Set[Interest] = Set(
@@ -93,14 +99,21 @@ final class SimulatedExchange(
 
   override protected def connect(): Unit =
     given ox.Ox = scope
-    val rawSystem = ActorSystem(rawBus)
-    rawSystem.spawn(upstream)
-    // 只订公共行情：柜台撮合的输入就是行情，别的与它无关
-    val fromUpstream = rawBus.subscribe(Topics.market.map(Interest.All.apply))
+    rawSystem = ActorSystem(rawBus)
+    upstreamHandle = rawSystem.spawn(upstream)
+    // **收上游的一切**, 而不是按内置行情 topic 枚举着收: 用户自定义的行情源同样是一等公民
+    // (见 Subscription.marketStreams), 枚举着收会让它在这里静默消失 —— 契约校验通过、
+    // 订阅指令也转下去了, 数据却没人接着往外送。
+    val fromUpstream = rawBus.subscribeAll()
     // 私有总线的消费线程只做一件事：把行情投回主总线上本柜台自己的键，
     // 于是它重新回到 actor 线程手里 —— 状态的写者仍然只有一个。
     fork {
-      fromUpstream.events.foreach(event => publish(Event.local(UpstreamMarkets, UpstreamMarket(account, event))))
+      fromUpstream.events.foreach { event =>
+        // 跳过指令: 它是从主总线**流进来**的 (见 onOther), 原样转回去会让订阅指令
+        // 在两条总线之间无限弹跳。
+        if !Commands.all.exists(_ eq event.topic) then
+          publish(Event.local(UpstreamMarkets, UpstreamMarket(account, event)))
+      }
     }
     logger.info(
       s"虚拟柜台 (替身) 启动: $target order->ex=${config.orderToExchangeDelayMs}ms " +
@@ -172,3 +185,12 @@ final class SimulatedExchange(
 
   /** 本账户当前的账本快照 (供绩效统计与测试) */
   def ledger: Ledger = state.ledger
+
+  /** 停机时把私有总线上的上游一并停掉 —— 它不在主生命周期树上, 没人替它收尾。
+    *
+    * 不停的后果不是正确性问题 (本柜台的邮箱已关, 转发过来的事件会被丢弃)，
+    * 而是上游的 `onStop` 永不执行、转发线程一直跑到进程结束。
+    */
+  override def onStop(now: Timestamp): Vector[AnyEvent] =
+    if upstreamHandle != null then rawSystem.stop(upstreamHandle)
+    Vector.empty

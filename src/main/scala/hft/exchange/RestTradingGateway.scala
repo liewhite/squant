@@ -58,7 +58,7 @@ final class RestTradingGateway(
         case Left(e @ ExchangeError.Http(status, _)) if status >= 400 && status < 500 =>
           // 交易所明确拒绝，订单确定未成立 -> 回流策略 (与精度拒绝同一条路径)
           logger.warn(s"下单被拒: $exchange ${order.symbol} ${e.message}")
-          reject(order, e.message)
+          reject(order, e.message, now)
         case Left(e) =>
           // 网络/超时/5xx: 订单是否成立不确定，本地状态无法保证正确
           throw IllegalStateException(s"下单结果不确定, 终止: $exchange ${order.symbol} ${e.message}")

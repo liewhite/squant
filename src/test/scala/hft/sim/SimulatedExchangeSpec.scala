@@ -6,6 +6,7 @@ import hft.engine.Engine
 import hft.event.Commands.{AccountOutcome, OrderIntent, OutcomeEvent}
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.exchange.MarketFeed
+import hft.event.MarketTopic
 import hft.strategy.{Strategy, StrategyHandlers}
 import ox.{Ox, fork, supervised}
 
@@ -18,6 +19,14 @@ import hft.TestUnits.given
   * 柜台是插件：下单经总线的下单指令进来、回报经总线出去。测试因此完全走总线，
   * 不再有任何"直接调柜台的 REST 方法"的旁路 —— 那条旁路在实盘里根本不存在。
   */
+object CustomFeedSpec:
+  /** 用户自定义的行情族 —— 框架不知道它的存在, 但它是一等公民 */
+  final case class DepthSnapshot(instrument: Instrument, value: Double)
+
+  object Depth extends MarketTopic[DepthSnapshot]("testDepth"):
+    def keyOf(p: DepthSnapshot): Instrument = p.instrument
+    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.BBO(symbol)
+
 class SimulatedExchangeSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
@@ -32,6 +41,9 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     /** 外部喂一条盘口 —— 走的正是真实行情源发布事件的那条路径 */
     def emitBbo(bid: Price, ask: Price, ts: Timestamp): Unit =
       publish(Event.at(Topics.Bbo, BBO(ex, sym, bid, Coin(1.0), ask, Coin(1.0), ts), ts))
+    /** 外部喂一条**用户自定义**的行情 —— 框架把这类源当一等公民, 替身也必须转发 */
+    def emitCustom(value: Double, ts: Timestamp): Unit =
+      publish(Event.at(CustomFeedSpec.Depth, CustomFeedSpec.DepthSnapshot(Instrument(ex, sym), value), ts))
 
   /** 测试用极简策略: 收到首个 BBO 即在买一下方 offset 处挂一张 PostOnly 限价买单 */
   private class OneShotMakerStrategy(offsetRatio: Double, orderSize: Coin) extends Strategy:
@@ -169,6 +181,40 @@ class SimulatedExchangeSpec extends munit.FunSuite:
       eventually("策略应已挂出订单到柜台")(sim.restingCount > 0)
       upstream.emitBbo(49980, 49984, 2)
       eventually("买单应成交形成多头")(sim.positions.exists(_.size > Coin.Zero))
+
+  test("用户自定义的行情 topic 也被替身转发出去 —— 否则它在私有总线上静默消失"):
+    // 替身若按内置行情 topic 枚举着收上游, 用户自定义的行情源就会在这里断掉:
+    // 契约校验通过 (替身接了订阅指令)、指令也转下去了, 数据却没人接着往外送 ——
+    // 策略"很安静", 没有任何症状。这正是本架构最忌讳的失效形态。
+    supervised:
+      val bus = EventBus()
+      val seen = ConcurrentLinkedQueue[Double]()
+      val mailbox = bus.subscribe(Set(Interest.All(CustomFeedSpec.Depth)))
+      fork { mailbox.events.foreach(ev => ev.as(CustomFeedSpec.Depth).foreach(d => seen.add(d.value))) }
+      val upstream = FakeMarketFeed()
+      ActorSystem(bus).spawn(SimulatedExchange(upstream, metas, SimConfig(0, 0, 10_000), AccountId.Live))
+
+      upstream.emitCustom(42.0, 1)
+      eventually("自定义行情应被转发到主总线")(seen.asScala.toVector == Vector(42.0))
+
+  test("行情订阅指令不会在两条总线之间弹跳"):
+    // 指令是从主总线流进替身、再转给私有总线上游的。若中继把它原样转回主总线,
+    // 替身就会再收到一次、再转一次 —— 无限循环, 症状是 CPU 打满而不是报错。
+    supervised:
+      val bus = EventBus()
+      val upstream = FakeMarketFeed()
+      ActorSystem(bus).spawn(SimulatedExchange(upstream, metas, SimConfig(0, 0, 10_000), AccountId.Live))
+
+      val relayed = ConcurrentLinkedQueue[AnyEvent]()
+      val mailbox = bus.subscribe(Set(Interest.Keyed(hft.event.Commands.MarketSubscription, Set(ex))))
+      fork { mailbox.events.foreach(relayed.add) }
+
+      bus.publish(Event.local(
+        hft.event.Commands.MarketSubscription,
+        hft.event.Commands.MarketSubscriptionRequest(ex, Set(SubscriptionKind.BBO(sym))),
+      ))
+      Thread.sleep(200) // 真弹跳的话这 200ms 足够攒出成千上万条
+      assertEquals(relayed.size, 1, "订阅指令只该在主总线上出现一次")
 
   test("精度对齐在柜台里发生: 收不下的量不进撮合, 以拒单回流"):
     // 精度是交易所的事实, 影子盘也照此对齐 —— 否则它的成交量与实盘系统性地差一个取整,

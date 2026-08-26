@@ -141,3 +141,15 @@ object Commands:
     * (发出时等待方可能已经收够了)。
     */
   val all: Set[Topic[?, ?]] = Set(MarketSubscription, AccountSync, OrderIntent)
+
+  /** **恰好一个接单者**的指令。
+    *
+    * 两个柜台接同一个 `(账户, 交易所)` 就是静默双执行 —— 同一条下单意图被投递给两者，
+    * 各下一次单，而没有任何症状。路由键带上交易所维度防住的是"拆出多个柜台"这一种成因，
+    * 防不住"同一个键上装了两台"；后者只能靠装配期数一数。
+    *
+    * [[MarketSubscription]] 不在其中：一个交易所挂多个行情插件是正常的
+    * (一个接盘口与成交、一个接期权希腊值)，它们各自认领认得的流类型。
+    * 行情多订一次最多浪费一次往返，与多下一次单不是一回事。
+    */
+  val exclusive: Set[Topic[?, ?]] = Set(AccountSync, OrderIntent)

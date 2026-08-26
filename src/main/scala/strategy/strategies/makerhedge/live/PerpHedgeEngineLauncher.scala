@@ -10,9 +10,10 @@ import org.slf4j.LoggerFactory
 import ox.supervised
 import sttp.client4.DefaultSyncBackend
 
-/** 永续 delta 对冲实盘启动器 (引擎集成版)。**复用实盘引擎**: BBO 走引擎已有的 BybitMarketStream (不二次订阅),
-  * 期权净 greeks 由 [[OptionGreeksStream]] 注入同一条 事件总线; 对冲用引擎原生的 [[MakerHedgeStrategy]]
-  * (MaAsym 带 maker 挂单 + 5s 重挂), 订单走引擎 outcomeBus (StrategyRunner 自动按 SymbolMeta 对齐精度)。
+/** 永续 delta 对冲实盘启动器 (引擎集成版)。**复用实盘引擎**: BBO 走 [[BybitMarketFeed]] (不二次订阅),
+  * 期权净 greeks 由 [[OptionGreeksFeed]] 从柜台的汇报面注入同一条总线; 对冲用引擎原生的
+  * [[MakerHedgeStrategy]] (MaAsym 带 maker 挂单 + 5s 重挂), 订单经下单指令进柜台 (柜台按
+  * SymbolMeta 对齐精度)。
   * gammaAdjust=true: 两次 greeks 轮询间用引擎 BBO + gamma 一阶刷新 delta -> tick 级新鲜。
   *
   * 启动时用历史 K 线 prewarm ATR/均线, 避免冷启动等数十小时。**无 dry-run, 启动即真实对冲下单** —— 用小资金测试。
@@ -43,8 +44,8 @@ import sttp.client4.DefaultSyncBackend
     val perp = BybitClient.trading(backend, credentials.get) // 永续 (linear) 下单/查仓
     val opt = BybitOptionsClient(backend, credentials, testnet = conf.testnet)
 
-    // 一个 accountStream = 期权 greeks 注入流 (先, 同步发 ccy 余额兜底) + Bybit 永续账户流 (持仓/订单回报)
-    val feed = CompositeAccountFeed(Exchange.Bybit, Seq(OptionGreeksStream(opt, Exchange.Bybit, t.ccy, t.greeksPollMs), BybitAccountFeed(perp, backend)))
+    // 一个汇报面 = 期权 greeks 注入流 (先, 同步发 ccy 余额兜底) + Bybit 永续账户流 (持仓/订单回报)
+    val feed = CompositeAccountFeed(Exchange.Bybit, Seq(OptionGreeksFeed(opt, Exchange.Bybit, t.ccy, t.greeksPollMs), BybitAccountFeed(perp, backend)))
 
     // 柜台在前、行情在后: 柜台既接下单指令也推回报 (消费者), 行情源是纯生产者。
     val gateway = RestTradingGateway.load(perp, feed, AccountId.Live)

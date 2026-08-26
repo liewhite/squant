@@ -86,6 +86,40 @@ class EngineContractSpec extends munit.FunSuite:
       val e = intercept[IllegalStateException](engine.addStrategy(Watcher(), AccountId.Live))
       assert(e.getMessage.contains("下单指令"), e.getMessage)
 
+  test("旁观者冒充不了接单者 —— 订 Interest.All(OrderIntent) 的记录器不算数"):
+    // 校验数的是**定向**订阅者。把全量订阅者算进去的话, 一个意图记录/监控插件就能让
+    // "柜台没装"这件事通过校验, 而订单永远发不出去 —— 那正是这道校验要防的失效。
+    supervised:
+      val log = ConcurrentLinkedQueue[String]()
+      val engine = Engine.start(plugins = Vector(RecordingFeed(ex, log)))
+      val spy = engine.subscribe(Set(Interest.All(hft.event.Commands.OrderIntent)))
+      try
+        val e = intercept[IllegalStateException](engine.addStrategy(Watcher(), AccountId.Live))
+        assert(e.getMessage.contains("下单指令"), e.getMessage)
+      finally spy.close()
+
+  test("同一个 (账户, 交易所) 上装第二个柜台 -> 装配期拒绝 (否则静默双执行)"):
+    // 路由键带交易所维度防住的是"拆出多个柜台"这一种成因, 防不住"同一个键上装了两台";
+    // 后者只能靠装配期数一数。运行期唯一的症状是仓位莫名其妙翻倍。
+    supervised:
+      val log = ConcurrentLinkedQueue[String]()
+      val engine = Engine.start(plugins = Vector(RecordingGateway(ex, AccountId.Live, log)))
+      val e = intercept[IllegalStateException](engine.install(RecordingGateway(ex, AccountId.Live, log)))
+      assert(e.getMessage.contains("已经有接单者"), e.getMessage)
+
+  test("同一个交易所上装两个柜台, 账户不同 -> 允许 (实盘与影子盘并行的前提)"):
+    supervised:
+      val log = ConcurrentLinkedQueue[String]()
+      val engine = Engine.start(plugins = Vector(RecordingGateway(ex, AccountId.Live, log)))
+      engine.install(RecordingGateway(ex, AccountId.Paper(1), log)) // 不该抛
+
+  test("同一个交易所上装两个行情插件 -> 允许 (一个接盘口、一个接希腊值)"):
+    // 行情订阅不是独占指令: 多订一次最多浪费一次往返, 与多下一次单不是一回事。
+    supervised:
+      val log = ConcurrentLinkedQueue[String]()
+      val engine = Engine.start(plugins = Vector(RecordingFeed(ex, log)))
+      engine.install(RecordingFeed(ex, log)) // 不该抛
+
   test("拒绝发生在策略启动之前 —— 起来了再拒绝就得再把它停回去"):
     supervised:
       val log = ConcurrentLinkedQueue[String]()

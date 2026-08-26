@@ -32,6 +32,9 @@ final class EventBus:
 
   private val topics: ConcurrentHashMap[Topic[?, ?], TopicIndex] = ConcurrentHashMap()
 
+  /** 无差别收下一切的订阅者，见 [[subscribeAll]]。通常为空，热路径上只是一次长度检查 */
+  private val everything: CopyOnWriteArrayList[Channel[AnyEvent]] = CopyOnWriteArrayList()
+
   /** 订阅/退订的互斥锁。
     *
     * 只锁冷路径 —— [[publish]] 不参与，热路径仍然无锁。
@@ -73,6 +76,25 @@ final class EventBus:
     EventBus.Mailbox(ch, () => registrationLock.synchronized(remove(ch, allTopics, keyedByTopic)))
   }
 
+  /** 无差别订阅本总线上的**一切** —— 给**中继**用，不给业务组件用。
+    *
+    * 业务组件一律声明 [[Interest]]：那样投递才是两次哈希 (而不是每条事件都发给你再自己筛)，
+    * 引擎也才自省得出该向交易所订哪些流。全收会把这两样一起丢掉。
+    *
+    * 存在的理由只有一个：**中继不知道、也不该知道会有哪些 topic 流过**。虚拟柜台把上游
+    * 行情源装在自己的私有总线上，再延迟转发到主总线 —— 若它按内置行情 topic 枚举着收，
+    * 用户自定义的行情源就会在那里静默消失 (契约校验通过、订阅指令也转下去了，
+    * 数据却没人接着往外送)，而这正是本架构最忌讳的失效形态。
+    *
+    * 中继务必跳过指令面事件 (见 [[Commands.all]])：指令是从主总线**流进来**的，
+    * 原样转回去会让它在两条总线之间无限弹跳。
+    */
+  def subscribeAll(): EventBus.Mailbox = registrationLock.synchronized {
+    val ch = Channel.unlimited[AnyEvent]
+    everything.add(ch)
+    EventBus.Mailbox(ch, () => registrationLock.synchronized(everything.remove(ch): Unit))
+  }
+
   /** 某个 (topic, key) 槽上的订阅者数 —— 供观测与测试确认退订确实摘干净了。
     *
     * key 的类型由 topic 给出 (而不是 `Any`)：查一个类型对不上的 key 永远得 0，
@@ -92,6 +114,19 @@ final class EventBus:
     */
   def hasSubscriber[K](topic: Topic[K, ?], key: K): Boolean = subscriberCount(topic, key) > 0
 
+  /** 定向订阅了这个 `(topic, key)` 的订阅者数 —— **不含**该 topic 的全量订阅者。
+    *
+    * 指令面的契约校验用的是它，而不是 [[subscriberCount]]：两者的差别正是
+    * **接单者与旁观者的差别**。一个订了 `Interest.All(OrderIntent)` 的意图记录器是旁观者，
+    * 它不会执行任何订单；若把它算作接单者，柜台没装也能通过校验，而订单永远发不出去 ——
+    * 那恰是这道校验存在的全部理由要防的那种零症状失效。
+    *
+    * 反过来，接单者**必然**是定向订阅的：它服务的是某个确定的账户/交易所，
+    * 全量订阅意味着它连"哪些单归自己"都没想清楚。
+    */
+  def directSubscriberCount[K](topic: Topic[K, ?], key: K): Int =
+    Option(topics.get(topic)).fold(0)(idx => Option(idx.byKey.get(key)).fold(0)(_.size))
+
   /** 擦除了 key 类型的同一个查询 —— 只给"从一份 [[Interest]] 声明反查"用
     * (那里的 key 类型已被擦除)。限定 `private[hft]`: 公开面留给类型安全的那一个,
     * 免得业务代码拿一个类型对不上的 key 查出个永远为假的答案。 */
@@ -99,6 +134,10 @@ final class EventBus:
     Option(topics.get(topic)).exists { idx =>
       !idx.all.isEmpty || Option(idx.byKey.get(key)).exists(!_.isEmpty)
     }
+
+  /** [[directSubscriberCount]] 的擦除版，理由同上 */
+  private[hft] def hasAnyDirectSubscriber(topic: Topic[?, ?], key: Any): Boolean =
+    Option(topics.get(topic)).exists(idx => Option(idx.byKey.get(key)).exists(!_.isEmpty))
 
   /** 把一条 channel 从它登记过的每个槽里摘除。
     *
@@ -129,6 +168,7 @@ final class EventBus:
     * 不该把发布方 (另一个 actor 的事件循环) 炸掉、进而级联终止整个引擎。
     */
   def publish(event: AnyEvent): Unit =
+    if !everything.isEmpty then everything.forEach(ch => ch.sendOrClosed(event): Unit)
     val idx = topics.get(event.topic)
     if idx != null then
       idx.all.forEach(ch => ch.sendOrClosed(event): Unit)

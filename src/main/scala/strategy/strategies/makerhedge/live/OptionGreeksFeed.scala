@@ -14,8 +14,8 @@ import org.slf4j.LoggerFactory
   * **关键**: `StateManager.greeks` 要求 greeks 与 `cashBalances(ccy)` 同时存在才返回总 delta; live 下
   * 若交易所钱包帧无该 ccy 条目 (余额 0 常不下发), greeks 永远读不到 -> 对冲静默不触发 -> 期权裸敞口!
   * 故 start 时**同步先发一条 ccy 余额 0** 兜底 (在永续账户流之前 -> 真实现货余额到达会覆盖, 无竞态)。 */
-final class OptionGreeksStream(opt: OptionsExchange, exch: Exchange, ccy: String, pollMs: Long = 3000L) extends AccountFeed:
-  private val logger = LoggerFactory.getLogger(classOf[OptionGreeksStream])
+final class OptionGreeksFeed(opt: OptionsExchange, exch: Exchange, ccy: String, pollMs: Long = 3000L) extends AccountFeed:
+  private val logger = LoggerFactory.getLogger(classOf[OptionGreeksFeed])
   override def exchange: Exchange = exch
 
   override def connect(account: AccountId, publish: AnyEvent => Unit, spawn: (=> Unit) => Unit): Unit =

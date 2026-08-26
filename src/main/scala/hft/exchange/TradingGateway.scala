@@ -99,7 +99,7 @@ abstract class TradingGateway extends Actor:
             // 交易所收不下 —— 走与"交易所明确拒绝"同一条回流路径, 策略侧的 pending 登记
             // 因此被统一清理。分成两套机制的话, 其中一套迟早会漏掉某种拒绝形态。
             gatewayLogger.warn(s"下单被交易所精度拒绝: $reason")
-            reject(order, reason)
+            reject(order, reason, now)
       }
     case OutcomeEvent.CancelOrder(_, symbol, ref) =>
       gatewayLogger.info(s"撤单: $exchange $symbol ${ref.raw}")
@@ -109,8 +109,8 @@ abstract class TradingGateway extends Actor:
     *
     * 子类在收到交易所的 4xx 拒绝时也调它 —— 两种拒绝对策略是同一件事："这张单确定没成立"。
     */
-  protected final def reject(order: Order, reason: String): Unit =
-    ctx.publish(TradingGateway.rejection(account, exchange, order, reason))
+  protected final def reject(order: Order, reason: String, now: Timestamp): Unit =
+    ctx.publish(TradingGateway.rejection(account, exchange, order, reason, now))
 
   // ==================== 对齐 ====================
 
@@ -211,9 +211,12 @@ object TradingGateway:
     *
     * 策略侧的挂单登记靠它清理。做成一处：两种拒绝各造一条回报的话，
     * 其中一条迟早会漏掉某个字段，而漏掉 clientOrderId 就等于那条登记永远清不掉。
+    *
+    * `now` 是**本次处理时刻**而不是墙钟：回测在同一条路径上产出拒单，读墙钟会让
+    * 事件时间戳跨运行不可复现 —— 观察者导出的记录、策略读 timestamp 的任何逻辑都跟着漂。
     */
-  def rejection(account: AccountId, exchange: Exchange, order: Order, reason: String): AnyEvent =
-    Event.local(
+  def rejection(account: AccountId, exchange: Exchange, order: Order, reason: String, now: Timestamp): AnyEvent =
+    Event.stamped(
       Topics.OrderUpdate,
       OrderUpdate(
         account = account,
@@ -227,8 +230,10 @@ object TradingGateway:
         quantity = Coin.Zero,
         filledQuantity = Coin.Zero,
         fillSize = Coin.Zero,
-        timestamp = nowMs,
+        timestamp = now,
       ),
+      now,
+      now,
     )
 
 /** 账户私有推送流 —— 柜台的"汇报"面。
