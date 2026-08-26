@@ -4,7 +4,8 @@ import hft.domain.*
 import hft.engine.StrategyRunner
 import hft.event.{AnyEvent, Event, Interest, Topics}
 import hft.sim.SimConfig
-import hft.strategy.{OutcomeEvent, Strategy, StrategyHandlers}
+import hft.event.Commands.OutcomeEvent
+import hft.strategy.{Strategy, StrategyHandlers}
 import hft.state.{StateManager}
 import hft.TestUnits.given
 
@@ -29,10 +30,10 @@ class BacktestEngineSpec extends munit.FunSuite:
       if placed then Vector.empty
       else
         placed = true
-        Vector(ctx.place(
+        ctx.place(
           Order("", ex, sym, Side.Long, OrderType.Limit(b.bidPrice, TimeInForce.PostOnly), 1.0, reduceOnly = false, clientOrderId = ""),
           "buy",
-        ))
+        )
     }
 
   private val series = Vector(
@@ -42,13 +43,13 @@ class BacktestEngineSpec extends munit.FunSuite:
   )
 
   private def runOnce(): BacktestResult =
-    val runner = StrategyRunner.backtest(OneShotBuy(), metas)
+    val runner = StrategyRunner.backtest(OneShotBuy())
     BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0), metas).run()
 
   /** 跑一次并收集投递给观察者的全部事件 (含逐笔回报的 client_order_id 与时间戳)。 */
   private def runCollect(): Vector[AnyEvent] =
     val collected = Vector.newBuilder[AnyEvent]
-    val runner = StrategyRunner.backtest(OneShotBuy(), metas)
+    val runner = StrategyRunner.backtest(OneShotBuy())
     BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0), metas, observers = Seq(collected += _)).run()
     collected.result()
 
@@ -75,7 +76,7 @@ class BacktestEngineSpec extends munit.FunSuite:
     assertEquals(bbos, series.size, "撮合不再回显行情后, 转发的条数仍应等于源事件数")
 
   test("账户不一致的 runner 在装配期即被拒 (私有回报按账户路由, 不一致会静默饿死策略)"):
-    val runner = StrategyRunner.backtest(OneShotBuy(), metas, AccountId.Paper(1))
+    val runner = StrategyRunner.backtest(OneShotBuy(), AccountId.Paper(1))
     val e = intercept[IllegalArgumentException](
       BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(), metas)
     )
@@ -84,7 +85,7 @@ class BacktestEngineSpec extends munit.FunSuite:
   test("数据源乱序: 虚拟时间不倒流, 乱序条数被计数上报"):
     // 第 2 条 BBO 的时间戳倒退回 1500 (< 已推进到的 2000), 引擎应钳制而非让时间回退
     val disordered = Vector(bboEv(100.0, 100.1, 1000), bboEv(99.8, 99.9, 2000), bboEv(99.7, 99.8, 1500))
-    val runner = StrategyRunner.backtest(OneShotBuy(), metas)
+    val runner = StrategyRunner.backtest(OneShotBuy())
     val r = BacktestEngine(ex, FixedSource(disordered), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0), metas).run()
     assertEquals(r.outOfOrderEvents, 1L)
     assertEquals(r.marketEvents, 3L)

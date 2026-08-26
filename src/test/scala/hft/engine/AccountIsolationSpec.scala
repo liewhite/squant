@@ -4,7 +4,8 @@ import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.state.StateManager
-import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent, Strategy, StrategyHandlers}
+import hft.event.Commands.{AccountOutcome, OrderIntent, OutcomeEvent}
+import hft.strategy.{Strategy, StrategyHandlers}
 import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -20,8 +21,6 @@ class AccountIsolationSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
   private val inst = Instrument(ex, sym)
-  private val meta = SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
-  private val metas = Map((ex, sym) -> meta)
   private val paper = AccountId.Paper(1)
 
   /** 记录自己看到的成交与仓位；两个实例共用同一份逻辑 */
@@ -39,8 +38,8 @@ class AccountIsolationSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val seen = ConcurrentLinkedQueue[String]()
-      system.spawn(Executor(Recorder(seen, "live"), metas, AccountId.Live))
-      system.spawn(Executor(Recorder(seen, "paper"), metas, paper))
+      system.spawn(Executor(Recorder(seen, "live"), AccountId.Live))
+      system.spawn(Executor(Recorder(seen, "paper"), paper))
 
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
       bus.publish(Event.local(Topics.Fill, fill(AccountId.Live, 1.0)))
@@ -57,19 +56,41 @@ class AccountIsolationSpec extends munit.FunSuite:
       assertEquals(got.count(_ == "live:bbo"), 2, "行情无账户归属，一份服务所有账户")
       assertEquals(got.count(_ == "paper:bbo"), 2)
 
-  test("下单意图按账户路由到各自出口"):
+  test("下单意图按 (账户, 交易所) 路由到各自柜台"):
     supervised:
       val bus = EventBus()
-      val live = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountId.Live))))
-      val shadow = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(paper))))
+      val live = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, ex)))))
+      val shadow = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(paper, ex)))))
 
       val order = OutcomeEvent.CancelOrder(ex, sym, OrderRef.ByClientId("c1"))
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, order)))
       bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, order)))
 
-      // 实盘出口先读到的必须是实盘那条 —— 影子盘那条根本不该进它的邮箱
+      // 实盘柜台先读到的必须是实盘那条 —— 影子盘那条根本不该进它的邮箱
       assertEquals(live.events.receive().as(OrderIntent).map(_.account), Some(AccountId.Live))
       assertEquals(shadow.events.receive().as(OrderIntent).map(_.account), Some(paper))
+
+  test("同一账户的两个交易所柜台互不串单"):
+    // 路由键少了交易所维度时, 两个柜台都会收到同一条意图 —— 静默双执行, 没有任何症状。
+    supervised:
+      val bus = EventBus()
+      val binance = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, Exchange.Binance)))))
+      val okx = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, Exchange.Okx)))))
+
+      bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live,
+        OutcomeEvent.CancelOrder(Exchange.Okx, sym, OrderRef.ByClientId("okx-1")))))
+      // 哨兵: Binance 柜台若误收了上面那条, 先读到的就不是哨兵
+      bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live,
+        OutcomeEvent.CancelOrder(Exchange.Binance, sym, OrderRef.ByClientId("sentinel")))))
+
+      assertEquals(okx.events.receive().as(OrderIntent).map(_.outcome.targetExchange), Some(Exchange.Okx))
+      assertEquals(
+        binance.events.receive().as(OrderIntent).flatMap(_.outcome match
+          case OutcomeEvent.CancelOrder(_, _, ref) => Some(ref.raw)
+          case _                                   => None),
+        Some("sentinel"),
+        "Binance 柜台不该收到发往 OKX 的意图",
+      )
 
   test("同账户同标的不能有两个策略实例"):
     val claims = InstrumentClaims[String]()

@@ -13,10 +13,9 @@ class ExchangeOrderPrecisionSpec extends munit.FunSuite:
 
   private def sentQuantity(contractSize: Double, sizeStep: Double, wanted: Double): String =
     val meta = metaOf(contractSize, sizeStep)
-    val metas = Map((meta.exchange, meta.symbol) -> meta)
     val order = Order("", meta.exchange, meta.symbol, Side.Long, OrderType.Market, Coin(wanted), reduceOnly = false, clientOrderId = "c1")
-    val aligned = OrderConversion.alignToExchange(order, metas).getOrElse(fail("应能对齐"))
-    meta.formatSize(OrderConversion.toExchangeOrder(aligned, metas).quantity)
+    val aligned = OrderConversion.alignToExchange(order, meta).getOrElse(fail("应能对齐"))
+    meta.formatSize(OrderConversion.toExchangeOrder(aligned, meta).quantity)
 
   test("contractSize != 1: 发出的数量是整档，不带浮点尾巴"):
     assertEquals(sentQuantity(contractSize = 0.01, sizeStep = 1.0, wanted = 0.07), "7")
@@ -42,11 +41,10 @@ class ExchangeOrderPrecisionSpec extends munit.FunSuite:
     assertEquals(sentQuantity(contractSize = 1.0, sizeStep = 0.001, wanted = 0.0014), "0.001")
 
   test("低于最小下单量 -> 明确拒绝, 而不是发一张交易所收不下的单"):
-    val metas = Map((Exchange.Okx, "BTCUSDT") ->
-      SymbolMeta(Exchange.Okx, "BTCUSDT", tickSize = 0.1, sizeStep = 1.0, minOrderSize = 10.0, contractSize = 0.01))
+    val meta = SymbolMeta(Exchange.Okx, "BTCUSDT", tickSize = 0.1, sizeStep = 1.0, minOrderSize = 10.0, contractSize = 0.01)
     def attempt(wanted: Double) = OrderConversion.alignToExchange(
       Order("", Exchange.Okx, "BTCUSDT", Side.Long, OrderType.Market, Coin(wanted), reduceOnly = false, clientOrderId = "c"),
-      metas,
+      meta,
     )
     assert(attempt(0.09).isLeft, "9 张 < 最小 10 张")
     assert(attempt(0.09).left.exists(_.contains("最小下单量")), attempt(0.09).toString)

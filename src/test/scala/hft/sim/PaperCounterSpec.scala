@@ -3,7 +3,7 @@ package hft.sim
 import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
-import hft.strategy.{AccountOutcome, OrderIntent, OutcomeEvent}
+import hft.event.Commands.{AccountOutcome, OrderIntent, OutcomeEvent}
 import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -17,8 +17,8 @@ class PaperCounterSpec extends munit.FunSuite:
   private val paper: AccountId.Paper = AccountId.Paper(1)
   /** 无延迟配置：断言不必等时钟 (延迟本身另有用例) */
   private val instant = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
-  /** contractSize = 1 的常规标的 */
-  private val metas1 = Map((ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0))
+  /** contractSize = 1 的常规标的。影子柜台也按交易所精度对齐 —— 它存在的理由就是预测实盘 */
+  private val metas = Map[Symbol, SymbolMeta](sym -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0))
 
   private def bbo(bid: Double, ask: Double, ts: Long = 0L) = BBO(ex, sym, bid, Coin(1.0), ask, Coin(1.0), ts)
 
@@ -48,7 +48,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
-      system.spawn(PaperCounter(paper, ex, instant))
+      system.spawn(PaperCounter(paper, ex, instant, metas))
 
       // 挂一张买单在 bid 下方, 随后行情下穿 -> 成交
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 0.5, "c1"))))
@@ -65,7 +65,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
-      system.spawn(PaperCounter(paper, ex, instant))
+      system.spawn(PaperCounter(paper, ex, instant, metas))
 
       // 实盘意图: 柜台不该撮合它
       bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, buyLimit(99.0, 0.5, "live1"))))
@@ -83,7 +83,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val infos = collect(bus, Set(Interest.All(Topics.AccountInfo)))
-      val counter = PaperCounter(paper, ex, instant, equityRefreshMs = 0)
+      val counter = PaperCounter(paper, ex, instant, metas, equityRefreshMs = 0)
       system.spawn(counter)
 
       bus.publish(Topics.clockAt(1L))
@@ -101,8 +101,8 @@ class PaperCounterSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
-      val metas = Map((ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = 0.01))
-      system.spawn(PaperCounter(paper, ex, instant))
+      val metas = Map[Symbol, SymbolMeta](sym -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = 0.01))
+      system.spawn(PaperCounter(paper, ex, instant, metas))
 
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 0.03, "c1"))))
       bus.publish(Event.at(Topics.Bbo, bbo(98.0, 98.1), 1L))
@@ -121,7 +121,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
       val delayed = SimConfig(exchangeToStrategyDelayMs = 120, orderToExchangeDelayMs = 120, initialBalanceUsdt = 10_000.0)
-      system.spawn(PaperCounter(paper, ex, delayed))
+      system.spawn(PaperCounter(paper, ex, delayed, metas))
 
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 0.5, "c1"))))
       // 订单还在途 (120ms 未到)，此刻的下穿行情不该让它成交

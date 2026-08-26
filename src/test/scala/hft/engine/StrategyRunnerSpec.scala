@@ -3,7 +3,8 @@ package hft.engine
 import hft.domain.*
 import hft.event.{AnyEvent, Event, Interest, Subscription, Topics}
 import hft.state.StateManager
-import hft.strategy.{OutcomeEvent, Strategy}
+import hft.event.Commands.OutcomeEvent
+import hft.strategy.Strategy
 import hft.TestUnits.given
 
 /** 策略订阅范围的派生: 框架补齐了什么、又据此向交易所订了什么。 */

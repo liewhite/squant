@@ -6,7 +6,7 @@ import hft.TestUnits.given
 import hft.domain.*
 import hft.engine.StrategyRunner
 import hft.event.{AnyEvent, Event, Topics}
-import hft.strategy.{OrderIntent, OutcomeEvent}
+import hft.event.Commands.{OrderIntent, OutcomeEvent}
 
 /** DeltaHedgeStrategy 机制单测。
   *
@@ -64,7 +64,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
 
   /** 起一个 runner 并把盘口喂上 (盘口是挂单价与 requote 时钟的来源) */
   private def runnerWith(s: DeltaHedgeStrategy): StrategyRunner =
-    val r = StrategyRunner(s, metas, AccountId.Live)
+    val r = StrategyRunner(s, AccountId.Live)
     feed(r, bbo(3000.0, 0))
     r
 

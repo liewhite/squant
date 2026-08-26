@@ -4,7 +4,8 @@ import hft.actor.{Actor, ActorHandle, ActorSystem}
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.state.StateManager
-import hft.strategy.{OrderIntent, OutcomeEvent, Strategy, StrategyHandlers}
+import hft.event.Commands.{OrderIntent, OutcomeEvent}
+import hft.strategy.{Strategy, StrategyHandlers}
 import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -51,7 +52,6 @@ class SupervisorSpec extends munit.FunSuite:
       policy = policy,
       promoteLive = (i, _) => { promoted.add(i); system.spawn(Idle()) },
       demoteLive = h => demoted.add(h): Unit,
-      symbolMetas = metas,
       decideIntervalMs = 0,
     )
     system.spawn(sup)
@@ -117,7 +117,7 @@ class SupervisorSpec extends munit.FunSuite:
         Seq(inst), paper, _ => Noop(), _ => decision.get(),
         (i, _) => { promoted.add(i); system.spawn(Idle()) },
         h => demoted.add(h): Unit,
-        metas, decideIntervalMs = 0,
+        decideIntervalMs = 0,
       )
       system.spawn(sup)
 
@@ -150,7 +150,7 @@ class SupervisorSpec extends munit.FunSuite:
       val decision = AtomicReference[Decision](Decision.Promote)
       system.spawn(Supervisor(
         Seq(inst), paper, _ => Noop(), _ => decision.get(),
-        (i, _) => { promoted.add(i); system.spawn(Idle()) }, h => demoted.add(h): Unit, metas, decideIntervalMs = 0,
+        (i, _) => { promoted.add(i); system.spawn(Idle()) }, h => demoted.add(h): Unit, decideIntervalMs = 0,
       ))
 
       bus.publish(Event.local(Performances, perf(paper, 100.0, 50)))
@@ -186,7 +186,7 @@ class SupervisorSpec extends munit.FunSuite:
       system.spawn(Supervisor(
         Seq(inst), paper, _ => Noop(), _ => decision.get(),
         (i, _) => { promoted.add(i); system.spawn(Idle()) },
-        h => demoted.add(h): Unit, metas, decideIntervalMs = 0,
+        h => demoted.add(h): Unit, decideIntervalMs = 0,
       ))
 
       bus.publish(Event.local(Performances, perf(paper, 100.0, 50)))
@@ -224,7 +224,7 @@ class SupervisorSpec extends munit.FunSuite:
       system.spawn(Supervisor(
         Seq(inst), paper, _ => Noop(), policy,
         (i, _) => { promoted.add(i); system.spawn(Idle()) },
-        h => demoted.add(h): Unit, metas, decideIntervalMs = 0,
+        h => demoted.add(h): Unit, decideIntervalMs = 0,
       ))
 
       // 第一轮: 实盘累计到 -30, 然后降级

@@ -152,8 +152,13 @@ final class SimulatedExchange(
   // ==================== 对齐 ====================
 
   /** 替身账户同样从零开始 —— 没有"历史"可言，如实报告当下的账本 */
-  override protected def syncPositions(symbols: Set[Symbol]): Vector[Position] =
-    state.ledger.openPositions(state.markOf)
+  override protected def syncPositions(symbols: Set[Symbol]): Vector[Position] = positions
+
+  /** 本柜台当前的持仓快照 (供测试与绩效统计) */
+  def positions: Vector[Position] = state.ledger.openPositions(state.markOf)
+
+  /** 当前挂单簿里还有几张单 (供测试观察撮合进度) */
+  def restingCount: Int = state.resting.size
 
   override protected def syncPendingOrders(symbols: Set[Symbol]): Vector[OrderUpdate] =
     state.resting.values.filter(o => symbols.contains(o.symbol)).map { o =>

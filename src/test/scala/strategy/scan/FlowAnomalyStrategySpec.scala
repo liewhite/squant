@@ -6,7 +6,8 @@ import hft.domain.*
 import hft.engine.StrategyRunner
 import hft.event.{AnyEvent, Event, Topics}
 import hft.sim.SimConfig
-import hft.strategy.{OrderIntent, StrategyContext}
+import hft.event.Commands.OrderIntent
+import hft.strategy.StrategyContext
 
 import scala.collection.mutable
 
@@ -77,10 +78,10 @@ class FlowAnomalyStrategySpec extends munit.FunSuite:
   test("换一个响应就会下单 —— 检测不变, 交易行为变"):
     val buyOnAnomaly = new AnomalyResponse:
       def onAnomaly(a: FlowAnomaly, ctx: StrategyContext, now: Timestamp): Vector[AnyEvent] =
-        Vector(ctx.place(
+        ctx.place(
           Order("", a.exchange, a.symbol, a.side, OrderType.Market, Coin(0.01), reduceOnly = false, clientOrderId = ""),
           "flow-anomaly",
-        ))
+        )
     val (anomalies, intents) = runStrategy(buyOnAnomaly)
     assertEquals(anomalies.size, 1)
     assertEquals(intents.size, 1, "同一批信号, 换个响应就下单了")
@@ -88,7 +89,7 @@ class FlowAnomalyStrategySpec extends munit.FunSuite:
   /** 跑一遍策略, 分别收集它 emit 的异动与产出的下单意图 */
   private def runStrategy(response: AnomalyResponse): (Vector[FlowAnomaly], Vector[AnyEvent]) =
     val strategy = FlowAnomalyStrategy(ex, universe, cfg, rule, response)
-    val runner = StrategyRunner.backtest(strategy, metas)
+    val runner = StrategyRunner.backtest(strategy)
     val anomalies = mutable.ArrayBuffer.empty[FlowAnomaly]
     val intents = mutable.ArrayBuffer.empty[AnyEvent]
     def feed(ev: AnyEvent, now: Timestamp): Unit =
@@ -113,7 +114,7 @@ class FlowAnomalyStrategySpec extends munit.FunSuite:
 
   test("策略形态诚实声明它可能交易的标的 (不是绕过独占登记)"):
     val strategy = FlowAnomalyStrategy(ex, universe, cfg, rule)
-    val sub = StrategyRunner.backtest(strategy, metas).subscription
+    val sub = StrategyRunner.backtest(strategy).subscription
     assertEquals(sub.instruments, universe.map(Instrument(ex, _)))
 
   test("空宇宙在装配期即被拒"):
@@ -121,7 +122,7 @@ class FlowAnomalyStrategySpec extends munit.FunSuite:
 
   test("这个形态能进回测 —— 固定一组 runner, BacktestEngine 直接收"):
     val strategy = FlowAnomalyStrategy(ex, universe, cfg, rule)
-    val runner = StrategyRunner.backtest(strategy, metas)
+    val runner = StrategyRunner.backtest(strategy)
     // 造一段全市场平稳 + SYM3 独立爆买的行情
     val events = mutable.ArrayBuffer.empty[AnyEvent]
     var t = 1_000L

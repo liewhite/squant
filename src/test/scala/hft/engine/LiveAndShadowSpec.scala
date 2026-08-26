@@ -3,10 +3,11 @@ package hft.engine
 import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
-import hft.exchange.TradingClient
+import hft.exchange.{AccountFeed, RestTradingGateway, TradingClient}
 import hft.sim.{PaperCounter, SimConfig}
 import hft.state.StateManager
-import hft.strategy.{OrderIntent, OutcomeEvent, Strategy, StrategyHandlers}
+import hft.event.Commands.{OrderIntent, OutcomeEvent}
+import hft.strategy.{Strategy, StrategyHandlers}
 import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
@@ -23,11 +24,16 @@ class LiveAndShadowSpec extends munit.FunSuite:
   private val sym = "BTCUSDT"
   private val inst = Instrument(ex, sym)
   private val meta = SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
-  private val metas = Map((ex, sym) -> meta)
+  private val metas = Map[Symbol, SymbolMeta](sym -> meta)
   private val paper: AccountId.Paper = AccountId.Paper(1)
   private val instant = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
 
-  /** 记录下单的假交易所 —— 代表实盘出口的那一端 */
+  /** 不推送任何东西的汇报面 —— 实盘成交只能来自真实推送, 本测试不造 */
+  private object SilentFeed extends AccountFeed:
+    override def exchange: Exchange = ex
+    override def connect(account: AccountId, publish: AnyEvent => Unit, fork: (=> Unit) => Unit): Unit = ()
+
+  /** 记录下单的假交易所 —— 代表实盘柜台的那一端 */
   private class RecordingClient(placed: ConcurrentLinkedQueue[ExchangeOrder]) extends TradingClient:
     override def exchange: Exchange = ex
     override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
@@ -47,10 +53,10 @@ class LiveAndShadowSpec extends munit.FunSuite:
       if placed then Vector.empty
       else
         placed = true
-        Vector(ctx.place(
+        ctx.place(
           Order("", ex, sym, Side.Long, OrderType.Limit(b.bidPrice - 1.0, TimeInForce.GTC), 0.5, reduceOnly = false, clientOrderId = ""),
           "maker",
-        ))
+        )
     }
 
   private def eventually(cond: => Boolean, what: String): Unit =
@@ -67,13 +73,13 @@ class LiveAndShadowSpec extends munit.FunSuite:
       val fillMailbox = bus.subscribe(Set(Interest.All(Topics.Fill)))
       ox.forkDiscard { while true do fillMailbox.events.receive().as(Topics.Fill).foreach(fills.add) }
 
-      // 两条出口：真实交易所 (Live) 与虚拟柜台 (Paper(1))
-      system.spawn(OutcomeProcessor(Map(ex -> RecordingClient(livePlaced)), metas, AccountId.Live))
-      system.spawn(PaperCounter(paper, ex, instant))
+      // 两个柜台：真实交易所 (Live) 与虚拟柜台 (Paper(1))
+      system.spawn(RestTradingGateway(RecordingClient(livePlaced), SilentFeed, AccountId.Live, metas))
+      system.spawn(PaperCounter(paper, ex, instant, metas))
 
       // 同一份策略逻辑, 两个账户各一个实例
-      system.spawn(Executor(OneShotMaker(), metas, AccountId.Live))
-      system.spawn(Executor(OneShotMaker(), metas, paper))
+      system.spawn(Executor(OneShotMaker(), AccountId.Live))
+      system.spawn(Executor(OneShotMaker(), paper))
 
       // 一份行情喂给所有人 (行情无账户归属)
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 1L), 1L))
