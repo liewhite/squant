@@ -1,6 +1,6 @@
 package strategy.strategies.ivsellhedge.live
 
-import strategy.strategies.ivsellhedge.logic.DeltaKamaHedgeStrategy
+import strategy.strategies.ivsellhedge.logic.DeltaHedgeStrategy
 import strategy.utils.hedge.DeltaBand
 import strategy.utils.option.OkxOptionsClient
 
@@ -55,8 +55,10 @@ import sttp.client4.DefaultSyncBackend
     s"IvSellHedge *** 实盘 LIVE *** ${if conf.simulated then "模拟盘(simulated)" else "主网(mainnet)"} 配置=$confPath"
   )
   logger.warn(
-    f"对冲: 死区基准=${t.deltaThreshold}%.4f ${t.ccy} MACD逆势侧×${t.macdTightenRatio}%.2f " +
-      f"KAMA@${t.kamaBar}(ER${t.kamaErPeriod}/${t.kamaFast}/${t.kamaSlow}, 平滑标的价) " +
+    f"对冲: 判据=真实净敞口; 死区基准=${t.deltaThreshold}%.4f ${t.ccy} " +
+      f"MACD逆势侧×${t.macdTightenRatio}%.2f 震荡×${t.chopWidenMult}%.2f 趋势×${t.trendTightenMult}%.2f " +
+      f"-> **敞口上界 ${t.maxExposure}%.4f ${t.ccy}**%n" +
+      f"ER@${t.kamaBar}(${t.kamaErPeriod}/${t.kamaFast}/${t.kamaSlow}) " +
       f"MACD@${t.macdBar} 单笔上限=${t.maxHedgeQty}%n" +
       f"报价: ER<${t.trendErThreshold}%.2f 平缓 -> 被动挂对手价外 ${t.passiveOffset * 100}%.3f%%, 给 ${t.passiveTtlMs}ms; " +
       f"ER>=${t.trendErThreshold}%.2f 单边 -> 跨价穿透 ${t.crossOffset * 100}%.3f%%, 只给 ${t.crossTtlMs}ms"
@@ -71,9 +73,9 @@ import sttp.client4.DefaultSyncBackend
 
     val engine = Engine.start(gateways = Vector(ExchangeGateway.trading(perp, market, Some(account))))
 
-    val hedge = DeltaKamaHedgeStrategy(
+    val hedge = DeltaHedgeStrategy(
       Exchange.Okx, t.symbol, t.ccy,
-      band = DeltaBand.macdTightened(Coin(t.deltaThreshold), t.macdTightenRatio),
+      band = t.deltaBand,
       kamaBarMs = t.kamaBarMs,
       kamaErBars = t.kamaErPeriod,
       kamaFastBars = t.kamaFast,
@@ -90,13 +92,13 @@ import sttp.client4.DefaultSyncBackend
     )
     // 两条序列都用历史 K 线预热, 开机即就绪:
     //   MACD 不预热 -> 数十根 bar 内方向恒为 0, 死区退化为对称 (那条规则在启动期缺席);
-    //   KAMA 不预热 -> 判据退化为真实敞口 + 报价按单边处理 (对冲更频繁、更贵)。
+    //   ER 不预热 -> 死区用基准阈值 (不猜体制) + 报价按单边处理 (对冲更频繁、更贵)。
     opt.linearKlines(t.symbol, t.macdBar, math.max(t.macdSlow + t.macdSignal + 8, 64)) match
       case Right(bars) => hedge.prewarmMacd(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.macdBar} K线 -> MACD 就绪")
       case Left(e)     => logger.error(s"prewarm 取 K 线失败 (MACD 将靠实时 BBO 慢热, 期间死区对称): $e")
     opt.linearKlines(t.symbol, t.kamaBar, math.max(t.kamaErPeriod * 4, 64)) match
-      case Right(bars) => hedge.prewarmKama(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.kamaBar} K线 -> KAMA 就绪")
-      case Left(e)     => logger.error(s"prewarm 取 K 线失败 (KAMA 将靠实时 BBO 慢热, 期间按真实敞口判越界): $e")
+      case Right(bars) => hedge.prewarmKama(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.kamaBar} K线 -> ER 就绪")
+      case Left(e)     => logger.error(s"prewarm 取 K 线失败 (ER 将靠实时 BBO 慢热, 期间死区用基准阈值): $e")
 
     engine.addStrategy(hedge, AccountId.Live) // 先订阅总线
     engine.spawn(OptionSellerActor(opt, Exchange.Okx, sellerCfg)) // 再开始发敞口读数

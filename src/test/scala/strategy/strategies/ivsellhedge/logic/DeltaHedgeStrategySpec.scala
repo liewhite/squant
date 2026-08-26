@@ -8,15 +8,15 @@ import hft.engine.StrategyRunner
 import hft.event.{AnyEvent, Event, Topics}
 import hft.strategy.{OrderIntent, OutcomeEvent}
 
-/** DeltaKamaHedgeStrategy 机制单测。
+/** DeltaHedgeStrategy 机制单测。
   *
-  * 重点验证四件与设计直接相关的事：
-  *   1. **判据把敞口算在平滑价上、下单量用真实敞口** —— 两者刻意不同；
-  *   2. **平滑作用在价而非敞口** —— 卖出新腿的 delta 跳变立刻进判据，不被滤掉；
-  *   3. 永续持仓与现货余额以**原值**入信号 —— 对冲后死区自动复位；
-  *   4. KAMA 可用历史 K 线预热；未预热时回退真实敞口而不是停止对冲。
+  * 重点验证：
+  *   1. **判据与下单量是同一个真实净敞口** —— 信号只调阈值，不替换被测量的量；
+  *   2. 净敞口 = 期权 delta + 现货余额 + 永续持仓，三者都以原值参与；
+  *   3. ER 只影响阈值宽窄与报价方式，可用历史 K 线预热；
+  *   4. 三道安全闸门 (读数缺失/陈旧、minHedgeQty、maxHedgeQty)。
   */
-class DeltaKamaHedgeStrategySpec extends munit.FunSuite:
+class DeltaHedgeStrategySpec extends munit.FunSuite:
   private val ex = Exchange.Okx
   private val sym = "ETH"
   private val ccy = "ETH"
@@ -34,7 +34,7 @@ class DeltaKamaHedgeStrategySpec extends munit.FunSuite:
       maxQty: Coin = Coin(Double.MaxValue),
       staleMs: Long = 0L,
       quotes: QuotePolicy = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)),
-  ) = DeltaKamaHedgeStrategy(ex, sym, ccy, band,
+  ) = DeltaHedgeStrategy(ex, sym, ccy, band,
     kamaBarMs = minute, kamaErBars = kamaEr, macdBarMs = 3_600_000L,
     quotes = quotes, minHedgeQty = minQty, maxHedgeQty = maxQty, maxExposureStaleMs = staleMs)
 
@@ -62,13 +62,13 @@ class DeltaKamaHedgeStrategySpec extends munit.FunSuite:
     case other                                   => fail(s"expected PlaceOrders, got $other")
 
   /** 起一个 runner 并把盘口喂上 (盘口是挂单价与 requote 时钟的来源) */
-  private def runnerWith(s: DeltaKamaHedgeStrategy): StrategyRunner =
+  private def runnerWith(s: DeltaHedgeStrategy): StrategyRunner =
     val r = StrategyRunner(s, metas, AccountId.Live)
     feed(r, bbo(3000.0, 0))
     r
 
   /** 用历史 K 线把 KAMA 预热到给定价位 (每根 h=l=c), 再喂上盘口 */
-  private def runnerPrewarmed(s: DeltaKamaHedgeStrategy, px: Double = 3000.0, bars: Int = 40): StrategyRunner =
+  private def runnerPrewarmed(s: DeltaHedgeStrategy, px: Double = 3000.0, bars: Int = 40): StrategyRunner =
     s.prewarmKama(Seq.fill(bars)((px, px, px)))
     runnerWith(s)
 
@@ -76,45 +76,35 @@ class DeltaKamaHedgeStrategySpec extends munit.FunSuite:
     val r = runnerWith(strat(Fixed(0.1, 0.1)))
     assertEquals(feed(r, bbo(3000.0, 1)), Vector.empty)
 
-  test("KAMA 未预热 -> 平滑关掉, 按真实敞口判越界 (降级但不裸奔)"):
-    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 50)) // KAMA 远未就绪
-    val o = placed(feed(r, exposure(0.5, 10, gamma = -0.01)))
-    assertEquals(o.side, Side.Short)                        // 净多 0.5 -> 卖
-    assertEquals(o.quantity, Coin(0.5))
+  test("判据与下单量是同一个真实净敞口 (信号只调阈值, 不替换被测量的量)"):
+    val r = runnerPrewarmed(strat(Fixed(0.3, 0.3)))
+    // 净敞口 0.5 > 阈值 0.3 -> 触发, 量就是 0.5
+    val o = placed(feed(r, exposure(0.5, 10, gamma = -0.02, spot = 3100.0)))
+    assertEquals(o.side, Side.Short)
+    assertEquals(o.quantity, Coin(0.5), "量 = 判据用的那个量, 不存在第二个数")
+
+  test("gamma 不参与判据 (它曾被用来把敞口折算到平滑价上, 那是把根本规则架空了)"):
+    // 同一个净敞口, gamma 取任何值都必须给出同一个决定
+    val a = runnerPrewarmed(strat(Fixed(0.3, 0.3)))
+    val b2 = runnerPrewarmed(strat(Fixed(0.3, 0.3)))
+    val oa = placed(feed(a, exposure(0.5, 10, gamma = 0.0, spot = 3000.0)))
+    val ob = placed(feed(b2, exposure(0.5, 10, gamma = -5.0, spot = 3500.0)))
+    assertEquals(oa.quantity, ob.quantity)
+    assertEquals(oa.side, ob.side)
 
   test("死区内 -> 不动 (避免 delta 随价格漂移的抹布式调仓)"):
-    val r = runnerWith(strat(Fixed(1.0, 1.0), kamaEr = 50))
+    val r = runnerPrewarmed(strat(Fixed(1.0, 1.0)))
     assertEquals(feed(r, exposure(0.5, 10)), Vector.empty)
 
-  test("判据把敞口算在平滑价上, 下单量用真实敞口 —— 两者不同"):
-    // KAMA 预热在 3000; 敞口读数说"现价已到 3100、期权 delta = 0"。
-    // gamma=-0.02 -> 平滑价处的敞口 = 0 + (-0.02)(3000-3100) = +2.0, 越过死区 1.0 -> 触发;
-    // 而真实敞口 = 0 -> 量 0 < minHedgeQty -> 不下单。
-    val tight = runnerPrewarmed(strat(Fixed(1.0, 1.0), minQty = Coin(0.5)))
-    assertEquals(feed(tight, exposure(0.0, 10, gamma = -0.02, spot = 3100.0)), Vector.empty,
-      "信号越界但真实敞口为 0 -> 由 minHedgeQty 吸收")
-    // 同一局面放宽闸门就会下单, 且量取**真实**敞口 (0.3), 不是信号 (2.3)
-    val loose = runnerPrewarmed(strat(Fixed(1.0, 1.0), minQty = Coin(0.0001)))
-    val o = placed(feed(loose, exposure(0.3, 10, gamma = -0.02, spot = 3100.0)))
-    assert(math.abs(o.quantity.value - 0.3) < 1e-12, s"量按真实敞口, 实为 ${o.quantity.value}")
-
-  test("平滑作用在价而非敞口: 卖出新腿的 delta 跳变立刻进判据, 不被滤掉"):
-    // 平滑敞口序列会把这个跳变和"价格动了"混在一起滤掉, 于是刚卖出的腿要等好几个窗口才被看见。
-    // 平滑价的话, gamma 修正项为 0 (价没动), 敞口原值直接进判据 -> 立刻触发。
-    val r = runnerPrewarmed(strat(Fixed(1.0, 1.0)))
-    val o = placed(feed(r, exposure(2.0, 10, gamma = -0.02, spot = 3000.0)))
-    assertEquals(o.quantity, Coin(2.0), "刚卖出的腿带来的 2.0 敞口应当场被对冲")
-
-  test("永续持仓以原值入信号 -> 对冲后死区立刻复位"):
+  test("对冲后死区复位 (永续持仓抵扣掉敞口)"):
     val r = runnerPrewarmed(strat(Fixed(0.3, 0.3)))
     val o = placed(feed(r, exposure(2.0, 10)))
     assertEquals(o.side, Side.Short)
-    // 挂单成交 -> 永续持仓 -2.0, 挂单腿回到空闲
     feed(r, Event.stamped(Topics.OrderUpdate,
       OrderUpdate(AccountId.Live, "o1", Some("c1"), ex, sym, Side.Short, OrderStatus.Filled, 3000.0, 2.0, 2.0, 2.0, 20),
       20, 20))
     feed(r, position(-2.0, 20))
-    assertEquals(feed(r, exposure(2.0, 30)), Vector.empty, "敞口已被对冲平掉 -> 信号回到带内, 不该再下单")
+    assertEquals(feed(r, exposure(2.0, 30)), Vector.empty, "敞口已归零 -> 回到带内")
 
   test("净空敞口 -> 买入 (方向由真实敞口的符号定)"):
     val r = runnerPrewarmed(strat(Fixed(0.1, 0.1)))
@@ -248,3 +238,28 @@ class DeltaKamaHedgeStrategySpec extends munit.FunSuite:
   test("订单超时宽于最长存活时间, 否则框架会把正常挂单当丢单清理"):
     val s = strat(Fixed(0.1, 0.1), quotes = byEr)
     assert(s.orderTimeoutMs > calmStyle.ttlMs, s"orderTimeoutMs=${s.orderTimeoutMs} 须 > ${calmStyle.ttlMs}")
+
+  // ---------- ER 只调阈值宽窄, 不替换判据 ----------
+
+  test("同一个净敞口: 震荡里被放宽的阈值挡住, 趋势里被收紧的阈值放行"):
+    val band = DeltaBand.adaptive(Coin(0.4), macdTighten = 1.0, chopWiden = 2.0, trendTighten = 0.5)
+    def run(prewarmPrices: Seq[Double], exposureEth: Double): Vector[OutcomeEvent] =
+      val st = DeltaHedgeStrategy(ex, sym, ccy, band,
+        kamaBarMs = minute, kamaErBars = 3, macdBarMs = 3_600_000L,
+        quotes = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)))
+      st.prewarmKama(prewarmPrices.map(p => (p, p, p)))
+      feed(runnerWith(st), exposure(exposureEth, 10))
+    val chop = (1 to 20).map(i => if i % 2 == 0 then 3010.0 else 2990.0)  // ER≈0 -> 阈值 0.8
+    val trend = (1 to 20).map(i => 3000.0 + i * 5.0)                      // ER≈1 -> 阈值 0.2
+    // 敞口 0.5: 落在 0.2 与 0.8 之间 —— 唯一的区别就是阈值
+    assertEquals(run(chop, 0.5), Vector.empty, "震荡: 阈值放宽到 0.8 -> 0.5 在带内, 不对冲")
+    assert(run(trend, 0.5).nonEmpty, "趋势: 阈值收紧到 0.2 -> 0.5 越界, 对冲")
+
+  test("真实敞口有上界: 无论 ER 怎么走, 超过 base×chopWiden 必然对冲"):
+    val band = DeltaBand.adaptive(Coin(0.4), macdTighten = 1.0, chopWiden = 2.0, trendTighten = 0.5)
+    val st = DeltaHedgeStrategy(ex, sym, ccy, band,
+      kamaBarMs = minute, kamaErBars = 3, macdBarMs = 3_600_000L,
+      quotes = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)))
+    st.prewarmKama((1 to 20).map(i => { val p = if i % 2 == 0 then 3010.0 else 2990.0; (p, p, p) })) // 最放宽的体制
+    val o = placed(feed(runnerWith(st), exposure(0.81, 10)))
+    assertEquals(o.quantity, Coin(0.81), "超过上界 0.8 -> 必然对冲, 且量是真实敞口")

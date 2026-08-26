@@ -27,6 +27,8 @@
 
     "deltaThreshold": 0.3,
     "macdTightenRatio": 0.5,
+    "chopWidenMult": 2.0,
+    "trendTightenMult": 0.5,
     "kamaBar": "1m",
     "kamaErPeriod": 10,
     "kamaFast": 2,

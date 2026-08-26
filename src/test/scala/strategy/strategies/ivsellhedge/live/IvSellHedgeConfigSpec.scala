@@ -1,6 +1,7 @@
 package strategy.strategies.ivsellhedge.live
 
 import strategy.strategies.ivsellhedge.logic.SellPlan
+import strategy.utils.hedge.DeltaCtx
 
 /** 配置单测：JSON 解析 + 默认回填、K 线粒度换算 (SSOT)、越界即抛。 */
 class IvSellHedgeConfigSpec extends munit.FunSuite:
@@ -35,6 +36,13 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
     intercept[IllegalArgumentException](tuning.copy(settleRounds = 0).toSellerConfig)
     // ivStart=0 的语义与参考实现相反 ("从零波动起线性放大" 而非 "不启用缩放"), 更可能是漏配
     intercept[IllegalArgumentException](tuning.copy(ivStart = 0.0).toSellerConfig)
+
+  test("死区阈值随两个信号缩放, 且给出真实敞口的上界"):
+    val t = tuning.copy(deltaThreshold = 0.4, macdTightenRatio = 0.5, chopWidenMult = 2.0, trendTightenMult = 0.5)
+    assertEquals(t.maxExposure, 0.8, "上界 = 基准 × 震荡放宽倍数")
+    val b = t.deltaBand
+    assertEquals(b.bands(DeltaCtx(hft.domain.Coin.Zero, 0, Some(0.0))), (hft.domain.Coin(0.8), hft.domain.Coin(0.8)))
+    assertEquals(b.bands(DeltaCtx(hft.domain.Coin.Zero, 0, Some(1.0))), (hft.domain.Coin(0.2), hft.domain.Coin(0.2)))
 
   test("配置文件缺失 -> Left(原因), 不静默"):
     assert(IvSellHedgeConfig.loadOkx("conf/definitely-not-here.json").isLeft)

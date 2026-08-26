@@ -1,7 +1,8 @@
 package strategy.strategies.ivsellhedge.live
 
 import strategy.strategies.ivsellhedge.logic.SellPlan
-import strategy.utils.hedge.{QuotePolicy, QuoteStyle}
+import strategy.utils.hedge.{DeltaBand, QuotePolicy, QuoteStyle}
+import hft.domain.Coin
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import com.github.plokhotnyuk.jsoniter_scala.macros.*
@@ -35,6 +36,9 @@ import scala.util.control.NonFatal
  * @param settleRounds      提交过卖单后强制静默的轮数 (给持仓落地留时间, 防同一缺口被连卖两轮)
   * @param deltaThreshold    对冲死区基准阈值 (币本位, 如 0.3 ETH)
   * @param macdTightenRatio  MACD 逆势侧的收紧系数 (0.5 = 减半; 1.0 = 不收紧)
+ * @param chopWidenMult     ER→0 (震荡) 时死区阈值的放宽倍数 (>= 1)。**它同时是真实敞口的上界系数**:
+ *                          阈值最宽 = deltaThreshold × 它, 超过必然对冲
+ * @param trendTightenMult  ER→1 (趋势) 时死区阈值的收紧系数 ∈ (0,1]
   * @param kamaBar           KAMA 的 K 线粒度 (OKX 粒度串, 默认 "1m")。KAMA 平滑的是**标的价**,
  *                          所以能用历史 K 线预热, 开机即就绪
   * @param macdBar           MACD 的 K 线粒度 (OKX 粒度串, 如 "1H")；预热与实时聚合共用这一个事实
@@ -68,6 +72,8 @@ final case class IvSellTuning(
     // ---- 对冲腿 ----
     deltaThreshold: Double = 0.3,
     macdTightenRatio: Double = 0.5,
+    chopWidenMult: Double = 2.0,
+    trendTightenMult: Double = 0.5,
     kamaBar: String = "1m",
     kamaErPeriod: Int = 10,
     kamaFast: Int = 2,
@@ -97,7 +103,14 @@ final case class IvSellTuning(
   /** KAMA 的 K 线粒度换算成毫秒 (同 [[macdBarMs]]: 粒度只配一处, 预热与实时聚合共用) */
   def kamaBarMs: Long = IvSellTuning.barToMillis(kamaBar)
 
-  /** 报价方式的选择：敞口平缓 -> 被动慢挂；走单边 -> 跨价追单 */
+  /** 敞口死区：基准阈值 + 两个信号的缩放 (判据始终是真实敞口) */
+  def deltaBand: DeltaBand =
+    DeltaBand.adaptive(Coin(deltaThreshold), macdTightenRatio, chopWidenMult, trendTightenMult)
+
+  /** 真实敞口的上界 (阈值最宽的那一档) —— 装配期日志里报出来, 便于核对风险敞口 */
+  def maxExposure: Double = deltaThreshold * chopWidenMult
+
+  /** 报价方式的选择：价格平缓 -> 被动慢挂；走单边 -> 跨价追单 */
   def quotePolicy: QuotePolicy = QuotePolicy.byEfficiency(
     trendErThreshold,
     calm = QuoteStyle.passive(passiveOffset, passiveTtlMs),
