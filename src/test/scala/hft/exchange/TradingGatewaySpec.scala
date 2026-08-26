@@ -2,7 +2,7 @@ package hft.exchange
 
 import hft.actor.ActorSystem
 import hft.domain.*
-import hft.event.Commands.{AccountOutcome, OrderIntent, OutcomeEvent}
+import hft.event.Commands.{AccountOutcome, AccountSync, AccountSyncRequest, AccountSynced, OrderIntent, OutcomeEvent}
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.exchange.AccountReport
 import ox.supervised
@@ -47,19 +47,30 @@ class TradingGatewaySpec extends munit.FunSuite:
     while System.nanoTime() < deadline && !cond do Thread.sleep(5)
     assert(cond, s"等待超时: $what")
 
-  /** 装一台真实形态的柜台, 用手动汇报面驱动它 */
+  /** 让柜台先完成一次对齐 —— **对齐之前它忽略一切报告**：那时它既不知道自己管哪些标的，
+    * 账本也还没有初值，处理了只会算错。 */
+  private def align(bus: EventBus, symbols: Set[Symbol] = Set("BTCUSDT"))(using ox.Ox): Unit =
+    val done = bus.subscribe(Set(Interest.All(AccountSynced)))
+    bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, Exchange.Binance, 1L, symbols)))
+    done.events.receive(): Unit
+    done.close()
+
+  /** 装一台真实形态的柜台, 对齐之后用手动汇报面驱动它 */
   private def withFeed(body: (ManualFeed, ConcurrentLinkedQueue[AnyEvent]) => Unit): Unit =
     supervised:
       val bus = EventBus()
+      val feed = ManualFeed()
+      ActorSystem(bus).spawn(RestTradingGateway(QuietClient(), feed, AccountId.Live, metas))
+      align(bus)
+      // 对齐之后才开始收 —— 对齐本身会推一条零仓快照, 那不是本测试的对象
       val seen = ConcurrentLinkedQueue[AnyEvent]()
       val mailbox = bus.subscribe(Set(Interest.All(Topics.Position), Interest.All(Topics.Fill), Interest.All(Topics.OrderUpdate)))
       ox.forkDiscard { mailbox.events.foreach(seen.add) }
-      val feed = ManualFeed()
-      ActorSystem(bus).spawn(RestTradingGateway(QuietClient(), feed, AccountId.Live, metas))
       body(feed, seen)
 
-  private def executed(orderId: String, cumulative: Double) =
-    AccountReport.Executed(orderId, "BTCUSDT", Side.Long, Price(100.0), Coin(cumulative), 1L)
+  /** 一笔成交明细 —— 不参与记账 */
+  private def executed(qty: Double) =
+    AccountReport.Executed("BTCUSDT", Side.Long, Price(100.0), Coin(qty), 1L)
 
   /** `orderPrice` 是委托价, `avgFill` 是成交均价 —— 两者刻意不同, 记账只能用后者 */
   private def statusChanged(
@@ -84,48 +95,45 @@ class TradingGatewaySpec extends munit.FunSuite:
   private def positionSizes(seen: ConcurrentLinkedQueue[AnyEvent]): Vector[Double] =
     seen.asScala.toVector.flatMap(_.as(Topics.Position)).map(_.size.value)
 
-  test("一笔成交出柜台的顺序: 仓位快照先于其余回报"):
-    // 顺序是**构造**出来的 —— 柜台先记账、立刻发仓位, 不依赖各家推送的到达次序。
+  test("订单回报: 仓位先于订单状态发出"):
+    // 反过来的话策略会看到"挂单已消失、仓位还没更新" —— 它据此认为自己既没单也没仓位,
+    // 于是**再下一单**。那是危险侧的中间状态, 这条顺序就是为了消灭它。
     withFeed { (feed, seen) =>
-      feed.emit(executed("o1", cumulative = 0.5))
       feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.5))
-      eventually(kinds(seen).toString)(kinds(seen).size == 3)
-      assertEquals(kinds(seen), Vector("position", "fill", "orderUpdate"))
+      eventually(kinds(seen).toString)(kinds(seen).size == 2)
+      assertEquals(kinds(seen), Vector("position", "orderUpdate"))
       assertEquals(positionSizes(seen), Vector(0.5))
     }
 
-  test("重复推送不重复记账 —— 累计量没涨就什么都不发"):
+  test("成交明细不参与记账 —— 它只变成 Fill"):
+    // 记账的唯一依据是订单回报的累计量。让成交也参与记账, 就得为"只给单笔量的交易所"
+    // 本地累加, 而累加又要去重、会漂、会与另一个来源不一致 —— 一串补丁的源头。
     withFeed { (feed, seen) =>
-      feed.emit(executed("o1", cumulative = 0.5))
-      feed.emit(executed("o1", cumulative = 0.5)) // 同一条重放
-      eventually("首笔应已入账")(kinds(seen).size >= 2)
+      feed.emit(executed(qty = 0.5))
+      eventually("应产出成交明细")(kinds(seen).size == 1)
       Thread.sleep(100)
-      assertEquals(kinds(seen), Vector("position", "fill"), "重放不该产生第二笔")
-      assertEquals(positionSizes(seen), Vector(0.5))
+      assertEquals(kinds(seen), Vector("fill"), "成交只产明细, 不产仓位")
+      assertEquals(positionSizes(seen), Vector.empty[Double])
     }
 
-  test("跨频道乱序: 订单回报先到也能记上账, 成交随后到达时不重复计"):
-    // Bybit 的成交与订单状态来自两条频道, 交易所不保证先后。柜台以累计量为准,
-    // 谁先报谁触发记账 —— 后到的那条增量为零。
+  test("重复的订单回报不重复记账 —— 累计量没涨就什么都不发"):
     withFeed { (feed, seen) =>
-      feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.5)) // 订单回报先到, 带累计量
-      eventually("订单回报应已触发记账")(kinds(seen).size == 3)
-      assertEquals(kinds(seen), Vector("position", "fill", "orderUpdate"), "先到的那条同样先发仓位")
-
-      feed.emit(executed("o1", cumulative = 0.5)) // 成交频道随后到达
+      feed.emit(statusChanged("o1", OrderStatus.PartiallyFilled(Coin(0.5)), filled = 0.5))
+      eventually("首笔应已入账")(kinds(seen).size == 2)
+      feed.emit(statusChanged("o1", OrderStatus.PartiallyFilled(Coin(0.5)), filled = 0.5)) // 同一条重放
+      eventually("重放仍会转发订单状态")(kinds(seen).size == 3)
       Thread.sleep(100)
-      assertEquals(positionSizes(seen), Vector(0.5), "同一笔不该被记两次")
+      assertEquals(kinds(seen), Vector("position", "orderUpdate", "orderUpdate"), "重放不该再记一次账")
+      assertEquals(positionSizes(seen), Vector(0.5))
     }
 
   test("分批成交按增量入账, 每次都先发新仓位"):
     withFeed { (feed, seen) =>
-      feed.emit(executed("o1", cumulative = 0.3))
-      feed.emit(executed("o1", cumulative = 0.8)) // 又成交 0.5
+      feed.emit(statusChanged("o1", OrderStatus.PartiallyFilled(Coin(0.3)), filled = 0.3))
+      feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.8)) // 又成交 0.5
       eventually(kinds(seen).toString)(kinds(seen).size == 4)
-      assertEquals(kinds(seen), Vector("position", "fill", "position", "fill"))
-      assertEquals(positionSizes(seen), Vector(0.3, 0.8))
-      val fills = seen.asScala.toVector.flatMap(_.as(Topics.Fill)).map(_.size.value)
-      assertEquals(fills, Vector(0.3, 0.5), "发出去的是增量, 不是累计")
+      assertEquals(kinds(seen), Vector("position", "orderUpdate", "position", "orderUpdate"))
+      assertEquals(positionSizes(seen), Vector(0.3, 0.8), "记的是增量, 报的是新仓位")
     }
 
   test("订单回报触发的记账用**成交均价**, 不是委托价"):
@@ -133,20 +141,21 @@ class TradingGatewaySpec extends munit.FunSuite:
     // 巨额假亏损 —— 净值从此失真, 而没有任何报错。
     withFeed { (feed, seen) =>
       feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.5, orderPrice = 0.0, avgFill = 101.5))
-      eventually(kinds(seen).toString)(kinds(seen).size == 3)
-      val fill = seen.asScala.toVector.flatMap(_.as(Topics.Fill)).head
-      assertEqualsDouble(fill.price.value, 101.5, 1e-12, "成交价必须来自成交侧, 不能是委托价")
+      eventually(kinds(seen).toString)(kinds(seen).size == 2)
+      val position = seen.asScala.toVector.flatMap(_.as(Topics.Position)).head
+      assertEqualsDouble(position.entryPrice.value, 101.5, 1e-12, "持仓均价必须来自成交侧, 不能是委托价")
     }
 
   test("本地累加的浮点尾巴不产生幻影成交"):
     // 0.3 + 0.5 在浮点里是 0.8000000000000001。严格比较会让它产出一笔 1e-16 的成交,
     // 连带一条幻影仓位事件和一行流水。
     withFeed { (feed, seen) =>
-      feed.emit(executed("o1", cumulative = 0.8))
+      feed.emit(statusChanged("o1", OrderStatus.PartiallyFilled(Coin(0.8)), filled = 0.8))
       eventually("首笔应入账")(kinds(seen).size == 2)
-      feed.emit(executed("o1", cumulative = 0.3 + 0.5)) // = 0.8000000000000001
+      feed.emit(statusChanged("o1", OrderStatus.PartiallyFilled(Coin(0.8)), filled = 0.3 + 0.5)) // = 0.8000000000000001
+      eventually("重放仍会转发订单状态")(kinds(seen).size == 3)
       Thread.sleep(100)
-      assertEquals(kinds(seen), Vector("position", "fill"), "尾巴不该被当成一笔新成交")
+      assertEquals(positionSizes(seen), Vector(0.8), "尾巴不该被当成一笔新成交")
     }
 
   test("contractSize != 1: 容差换到币本位域, 小额真实成交不被吞掉"):
@@ -155,15 +164,16 @@ class TradingGatewaySpec extends munit.FunSuite:
     val coarse = SymbolMeta(Exchange.Binance, "BTCUSDT", tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = 0.01)
     supervised:
       val bus = EventBus()
-      val seen = ConcurrentLinkedQueue[AnyEvent]()
-      val mailbox = bus.subscribe(Set(Interest.All(Topics.Fill)))
-      ox.forkDiscard { mailbox.events.foreach(seen.add) }
       val feed = ManualFeed()
       ActorSystem(bus).spawn(RestTradingGateway(QuietClient(), feed, AccountId.Live, Map("BTCUSDT" -> coarse)))
+      align(bus)
+      val seen = ConcurrentLinkedQueue[AnyEvent]()
+      val mailbox = bus.subscribe(Set(Interest.All(Topics.Position)))
+      ox.forkDiscard { mailbox.events.foreach(seen.add) }
 
-      feed.emit(executed("o1", cumulative = 0.03)) // 3 张 = 0.03 币; 旧的错误阈值是 0.5 币
+      feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.03)) // 3 张 = 0.03 币; 旧的错误阈值是 0.5 币
       eventually("小额成交应照常入账")(seen.size == 1)
-      assertEqualsDouble(seen.asScala.head.as(Topics.Fill).get.size.value, 0.03, 1e-12)
+      assertEqualsDouble(seen.asScala.head.as(Topics.Position).get.size.value, 0.03, 1e-12)
 
   test("清理判据: 活着的订单永不清, 终态过了保留期才清"):
     // 清掉一张还活着的订单的记账进度, 下一条累计量会以"已记 0"重新记一遍 ——
@@ -176,6 +186,34 @@ class TradingGatewaySpec extends munit.FunSuite:
     assert(RestTradingGateway.retains(active, muchLater), "非终态的永远留着, 哪怕很久没动静")
     assert(RestTradingGateway.retains(justDone, 1_000L + RestTradingGateway.SettledRetentionMs), "保留期内还要留着接晚到的成交")
     assert(!RestTradingGateway.retains(longDone, 1_000L + RestTradingGateway.SettledRetentionMs + 1), "过了保留期就该清")
+
+  test("对齐时接管带部分成交的挂单, 后续回报不把那部分重记一遍"):
+    // 少了这一步: 拉到的仓位里本已含着那 0.3, 而记账进度是空的, 于是 cumExecQty=0.5
+    // 被算成增量 0.5 而不是 0.2 —— 仓位凭空多出 0.3, 且没有任何症状。
+    supervised:
+      val bus = EventBus()
+      val feed = ManualFeed()
+      // 对齐时账户里已有一张成交了 0.3 的挂单, 仓位也已是 0.3
+      class PartialClient extends QuietClient:
+        override def fetchPositions() =
+          Right(Vector(Position(AccountId.Live, Exchange.Binance, "BTCUSDT", Coin(0.3), Price(100.0), 0.0)))
+        override def fetchPendingOrders(symbol: Symbol) = Right(Vector(
+          OrderUpdate(AccountId.Live, "o1", Some("c1"), Exchange.Binance, "BTCUSDT", Side.Long,
+            OrderStatus.PartiallyFilled(Coin(0.3)), Price(100.0), Coin(1.0), Coin(0.3), 1L)
+        ))
+      ActorSystem(bus).spawn(RestTradingGateway(PartialClient(), feed, AccountId.Live, metas))
+      align(bus)
+
+      val seen = ConcurrentLinkedQueue[AnyEvent]()
+      val mailbox = bus.subscribe(Set(Interest.All(Topics.Position)))
+      ox.forkDiscard { mailbox.events.foreach(seen.add) }
+
+      feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.5)) // 又成交 0.2
+      eventually("应有新仓位")(seen.size == 1)
+      assertEqualsDouble(
+        seen.asScala.head.as(Topics.Position).get.size.value, 0.5, 1e-12,
+        "0.3 + 增量 0.2 = 0.5; 若把 0.5 整个当增量就会变成 0.8",
+      )
 
   test("交易所报的仓位不进总线 —— 总线上的仓位只有账本一个来源"):
     withFeed { (feed, seen) =>

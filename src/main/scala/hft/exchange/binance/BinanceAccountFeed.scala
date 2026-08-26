@@ -82,11 +82,11 @@ final class BinanceAccountFeed(
       case "REJECTED"         => OrderStatus.Rejected("rejected by exchange")
       // 未知状态意味着无法解释交易所的订单状态机，继续运行只会静默发散
       case other => throw IllegalStateException(s"Unknown order status '$other': $o")
-    val filledQty = Coin(o.z.asDouble) // 累计成交
-    // 成交先报: 柜台据此记账并先发仓位快照, 订单状态随后。同一条推送里两件事,
-    // 顺序由这里决定 —— 不必依赖交易所各频道的到达次序。
+    val filledQty = Coin(o.z.asDouble) // 累计成交 —— 记账的依据
+    // 本次成交只是明细 (给绩效/成交记录看), 不参与记账。先报它、后报订单状态:
+    // 同一条推送里的两件事, 顺序由这里决定, 不必依赖交易所各频道的到达次序。
     if o.l.asDouble > 0 then
-      report(AccountReport.Executed(o.i.toString, o.s, side, o.L.asPrice, filledQty, o.T))
+      report(AccountReport.Executed(o.s, side, o.L.asPrice, Coin(o.l.asDouble), o.T))
     report(AccountReport.OrderStatusChanged(
       orderId = o.i.toString,
       clientOrderId = Some(o.c),

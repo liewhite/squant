@@ -15,11 +15,6 @@ import BybitCodec.*
 import BybitCodec.given
 
 object BybitAccountFeed:
-  /** 一张订单在本地累出来的累计成交量，以及已经计入的成交 id (去重用) */
-  private final case class OrderExecutions(cumulative: Double, seen: Set[String], lastSeenAt: Long)
-  private object OrderExecutions:
-    def empty(now: Long): OrderExecutions = OrderExecutions(0.0, Set.empty, now)
-
   /** 算作真实成交的执行类型。其余 (资金费、结算) 不进账本 */
   private val TradeExecTypes: Set[String] = Set("Trade", "AdlTrade", "BustTrade", "Delivery", "BlockTrade", "")
 
@@ -59,21 +54,6 @@ final class BybitAccountFeed(
     * 本流不知道账户是谁 —— 那是柜台盖的章 */
   @volatile private var report: AccountReport => Unit = scala.compiletime.uninitialized
   @volatile private var spawnThread: (=> Unit) => Unit = scala.compiletime.uninitialized
-
-  /** 每张订单的累计成交量，以及已经计入的那些成交的 id。
-    *
-    * Bybit 的 execution 频道只给**本次**成交量，而柜台的记账依据是累计量 (那样才对重复推送
-    * 与跨频道乱序免疫)，所以在这里把它累起来。
-    *
-    * **累加前必须按 `execId` 去重**：柜台的幂等建立在"汇报面报的是真累计量"之上，
-    * 这里盲目累加的话，一条重复的 execution 推送就会把累计量推高一笔 —— 柜台看到累计上涨
-    * 就记账，仓位凭空多出一笔，而随后 order 频道更小的累计量只会得到负增量被忽略，
-    * 账本没有自愈路径，只能等对账告警。Bybit 官方也建议按 execId 去重。
-    *
-    * 只有 WS 接收线程一个访问者。断线不重连、进程重启走启动对齐，
-    * 因此这份累计不会跨越断线残留成错值。
-    */
-  private val executedByOrder = mutable.Map.empty[String, BybitAccountFeed.OrderExecutions]
 
   override def connect(sink: AccountReport => Unit, spawn: (=> Unit) => Unit): Unit =
     report = sink
@@ -115,11 +95,11 @@ final class BybitAccountFeed(
     case "ping" | "pong" => () // 心跳响应
     case other           => logger.warn(s"ignoring Bybit private op '$other': $text")
 
-  /** 单笔成交 -> 累计成交量。本频道只给本次量，累计在这里攒 (按 execId 去重)。
+  /** 单笔成交 -> 成交明细。**不参与记账** —— 仓位由 order 频道的累计成交量驱动。
     *
     * **先按 execType 筛**：本频道推的不只是成交 —— 资金费结算 (Funding) 与交割结算 (Settle)
-    * 也走这里，而它们的 execQty 是仓位量不是成交量。把它们累进去，账本会凭空多出
-    * 一整笔仓位大小的"成交"。
+    * 也走这里，而它们的 execQty 是仓位量不是成交量。把它们当成交报出去，
+    * 成交记录与绩效统计里就会多出一整笔仓位大小的"成交"。
     */
   private def publishExecution(d: ExecutionData): Unit =
     if !BybitAccountFeed.TradeExecTypes.contains(d.execType) then
@@ -128,21 +108,13 @@ final class BybitAccountFeed(
         logger.warn(s"Bybit 未知 execType '${d.execType}', 不计入成交 (order=${d.orderId} qty=${d.execQty})")
       return
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in execution: '${d.symbol}'"))
-    val now = nowMs
-    val prior = executedByOrder.getOrElse(d.orderId, BybitAccountFeed.OrderExecutions.empty(now))
-    if prior.seen.contains(d.execId) then
-      logger.debug(s"Bybit execution 重放, 已计入: order=${d.orderId} exec=${d.execId}")
-    else
-      val next = BybitAccountFeed.OrderExecutions(prior.cumulative + d.execQty.asDouble, prior.seen + d.execId, now)
-      executedByOrder(d.orderId) = next
-      report(AccountReport.Executed(
-        orderId = d.orderId,
-        symbol = sym,
-        side = sideFromBybit(d.side),
-        price = d.execPrice.asPrice,
-        cumulativeQty = Coin(next.cumulative),
-        timestamp = d.execTime.toLongOption.getOrElse(nowMs),
-      ))
+    report(AccountReport.Executed(
+      symbol = sym,
+      side = sideFromBybit(d.side),
+      price = d.execPrice.asPrice,
+      qty = Coin(d.execQty.asDouble),
+      timestamp = d.execTime.toLongOption.getOrElse(nowMs),
+    ))
 
   /** 订单状态。本频道带**累计**成交量 —— 柜台拿它补记账 (execution 先到时增量为零)，
     * 于是两条频道谁先到都不影响账本。 */
@@ -152,10 +124,6 @@ final class BybitAccountFeed(
     val status = mapOrderStatus(d.orderStatus, filled)
     // 终态之后不会再有新成交, 清掉本地累加器。**晚到的那条 execution 由柜台兜住**:
     // 它的记账进度在终态后还留一分钟墓碑, 认得出"这笔已经记过了" (见 RestTradingGateway.settled)。
-    // 只在**终态**清。非终态的绝不能清: 清掉本地累计, 下一笔成交会从零重攒, 报给柜台的
-    // 累计量就倒退了 —— 那一笔成交从此记不进账 (柜台只认增量为正的)。
-    // 分批成交的挂单挂上几小时是正常形态, 按"多久没动"去判它是不是僵尸, 判据本身不成立。
-    if status.isTerminal then executedByOrder.remove(d.orderId)
     report(AccountReport.OrderStatusChanged(
       orderId = d.orderId,
       clientOrderId = if d.orderLinkId.nonEmpty then Some(d.orderLinkId) else None,

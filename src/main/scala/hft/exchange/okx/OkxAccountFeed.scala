@@ -141,9 +141,9 @@ final class OkxAccountFeed(
     val fillSz = meta.toCoin(Contracts(d.fillSz.asDouble))
     val filledQty = meta.toCoin(Contracts(d.accFillSz.asDouble))
     val ts = nowMs
-    // 报累计量而非本次增量 —— 柜台据它算增量, 于是重复推送与乱序都不会让账本走偏
+    // 本次成交只是明细, 不参与记账 —— 仓位由下面那条回报的累计成交量驱动
     if fillSz.nonZero then
-      report(AccountReport.Executed(d.ordId, sym, side, d.fillPx.asPrice, filledQty, ts))
+      report(AccountReport.Executed(sym, side, d.fillPx.asPrice, fillSz, ts))
     report(AccountReport.OrderStatusChanged(
       orderId = d.ordId,
       clientOrderId = if d.clOrdId.nonEmpty then Some(d.clOrdId) else None,
