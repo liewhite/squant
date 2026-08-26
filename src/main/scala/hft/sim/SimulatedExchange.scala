@@ -177,7 +177,7 @@ final class SimulatedExchange(
     state.resting.values.filter(o => symbols.contains(o.symbol)).map { o =>
       OrderUpdate(
         account, o.orderId, Some(o.clientOrderId), exchange, o.symbol, o.side,
-        OrderStatus.Pending, o.limitPrice, o.quantity, Coin.Zero, Coin.Zero, nowMs,
+        OrderStatus.Pending, o.limitPrice, o.quantity, Coin.Zero, nowMs,
       )
     }.toVector
 

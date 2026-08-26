@@ -255,7 +255,6 @@ object TradingGateway:
         price = Price.Zero,
         quantity = Coin.Zero,
         filledQuantity = Coin.Zero,
-        fillSize = Coin.Zero,
         timestamp = now,
       ),
       now,

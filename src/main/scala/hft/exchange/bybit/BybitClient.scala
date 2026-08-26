@@ -219,7 +219,6 @@ final class BybitClient private[bybit] (
               price = Price(d.price.asDoubleOrZero),
               quantity = Coin(d.qty.asDouble),
               filledQuantity = filled,
-              fillSize = Coin.Zero,
               timestamp = nowMs,
             )
           }

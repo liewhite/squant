@@ -102,7 +102,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
     val o = placed(feed(r, exposure(2.0, 10)))
     assertEquals(o.side, Side.Short)
     feed(r, Event.stamped(Topics.OrderUpdate,
-      OrderUpdate(AccountId.Live, "o1", Some("c1"), ex, sym, Side.Short, OrderStatus.Filled, 3000.0, 2.0, 2.0, 2.0, 20),
+      OrderUpdate(AccountId.Live, "o1", Some("c1"), ex, sym, Side.Short, OrderStatus.Filled, 3000.0, 2.0, 2.0, 20),
       20, 20))
     feed(r, position(-2.0, 20))
     assertEquals(feed(r, exposure(2.0, 30)), Vector.empty, "敞口已归零 -> 回到带内")
@@ -139,7 +139,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
     val r = runnerWith(strat(Fixed(0.1, 0.1), erBars = 50))
     feed(r, exposure(0.5, 10))
     feed(r, Event.stamped(Topics.OrderUpdate,
-      OrderUpdate(AccountId.Live, "o1", Some("c1"), ex, sym, Side.Short, OrderStatus.Pending, 3030.0, 0.5, 0.0, 0.0, 1000),
+      OrderUpdate(AccountId.Live, "o1", Some("c1"), ex, sym, Side.Short, OrderStatus.Pending, 3030.0, 0.5, 0.0, 1000),
       1000, 1000))
     assertEquals(feed(r, bbo(3000.0, 3000)), Vector.empty, "2s < requote 5s -> 不撤")
     feed(r, bbo(3000.0, 7000)) match
@@ -187,7 +187,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
           out += os.head
           feed(r, Event.stamped(Topics.OrderUpdate,
             OrderUpdate(AccountId.Live, "o1", Some("c1"), ex, sym, os.head.side, OrderStatus.Cancelled,
-              Price(px), os.head.quantity, 0.0, 0.0, ts),
+              Price(px), os.head.quantity, 0.0, ts),
             ts, ts))
         case _ => ()
       }

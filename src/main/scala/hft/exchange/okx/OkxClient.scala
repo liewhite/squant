@@ -257,7 +257,6 @@ final class OkxClient private[okx] (
               price = Price(d.px.asDoubleOrZero),
               quantity = metaOf(sym).toCoin(Contracts(d.sz.asDouble)),
               filledQuantity = filled,
-              fillSize = Coin.Zero,
               timestamp = nowMs,
             )
           }

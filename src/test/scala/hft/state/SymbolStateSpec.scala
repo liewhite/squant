@@ -20,7 +20,7 @@ class SymbolStateSpec extends munit.FunSuite:
       clientOrderId = clientOrderId,
     )
 
-  private def orderUpdate(clientOrderId: String, status: OrderStatus, fillSize: Coin = 0.0): AnyEvent =
+  private def orderUpdate(clientOrderId: String, status: OrderStatus): AnyEvent =
     Event.at(Topics.OrderUpdate, OrderUpdate(
           account = AccountId.Live,
           orderId = "ex-1",
@@ -32,7 +32,6 @@ class SymbolStateSpec extends munit.FunSuite:
           price = 50000.0,
           quantity = 0.01,
           filledQuantity = 0.0,
-          fillSize = fillSize,
           timestamp = t0,
         ), t0)
 

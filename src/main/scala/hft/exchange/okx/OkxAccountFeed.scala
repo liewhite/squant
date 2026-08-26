@@ -169,7 +169,6 @@ final class OkxAccountFeed(
       price = Price(d.px.asDoubleOrZero),
       quantity = meta.toCoin(Contracts(d.sz.asDouble)),
       filledQuantity = filledQty,
-      fillSize = fillSz,
       timestamp = nowMs,
     )
     publish(Event.local(Topics.OrderUpdate, update))

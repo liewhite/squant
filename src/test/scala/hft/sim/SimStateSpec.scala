@@ -133,6 +133,7 @@ class SimStateSpec extends munit.FunSuite:
     val (s4, _) = s3.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "late", 0.002), "3", 1)  // 后到 seq1
     val (_, evs) = s4.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2)), 2) // bid 50011 >= 50010 -> 两张同刻越价
     val filledOf = evs.flatMap(_.as(Topics.OrderUpdate)).collect {
-      case u if u.status == OrderStatus.Filled => (u.clientOrderId, u.fillSize.value)
+      // Filled 的 filledQuantity 即本笔成交量 (撮合层不产生部分成交的中间态)
+      case u if u.status == OrderStatus.Filled => (u.clientOrderId, u.filledQuantity.value)
     }
     assertEquals(filledOf, Vector((Some("early"), 0.002), (Some("late"), 0.001)))

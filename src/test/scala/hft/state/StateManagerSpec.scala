@@ -82,7 +82,7 @@ class StateManagerSpec extends munit.FunSuite:
     state.addPendingOrder(order, t0)
     state.apply(Event.local(
       Topics.OrderUpdate,
-      OrderUpdate(AccountId.Live, "EX-9", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Pending, 99.0, Coin(1.0), Coin(0.0), Coin(0.0), t0),
+      OrderUpdate(AccountId.Live, "EX-9", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Pending, 99.0, Coin(1.0), Coin(0.0), t0),
     ))
     assertEquals(
       state.symbolState("BTCUSDT").get.pendingOrders.head.order.id,

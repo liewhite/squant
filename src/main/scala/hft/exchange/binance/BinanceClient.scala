@@ -192,7 +192,6 @@ final class BinanceClient private[binance] (
             price = o.price.asPrice,
             quantity = Coin(o.origQty.asDouble),
             filledQuantity = filled,
-            fillSize = Coin.Zero,
             timestamp = o.time,
           )
         }.toVector

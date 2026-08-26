@@ -95,7 +95,6 @@ final class BinanceAccountFeed(
       price = o.p.asPrice,
       quantity = Coin(o.q.asDouble),
       filledQuantity = Coin(o.z.asDouble),
-      fillSize = Coin(o.l.asDouble),
       timestamp = o.T,
     )
     publish(Event.at(Topics.OrderUpdate, update, msg.E))

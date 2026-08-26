@@ -42,7 +42,7 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       // 交易所确认挂单 (给它一个 orderId) —— 只有已确认的单才撤得掉
       bus.publish(Event.local(
         Topics.OrderUpdate,
-        OrderUpdate(AccountId.Live, "EX-1", Some(placed.clientOrderId), ex, sym, Side.Long, OrderStatus.Pending, 100.0, Coin(0.01), Coin(0.0), Coin(0.0), 0L),
+        OrderUpdate(AccountId.Live, "EX-1", Some(placed.clientOrderId), ex, sym, Side.Long, OrderStatus.Pending, 100.0, Coin(0.01), Coin(0.0), 0L),
       ))
 
       system.stop(h)

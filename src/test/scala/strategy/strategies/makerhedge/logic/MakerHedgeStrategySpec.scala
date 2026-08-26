@@ -24,7 +24,7 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
 
   private def bbo(px: Price, ts: Timestamp) = Event.stamped(Topics.Bbo, BBO(ex, sym, px, 1.0, px, 1.0, ts), ts, ts)
   private def ordUpd(status: OrderStatus, side: Side, px: Price, ts: Timestamp, oid: OrderId = "o1") =
-    Event.stamped(Topics.OrderUpdate, OrderUpdate(AccountId.Live, oid, Some("c1"), ex, sym, side, status, px, 0.5, 0.0, 0.0, ts), ts, ts)
+    Event.stamped(Topics.OrderUpdate, OrderUpdate(AccountId.Live, oid, Some("c1"), ex, sym, side, status, px, 0.5, 0.0, ts), ts, ts)
   /** 经 StrategyRunner 驱动策略 —— 它是策略的唯一入口 (负责绑定账户、生成 id、登记 pending)。
     * 产出的是事件流, 从中取回下单意图。 */
   private def feed(runner: StrategyRunner, ev: AnyEvent): Vector[OutcomeEvent] =

@@ -118,7 +118,6 @@ final class BybitAccountFeed(
       price = Price(d.price.asDoubleOrZero),
       quantity = Coin(d.qty.asDouble),
       filledQuantity = filled,
-      fillSize = Coin.Zero,
       timestamp = nowMs,
     )
     publish(Event.local(Topics.OrderUpdate, update))

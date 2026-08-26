@@ -159,7 +159,7 @@ final case class SimState(
       case Some((orderId, o)) =>
         val ev = Event.stamped(
           Topics.OrderUpdate,
-          OrderUpdate(account, orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, Coin.Zero, Coin.Zero, now),
+          OrderUpdate(account, orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, Coin.Zero, now),
           now,
           now,
         )
@@ -202,7 +202,7 @@ final case class SimState(
           case Side.Long  => qty.min((-posSize).max(Coin.Zero)) // 买平空: 至多平掉现有空头
     if reduceOnly && effectiveQty.isZero then
       // reduceOnly 无可平仓位 -> 不成交，回 Cancelled (订单已被调用方移出簿 / 不入簿)
-      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Cancelled, fillPrice, qty, Coin.Zero, Coin.Zero, now)
+      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Cancelled, fillPrice, qty, Coin.Zero, now)
       (this, Vector(Event.stamped(Topics.OrderUpdate, update, now, now)))
     else
       val feeRate = liquidity match
@@ -210,7 +210,7 @@ final case class SimState(
         case Liquidity.Taker => takerFeeRate
       val fee = effectiveQty.notional(fillPrice) * feeRate
       val next = copy(ledger = ledger.applyFill(exchange, symbol, side, fillPrice, effectiveQty, fee))
-      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, effectiveQty, now)
+      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, now)
       val f = Fill(account, exchange, symbol, side, fillPrice, effectiveQty, now)
       // 顺序是这三条的全部意义, 见 hft.exchange.TradingGateway 的"回报有固定顺序":
       //   仓位快照 -> 成交 -> 订单终态
@@ -226,7 +226,7 @@ final case class SimState(
   private def statusEvent(exchange: Exchange, order: Order, orderId: OrderId, status: OrderStatus, price: Price, now: Timestamp): AnyEvent =
     Event.stamped(
       Topics.OrderUpdate,
-      OrderUpdate(account, orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, Coin.Zero, Coin.Zero, now),
+      OrderUpdate(account, orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, Coin.Zero, now),
       now,
       now,
     )

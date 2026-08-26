@@ -139,8 +139,6 @@ final case class OrderUpdate(
     quantity: Coin,
     /** 累计成交量 */
     filledQuantity: Coin,
-    /** 本次成交量 (用于乐观更新 position) */
-    fillSize: Coin,
     timestamp: Timestamp,
 )
 

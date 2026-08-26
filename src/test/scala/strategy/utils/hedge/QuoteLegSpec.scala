@@ -9,7 +9,7 @@ class QuoteLegSpec extends munit.FunSuite:
   private val sym = "ETH"
 
   private def upd(status: OrderStatus, px: Price = 3000.0, ts: Timestamp = 1000, oid: OrderId = "o1") =
-    OrderUpdate(AccountId.Live, oid, Some("c1"), ex, sym, Side.Short, status, px, 1.0, 0.0, 0.0, ts)
+    OrderUpdate(AccountId.Live, oid, Some("c1"), ex, sym, Side.Short, status, px, 1.0, 0.0, ts)
 
   private def bbo(bid: Price, ask: Price) = BBO(ex, sym, bid, 1.0, ask, 1.0, 0)
 
