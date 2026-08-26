@@ -1,6 +1,6 @@
 package strategy.strategies.ivsellhedge.logic
 
-import strategy.utils.hedge.{DeltaBand, DeltaCtx}
+import strategy.utils.hedge.{DeltaBand, DeltaCtx, QuotePolicy, QuoteStyle}
 
 import hft.TestUnits.given
 import hft.domain.*
@@ -33,9 +33,10 @@ class DeltaKamaHedgeStrategySpec extends munit.FunSuite:
       minQty: Coin = Coin(0.001),
       maxQty: Coin = Coin(Double.MaxValue),
       staleMs: Long = 0L,
+      quotes: QuotePolicy = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)),
   ) = DeltaKamaHedgeStrategy(ex, sym, ccy, band,
     kamaBucketMs = bucket, kamaErPeriod = kamaEr, macdBarMs = 3_600_000L,
-    offsetPct = 0.01, requoteMs = 5000, minHedgeQty = minQty, maxHedgeQty = maxQty, maxExposureStaleMs = staleMs)
+    quotes = quotes, minHedgeQty = minQty, maxHedgeQty = maxQty, maxExposureStaleMs = staleMs)
 
   private def feed(runner: StrategyRunner, ev: AnyEvent, localTs: Timestamp = -1): Vector[OutcomeEvent] =
     val lt = if localTs >= 0 then localTs else ev.localTs
@@ -179,3 +180,68 @@ class DeltaKamaHedgeStrategySpec extends munit.FunSuite:
       OptionExposure(ex, "BTC", Coin(5.0), Coin(0.0), Coin(0.0), Price(60000), 1, 10), 10, 10)
     assertEquals(feed(r, other), Vector.empty)
     assertEquals(feed(r, bbo(3000.0, 11)), Vector.empty, "BTC 那条不该被存下来当本策略的敞口")
+
+  // ---------- 报价方式随体制切换 (KAMA 的效率比驱动) ----------
+
+  private val calmStyle = QuoteStyle.passive(0.01, 60_000)
+  private val trendStyle = QuoteStyle.crossing(0.001, 1000)
+  private val byEr = QuotePolicy.byEfficiency(0.5, calmStyle, trendStyle)
+
+  /** 喂一段敞口序列，收集全部下单意图。
+    *
+    * 头几个桶 ER 还没预热 (此时按单边处理)，第一张单必然是跨价的 —— 所以每收到一张单就撤掉，
+    * 让后续的桶能继续触发，最后看**ER 预热之后**那张单用的是哪种方式。
+    */
+  private def ordersOver(r: StrategyRunner, series: Seq[(Int, Double)]): Vector[Order] =
+    val out = Vector.newBuilder[Order]
+    series.foreach { case (i, o) =>
+      val evs = feed(r, exposure(o, i * bucket))
+      evs.foreach {
+        case OutcomeEvent.PlaceOrders(os, _) =>
+          out += os.head
+          // 撤掉它, 让挂单腿回到空闲 (否则等确认会挡住后面所有桶)
+          feed(r, Event.stamped(Topics.OrderUpdate,
+            OrderUpdate(AccountId.Live, "o1", Some("c1"), ex, sym, os.head.side, OrderStatus.Cancelled,
+              3000.0, os.head.quantity, 0.0, 0.0, i * bucket),
+            i * bucket, i * bucket))
+        case _ => ()
+      }
+    }
+    out.result()
+
+  private def tifOf(o: Order): TimeInForce = o.orderType match
+    case OrderType.Limit(_, tif) => tif
+    case other                   => fail(s"expected Limit, got $other")
+
+  private def pxOf(o: Order): Double = o.orderType match
+    case OrderType.Limit(px, _) => px.value
+    case other                  => fail(s"expected Limit, got $other")
+
+  test("敞口来回折返 (ER 低) -> 被动挂在 ask 之上, PostOnly"):
+    // 敞口在 ±2 之间折返: 净位移≈0、路径很长 -> ER≈0 -> 平缓; KAMA≈-2 远超死区 0.1 故持续触发
+    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 2, quotes = byEr))
+    val orders = ordersOver(r, (1 to 14).map(i => (i, if i % 2 == 0 then 2.0 else -2.0)))
+    assert(orders.sizeIs >= 2, s"应触发多次, 实为 ${orders.size}")
+    assertEquals(tifOf(orders.head), TimeInForce.GTC, "第一张在 ER 预热前 -> 按单边处理")
+    assertEquals(tifOf(orders.last), TimeInForce.PostOnly, "ER 预热后判为平缓 -> 被动挂")
+    assert(math.abs(pxOf(orders.last) - 3000.0 * 1.01) < 1e-6 || math.abs(pxOf(orders.last) - 3000.0 * 0.99) < 1e-6,
+      s"被动价应在盘口之外, 实为 ${pxOf(orders.last)}")
+
+  test("敞口单边走 (ER 高) -> 跨价挂在 bid 之下, GTC"):
+    // 敞口单边递增: 净位移≈路径长度 -> ER≈1 -> 单边 -> 跨价追单
+    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 2, quotes = byEr))
+    val orders = ordersOver(r, (1 to 14).map(i => (i, i * 0.5)))
+    assert(orders.sizeIs >= 2, s"应触发多次, 实为 ${orders.size}")
+    assertEquals(tifOf(orders.last), TimeInForce.GTC, "ER 预热后仍判为单边 -> 跨价")
+    assertEquals(orders.last.side, Side.Short, "净多 -> 卖")
+    assert(math.abs(pxOf(orders.last) - 3000.0 * 0.999) < 1e-6, s"卖单应挂在 bid 之下, 实为 ${pxOf(orders.last)}")
+
+  test("ER 预热不足 -> 按单边处理 (裸着敞口比多付手续费贵)"):
+    val r = runnerWith(strat(Fixed(0.1, 0.1), kamaEr = 50, quotes = byEr))
+    placed(feed(r, exposure(0.5, 10))).orderType match
+      case OrderType.Limit(_, tif) => assertEquals(tif, TimeInForce.GTC)
+      case other                   => fail(s"expected Limit, got $other")
+
+  test("订单超时宽于最长存活时间, 否则框架会把正常挂单当丢单清理"):
+    val s = strat(Fixed(0.1, 0.1), quotes = byEr)
+    assert(s.orderTimeoutMs > calmStyle.ttlMs, s"orderTimeoutMs=${s.orderTimeoutMs} 须 > ${calmStyle.ttlMs}")

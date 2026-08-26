@@ -40,6 +40,14 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
     assert(IvSellHedgeConfig.loadOkx(tmp.toString).isLeft, "缺 ivStart 应解析失败")
     java.nio.file.Files.deleteIfExists(tmp)
 
+  test("报价方式由 ER 阈值切换, 两侧参数各自独立"):
+    val t = tuning.copy(trendErThreshold = 0.4, passiveOffset = 0.001, passiveTtlMs = 30_000,
+      crossOffset = 0.002, crossTtlMs = 500)
+    val p = t.quotePolicy
+    assertEquals(p.styleFor(Some(0.3)).tif, hft.domain.TimeInForce.PostOnly)
+    assertEquals(p.styleFor(Some(0.5)).tif, hft.domain.TimeInForce.GTC)
+    assertEquals(p.maxTtlMs, 30_000L, "框架订单超时要宽于最长存活时间, 取两者更大")
+
   test("配置文件缺失 -> Left(原因), 不静默"):
     assert(IvSellHedgeConfig.loadOkx("conf/definitely-not-here.json").isLeft)
 
@@ -51,4 +59,6 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
         assertEquals(c.tuning.macdBar, "1H")
         assertEquals(c.tuning.enableOpen, false)
         assertEquals(c.tuning.macdFast, 12)  // 模板未列出 -> 默认值
+        assertEquals(c.tuning.passiveTtlMs, 60_000L)
+        assertEquals(c.tuning.crossTtlMs, 1000L)
         assertEquals(c.simulated, true)

@@ -1,6 +1,6 @@
 package strategy.strategies.ivsellhedge.logic
 
-import strategy.utils.hedge.{DeltaBand, DeltaCtx, MakerQuoteLeg}
+import strategy.utils.hedge.{DeltaBand, DeltaCtx, QuoteLeg, QuotePolicy, QuoteStyle}
 
 import hft.domain.*
 import hft.event.{AnyEvent, Topics}
@@ -49,6 +49,8 @@ import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
   * @param symbol             永续标的 (OKX 统一 symbol = 基础币, 如 ETH)
   * @param ccy                期权基础币 —— [[OptionExposure]] 按交易所路由, 币种在载荷里, 故自行判别
   * @param band               敞口死区 (MACD 顺势侧收紧见 [[DeltaBand.macdTightened]])
+  * @param quotes             报价方式的选择 —— 敞口平缓时被动慢挂、走单边时跨价追单,
+  *                           见 [[QuotePolicy.byEfficiency]]
   * @param kamaBucketMs       KAMA 的一步 = 多长时间 (默认 5 分钟)
   * @param macdBarMs          MACD 的 K 线粒度 (默认 1 小时)
   * @param maxExposureStaleMs 敞口读数陈旧阈值 (ms): 超过它暂停对冲。>0 才生效
@@ -66,8 +68,8 @@ final class DeltaKamaHedgeStrategy(
     macdFastPeriod: Int = 12,
     macdSlowPeriod: Int = 26,
     macdSignal: Int = 9,
-    offsetPct: Double = 0.0002,
-    requoteMs: Long = 5000,
+    quotes: QuotePolicy,
+    cancelConfirmMs: Long = 3000,
     minHedgeQty: Coin = Coin(0.001),
     maxHedgeQty: Coin = Coin(Double.MaxValue),
     maxExposureStaleMs: Long = 0L,
@@ -92,7 +94,7 @@ final class DeltaKamaHedgeStrategy(
   private val kama = BucketedKama(kamaBucketMs, kamaErPeriod, kamaFast, kamaSlow)
 
   private var exposure: Option[OptionExposure] = None
-  private val leg = MakerQuoteLeg(offsetPct, requoteMs)
+  private val leg = QuoteLeg(cancelConfirmMs)
 
   /** 启动预热: 用历史 (high, low, close) 喂 K 线, 使 MACD 开机即就绪 (否则要等数十根 bar
     * 才有方向, 那期间死区退化为对称)。最旧->最新。 */
@@ -103,7 +105,7 @@ final class DeltaKamaHedgeStrategy(
     }
 
   // 订单超时需 > requote, 否则框架会先把正常挂单当超时清理
-  override def orderTimeoutMs: Long = requoteMs * 3
+  override def orderTimeoutMs: Long = quotes.maxTtlMs * 3
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
     .own(Topics.OrderUpdate) { (u, _, _) =>
@@ -133,15 +135,24 @@ final class DeltaKamaHedgeStrategy(
     *     时间戳盖的就是本地墙钟，拿交易所时钟去减就是在测量两地的时钟偏斜。
     */
   private def manage(bbo: BBO, localNow: Timestamp, ctx: StrategyContext): Vector[AnyEvent] =
-    leg.step(bbo.timestamp) match
-      case MakerQuoteLeg.Step.Blocked => Vector.empty
-      case MakerQuoteLeg.Step.Requote(ref, retry) =>
-        // 重发说明上一次撤单请求的终态回报迟迟没来 —— 期间这条腿不挂新单, 对冲实际停着, 必须看得见
-        if retry then warnThrottled("撤单重发", s"撤单确认超 ${requoteMs}ms 未到, 重发撤单 $ref (期间不挂新单, 对冲暂停)")
+    val style = quotes.styleFor(kama.efficiencyRatio)
+    leg.step(bbo.timestamp, style) match
+      case QuoteLeg.Step.Blocked => Vector.empty
+      case QuoteLeg.Step.Requote(ref, why) =>
+        logRequote(why)
         Vector(ctx.cancel(exchange, symbol, ref))
-      case MakerQuoteLeg.Step.Ready => tryHedge(bbo, localNow, ctx)
+      case QuoteLeg.Step.Ready => tryHedge(bbo, localNow, style, ctx)
 
-  private def tryHedge(bbo: BBO, localNow: Timestamp, ctx: StrategyContext): Vector[AnyEvent] =
+  private def logRequote(why: QuoteLeg.Requote): Unit = why match
+    case QuoteLeg.Requote.Expired(_) => () // 正常节奏, 不刷日志
+    case QuoteLeg.Requote.Preempted(from, to) =>
+      // 体制切换值得看见: 它说明敞口刚从震荡转单边 (或反过来), 执行方式随之改变
+      warnThrottled("报价抢占", s"体制切换 ${from.label} -> ${to.label}, 抢在超时前换单")
+    case QuoteLeg.Requote.Unconfirmed(waited) =>
+      // 期间这条腿不挂新单, 对冲实际停着, 必须看得见
+      warnThrottled("撤单重发", s"撤单确认 ${waited}ms 未到, 重发撤单 (期间不挂新单, 对冲暂停)")
+
+  private def tryHedge(bbo: BBO, localNow: Timestamp, style: QuoteStyle, ctx: StrategyContext): Vector[AnyEvent] =
     exposure match
       case None =>
         warnThrottled("敞口未到达", "期权敞口读数未到达 -> 未对冲 (检查 OptionSellerActor 是否在发布)")
@@ -168,14 +179,15 @@ final class DeltaKamaHedgeStrategy(
               Vector.empty
             else
               val side = if raw > Coin.Zero then Side.Short else Side.Long // 净多->卖, 净空->买
-              val limitPx = leg.place(side, Some(bbo), bbo.midPrice)
+              val (limitPx, tif) = leg.place(style, side, Some(bbo), bbo.midPrice)
               Vector(
                 ctx.place(
-                  Order("", exchange, symbol, side, OrderType.Limit(limitPx, TimeInForce.PostOnly), qty,
+                  Order("", exchange, symbol, side, OrderType.Limit(limitPx, tif), qty,
                     reduceOnly = false, clientOrderId = ""),
-                  f"delta_kama_hedge | $side qty=${qty.value}%.4f limit=${limitPx.value}%.2f " +
+                  f"delta_kama_hedge | $side qty=${qty.value}%.4f ${style.label} limit=${limitPx.value}%.2f " +
                     f"raw=${raw.value}%.4f signal=${signal.value}%.4f 带=(+${upTh.value}%.4f,-${downTh.value}%.4f) " +
                     f"macd=$macdDir kama=${kama.value.map(v => f"$v%.4f").getOrElse("预热中")} " +
+                    f"er=${kama.efficiencyRatio.map(v => f"$v%.2f").getOrElse("预热中")} " +
                     f"期权=${e.optionDelta.value}%.4f 现货=${e.coinBalance.value}%.4f 永续=${perp.value}%.4f",
                 )
               )

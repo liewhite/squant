@@ -32,8 +32,12 @@
     "kamaFast": 2,
     "kamaSlow": 30,
     "macdBar": "1H",
-    "offset": 0.0002,
-    "requoteMs": 5000,
+    "trendErThreshold": 0.5,
+    "passiveOffset": 0.0002,
+    "passiveTtlMs": 60000,
+    "crossOffset": 0.0005,
+    "crossTtlMs": 1000,
+    "cancelConfirmMs": 3000,
     "minHedgeQty": 0.001,
     "maxHedgeQty": 5.0
   }

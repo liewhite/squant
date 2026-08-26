@@ -1,5 +1,5 @@
 package strategy.strategies.makerhedge.logic
-import strategy.utils.hedge.{HedgeBand, HedgeCtx, MakerQuoteLeg}
+import strategy.utils.hedge.{HedgeBand, HedgeCtx, QuoteLeg, QuoteStyle}
 
 import hft.domain.*
 import hft.indicator.{Atr, KlineSeries, Macd, RealizedVol, Sma}
@@ -58,8 +58,10 @@ final class MakerHedgeStrategy(
       override protected def smaPeriod: Int = maSmaPeriod
 
   private var center: Double = Double.NaN
-  /** 被动挂单腿 (挂/撤/防重的机制与敞口轴对冲策略共用一份, 见 [[MakerQuoteLeg]]) */
-  private val leg = MakerQuoteLeg(offsetPct, requoteMs)
+  /** 本策略恒用被动挂单 (价格轴对冲的既有行为)。挂/撤/防重的机制与敞口轴对冲策略
+    * 共用一份, 见 [[QuoteLeg]]。 */
+  private val quoteStyle = QuoteStyle.passive(offsetPct, requoteMs)
+  private val leg = QuoteLeg()
   private var greeksRefMid: Double = Double.NaN // 上次 greeks 更新时的中间价 (gamma 修正基准)
 
   /** 启动预热: 用历史 (high, low, close) 喂 K 线 (h/l/c 当三笔 tick), 使 ATR/均线在开机即就绪,
@@ -96,12 +98,16 @@ final class MakerHedgeStrategy(
     }
 
   private def manage(px: Double, now: Timestamp, ctx: StrategyContext): Vector[AnyEvent] =
-    leg.step(now) match
-      case MakerQuoteLeg.Step.Blocked      => Vector.empty
-      case MakerQuoteLeg.Step.Requote(ref, retry) =>
-        if retry then warnThrottled(s"撤单确认超 ${requoteMs}ms 未到, 重发撤单 $ref (期间不挂新单, 对冲暂停)")
+    leg.step(now, quoteStyle) match
+      case QuoteLeg.Step.Blocked => Vector.empty
+      case QuoteLeg.Step.Requote(ref, why) =>
+        // 恒用同一种方式 -> 不会被抢占; 只有"撤单确认没回来"值得告警 (期间对冲实际停着)
+        why match
+          case QuoteLeg.Requote.Unconfirmed(waited) =>
+            warnThrottled(s"撤单确认 ${waited}ms 未到, 重发撤单 $ref (期间不挂新单, 对冲暂停)")
+          case _ => ()
         Vector(ctx.cancel(exchange, symbol, ref))
-      case MakerQuoteLeg.Step.Ready =>
+      case QuoteLeg.Step.Ready =>
           ctx.state.greeks(exchange, ccy) match
             case None =>
               warnThrottled("greeks/ccy 余额未就绪 -> 未对冲 (检查期权 greeks 流是否在推、ccy 余额是否注入)")
@@ -140,10 +146,10 @@ final class MakerHedgeStrategy(
                     // BBO 外 offset 挂被动单: 卖挂 bestAsk·(1+off)、买挂 bestBid·(1−off); 盘口缺失则回退中间价 (降级, 告警)
                     val bbo = ss.bbo(exchange)
                     if bbo.isEmpty then warnThrottled(f"盘口 BBO 缺失 -> maker 挂价回退中间价 $px%.2f (检查 BBO 订阅是否在推)")
-                    val limitPx = leg.place(side, bbo, Price(px))
+                    val (limitPx, tif) = leg.place(quoteStyle, side, bbo, Price(px))
                     Vector(
                       ctx.place(
-                        Order("", exchange, symbol, side, OrderType.Limit(limitPx, TimeInForce.PostOnly), Coin(qty), reduceOnly = false, clientOrderId = ""),
+                        Order("", exchange, symbol, side, OrderType.Limit(limitPx, tif), Coin(qty), reduceOnly = false, clientOrderId = ""),
                         f"maker_hedge | $side qty=$qty%.4f limit=$limitPx%.2f px=$px%.2f netDelta=$netDelta%.4f maBias=$maBias band=($up%.2f,$down%.2f)",
                       )
                     )

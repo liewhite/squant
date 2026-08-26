@@ -57,7 +57,9 @@ import sttp.client4.DefaultSyncBackend
   logger.warn(
     f"对冲: 死区基准=${t.deltaThreshold}%.4f ${t.ccy} MACD逆势侧×${t.macdTightenRatio}%.2f " +
       f"KAMA(${t.kamaBucketMs / 1000}s桶, ER${t.kamaErPeriod}/${t.kamaFast}/${t.kamaSlow}) " +
-      f"MACD@${t.macdBar} 挂单外移${t.offset * 100}%%/${t.requoteMs}ms重挂 单笔上限=${t.maxHedgeQty}"
+      f"MACD@${t.macdBar} 单笔上限=${t.maxHedgeQty}%n" +
+      f"报价: ER<${t.trendErThreshold}%.2f 平缓 -> 被动挂对手价外 ${t.passiveOffset * 100}%.3f%%, 给 ${t.passiveTtlMs}ms; " +
+      f"ER>=${t.trendErThreshold}%.2f 单边 -> 跨价穿透 ${t.crossOffset * 100}%.3f%%, 只给 ${t.crossTtlMs}ms"
   )
 
   supervised:
@@ -80,8 +82,8 @@ import sttp.client4.DefaultSyncBackend
       macdFastPeriod = t.macdFast,
       macdSlowPeriod = t.macdSlow,
       macdSignal = t.macdSignal,
-      offsetPct = t.offset,
-      requoteMs = t.requoteMs,
+      quotes = t.quotePolicy,
+      cancelConfirmMs = t.cancelConfirmMs,
       minHedgeQty = Coin(t.minHedgeQty),
       maxHedgeQty = Coin(t.maxHedgeQty),
       maxExposureStaleMs = t.exposureStaleMs,

@@ -1,6 +1,7 @@
 package strategy.strategies.ivsellhedge.live
 
 import strategy.strategies.ivsellhedge.logic.SellPlan
+import strategy.utils.hedge.{QuotePolicy, QuoteStyle}
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import com.github.plokhotnyuk.jsoniter_scala.macros.*
@@ -74,8 +75,12 @@ final case class IvSellTuning(
     macdFast: Int = 12,
     macdSlow: Int = 26,
     macdSignal: Int = 9,
-    offset: Double = 0.0002,
-    requoteMs: Long = 5000,
+    trendErThreshold: Double = 0.5,
+    passiveOffset: Double = 0.0002,
+    passiveTtlMs: Long = 60_000,
+    crossOffset: Double = 0.0005,
+    crossTtlMs: Long = 1000,
+    cancelConfirmMs: Long = 3000,
     minHedgeQty: Double = 0.001,
     maxHedgeQty: Double = 5.0,
     maxExposureStaleMs: Option[Long] = None,
@@ -87,6 +92,13 @@ final case class IvSellTuning(
     * 所以只配一处、这里派生。分两个字段配的话，预热用的粒度与实时聚合的粒度可以配得不一致，
     * 而症状只是"MACD 方向偶尔和图上不一样"。 */
   def macdBarMs: Long = IvSellTuning.barToMillis(macdBar)
+
+  /** 报价方式的选择：敞口平缓 -> 被动慢挂；走单边 -> 跨价追单 */
+  def quotePolicy: QuotePolicy = QuotePolicy.byEfficiency(
+    trendErThreshold,
+    calm = QuoteStyle.passive(passiveOffset, passiveTtlMs),
+    trending = QuoteStyle.crossing(crossOffset, crossTtlMs),
+  )
 
   def toSellerConfig: OptionSellerActor.Config =
     OptionSellerActor
