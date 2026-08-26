@@ -325,12 +325,16 @@ final class RestTradingGateway(
     client.fetchPositions() match
       case Right(positions) =>
         val mine = positions.filter(p => symbols.contains(p.symbol)).map(_.copy(account = account))
-        ledger = Ledger(account, mine.map(p => p.symbol -> p).toMap, cash = 0.0)
-        // 账本重置 -> 记账进度、第二本账、对账状态全部跟着归零
-        settled.clear() // 随后由既有挂单填回, 见 syncPendingOrders
-        fillLedger = Ledger(account, mine.map(p => p.symbol -> p).toMap, cash = 0.0)
-        reportedPositions.clear()
-        disagreements.clear()
+        val refreshed = mine.map(p => p.symbol -> p).toMap
+        // **只重置这批标的**。引擎为每批新加的策略都会发一次对齐指令 (symbols 只含那一批),
+        // 整本替换会把先装的策略的仓位连同它的记账进度一起抹掉 —— 那些策略从此按零仓决策,
+        // 而没有任何症状。这批标的里交易所没返回的视作零仓, 从账本里摘掉旧值。
+        ledger = Ledger(account, (ledger.positions -- symbols) ++ refreshed, cash = 0.0)
+        fillLedger = Ledger(account, (fillLedger.positions -- symbols) ++ refreshed, cash = 0.0)
+        // 记账进度不清: 这批标的还活着的订单会被挂单快照覆盖 (见 syncPendingOrders),
+        // 已终态的靠墓碑自然过期。清掉反而会让晚到的回报从零重记。
+        reportedPositions --= symbols
+        disagreements.filterInPlace((key, _) => !symbols.contains(key._1))
         syncedSymbols ++= symbols
         mine
       case Left(e) => throw IllegalStateException(s"$exchange 拉取初始持仓失败: ${e.message}")

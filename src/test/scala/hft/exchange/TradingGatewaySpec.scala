@@ -215,6 +215,35 @@ class TradingGatewaySpec extends munit.FunSuite:
         "0.3 + 增量 0.2 = 0.5; 若把 0.5 整个当增量就会变成 0.8",
       )
 
+  test("第二批策略的对齐不该抹掉第一批的账本"):
+    // 引擎为每批新加的策略都发一次对齐指令, symbols 只含那一批。整本替换会让先装的
+    // 策略从此按零仓决策 —— 没有任何症状。
+    supervised:
+      val bus = EventBus()
+      val feed = ManualFeed()
+      val eth = "ETHUSDT"
+      val ethMeta = SymbolMeta(Exchange.Binance, eth, 0.1, 0.001, 0.001, 1.0)
+      class TwoSymbolClient extends QuietClient:
+        override def fetchPositions() = Right(Vector(
+          Position(AccountId.Live, Exchange.Binance, "BTCUSDT", Coin(0.5), Price(100.0), 0.0)
+        ))
+      ActorSystem(bus).spawn(RestTradingGateway(TwoSymbolClient(), feed, AccountId.Live, metas + (eth -> ethMeta)))
+
+      align(bus, Set("BTCUSDT"))          // 第一批: BTC, 拉到 0.5
+      align(bus, Set(eth))                // 第二批: ETH, 交易所没返回它 -> 零仓
+
+      val seen = ConcurrentLinkedQueue[AnyEvent]()
+      val mailbox = bus.subscribe(Set(Interest.All(Topics.Position)))
+      ox.forkDiscard { mailbox.events.foreach(seen.add) }
+
+      // BTC 上再成交 0.2 —— 若第二批对齐把 BTC 的账抹了, 这里会算成 0.2 而不是 0.7
+      feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.2))
+      eventually("应有新仓位")(seen.size == 1)
+      assertEqualsDouble(
+        seen.asScala.head.as(Topics.Position).get.size.value, 0.7, 1e-12,
+        "第一批的 0.5 必须还在",
+      )
+
   test("三方对账: 谁跟谁对不上, 决定了这是什么性质的问题"):
     import RestTradingGateway.Verdict
     val tol = 1e-9
