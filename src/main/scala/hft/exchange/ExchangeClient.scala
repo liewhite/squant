@@ -13,6 +13,21 @@ trait ExchangeClient:
   /** 获取所有交易对元数据 */
   def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]]
 
+  /** 按 symbol 索引的合约规格 —— **进程内只拉一次**。
+    *
+    * 一个交易所的接入有三处要它：行情源把盘口数量从张换成币、汇报面把回报换回币、
+    * 柜台把下单意图对齐到交易所精度。三处各拉一次就是同一事实的三份副本
+    * （合约规格在进程生命周期内不变，但两次拉取之间交易所上了新合约的话它们就不一致了），
+    * 而且启动时白打两次 REST。
+    *
+    * `final`：各家客户端不该再各写一份索引方式。
+    *
+    * 失败即抛：缺规格就发不出单、换不了算，与其在首笔下单时炸，不如装配期就失败。
+    */
+  final lazy val symbolMetas: Map[Symbol, SymbolMeta] = fetchAllSymbolMetas() match
+    case Right(metas) => metas.map(m => m.symbol -> m).toMap
+    case Left(e)      => throw IllegalStateException(s"$exchange 预加载合约规格失败: ${e.message}")
+
 /** 私有 REST —— **拿到这个类型本身就意味着凭证已经具备**。
   *
   * 从前只有一个 `ExchangeClient`，凭证有没有靠 `hasCredentials: Boolean` 问，三个

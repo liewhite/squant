@@ -109,17 +109,8 @@ class OkxPublicClient protected[okx] (
     }
 
 
-  /** 合约规格缓存：把交易所回报里的**张数**换回框架统一的币本位。
-    * 惰性拉取一次 —— 只有走到需要换算的 REST 路径时才会用到。 */
-
-
-
-  /** 合约规格缓存：把交易所回报里的**张数**换回框架统一的币本位。
-    * 惰性拉取一次 —— 只有走到需要换算的 REST 路径时才会用到。 */
-  private lazy val symbolMetas: Map[Symbol, SymbolMeta] =
-    fetchAllSymbolMetas().fold(e => sys.error(s"加载合约规格失败: ${e.message}"), _.map(m => m.symbol -> m).toMap)
-
-
+  /** 把交易所回报里的**张数**换回框架统一的币本位。
+    * 规格取自 [[ExchangeClient.symbolMetas]] —— 与行情源、汇报面、柜台读的是同一份。 */
   protected def metaOf(symbol: Symbol): SymbolMeta =
     symbolMetas.getOrElse(symbol, sys.error(s"SymbolMeta not found: $exchange $symbol"))
 

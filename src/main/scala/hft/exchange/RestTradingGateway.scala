@@ -95,7 +95,7 @@ final class RestTradingGateway(
       case Left(e)     => throw IllegalStateException(s"$exchange 拉取账户信息失败: ${e.message}")
 
 object RestTradingGateway:
-  /** 拉取本所合约规格并装好柜台。
+  /** 装好柜台，合约规格取自客户端 (见 [[ExchangeClient.symbolMetas]]，进程内只拉一次)。
     *
     * 规格在**装配期**加载并且失败即终止：缺一个标的的规格就发不出它的单，
     * 与其在首笔下单时才炸，不如启动时就说清楚。
@@ -106,7 +106,4 @@ object RestTradingGateway:
       account: AccountId,
       accountRefreshMs: Long = 10_000,
   ): RestTradingGateway =
-    val metas = client.fetchAllSymbolMetas() match
-      case Right(ms) => ms.map(m => m.symbol -> m).toMap
-      case Left(e)   => throw IllegalStateException(s"${client.exchange} 预加载合约规格失败: ${e.message}")
-    RestTradingGateway(client, feed, account, metas, accountRefreshMs)
+    RestTradingGateway(client, feed, account, client.symbolMetas, accountRefreshMs)

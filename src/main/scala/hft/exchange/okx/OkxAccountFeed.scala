@@ -59,9 +59,7 @@ final class OkxAccountFeed(
   override def connect(acct: AccountId, sink: AnyEvent => Unit, spawn: (=> Unit) => Unit): Unit =
     account = acct
     publish = sink
-    metas = client.fetchAllSymbolMetas() match
-      case Right(ms) => ms.map(m => m.symbol -> m).toMap
-      case Left(e)   => throw IllegalStateException(s"OKX fetch symbol metas failed: ${e.message}")
+    metas = client.symbolMetas // 进程内只拉一次, 与柜台读的是同一份
 
     WsLoop.run("okx/private", backend, () => wsUrl, outgoing, onPrivateText, spawn)
     // login 帧入队，连接建立后立即发送 (timestamp 在此刻生成；连接通常亚秒级，OKX 允许 ~30s 偏差)

@@ -39,9 +39,7 @@ final class OkxMarketFeed(
   private var metas: Map[Symbol, SymbolMeta] = Map.empty
 
   override protected def connect(): Unit =
-    metas = client.fetchAllSymbolMetas() match
-      case Right(ms) => ms.map(m => m.symbol -> m).toMap
-      case Left(e)   => throw IllegalStateException(s"OKX fetch symbol metas failed: ${e.message}")
+    metas = client.symbolMetas // 进程内只拉一次, 与柜台读的是同一份
     WsLoop.run("okx/public", backend, () => wsUrl, outgoing, onPublicText, body => fork(body))
 
   /** 基类已去重，这里收到的都是尚未订阅过的流 */
