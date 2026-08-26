@@ -41,8 +41,16 @@ final class StrategyRunner(
     * `now` 为当前处理时刻 (回测虚拟时间 / 实盘墙钟)，作为 pending order 的 createdAt。
     */
   def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-    state.apply(event)
+    observe(event)
     handlers.dispatch(event, StrategyContext(state, account, now), now).map(prepareIntent(_, now))
+
+  /** 只更新状态，**不叫醒策略**。
+    *
+    * 启动对齐还没落地时用它：那时初始仓位与既有挂单都还在路上，策略要是此刻动作，
+    * 用的就是一份残缺的世界观 (见 [[Executor]] 的闸门)。状态照收不误 —— 排队的事件
+    * 一条都不能丢，只是先不据此决策。
+    */
+  def observe(event: AnyEvent): Unit = state.apply(event)
 
   /** 对策略**真正返回**的下单意图施加发单前的两件必做事：分配 clientOrderId、
     * 以币本位登记 pending。

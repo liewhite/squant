@@ -31,9 +31,8 @@ object BybitAccountFeed:
   *   2. 收到 auth 成功 (op=auth,success=true) 后，入队订阅 execution/order/wallet
   *
   * 解析 (linear 数量即币本位，无张<->币换算)：
-  *   - execution -> Fill (本次成交，维护仓位)。Bybit order 频道只带累计成交 cumExecQty 不带单笔增量，
-  *     故仓位维护交由 execution 频道，与 order 频道职责分离，避免重复计数
-  *   - order     -> OrderUpdate (仅挂单状态追踪；本频道不带单笔成交增量)
+  *   - execution -> 成交明细 (本次成交量与成交价)。**不参与记账**
+  *   - order     -> 订单状态 + **累计成交量**, 柜台据它记账 (见 hft.exchange.AccountReport)
   *   - wallet    -> AccountInfo(净值) + 各币种 Balance
   *
   * Fail-fast：连接断开、解析失败、auth/订阅失败一律抛异常终止引擎作用域。

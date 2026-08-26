@@ -139,15 +139,17 @@ class EngineContractSpec extends munit.FunSuite:
       eventually(log.asScala.toVector.toString)(log.size == 2)
       assertEquals(log.asScala.toVector, Vector(s"sync:$ex:$sym", s"market:$ex:$sym"), "对齐必须排在行情订阅之前")
 
-  test("影子账户不发对齐指令 —— 它从零开始, 没有历史可恢复"):
+  test("影子账户同样走对齐 —— 否则它永远收不到那批初始零仓快照"):
+    // 策略被教导"拿到初始仓位之前不要动作"。实盘给了、影子不给的话, 同一份逻辑在影子盘上
+    // 永远不交易 —— 虚实分叉, 而且恰好废掉影子盘的对照价值。影子柜台的对齐是本地的, 不打 REST。
     supervised:
       val log = ConcurrentLinkedQueue[String]()
       val paper = AccountId.Paper(1)
       val engine = Engine.start(plugins = Vector(RecordingGateway(ex, paper, log), RecordingFeed(ex, log)))
       engine.addStrategy(Watcher(), paper)
 
-      eventually(log.asScala.toVector.toString)(log.size == 1)
-      assertEquals(log.asScala.toVector, Vector(s"market:$ex:$sym"), "影子账户只订行情, 不对齐")
+      eventually(log.asScala.toVector.toString)(log.size == 2)
+      assertEquals(log.asScala.toVector, Vector(s"sync:$ex:$sym", s"market:$ex:$sym"), "对齐仍排在行情之前")
 
   test("停掉柜台后, 那条指令信道确实空了 —— 再加策略会被同一道闸拦下"):
     // 校验查的是**当下**的订阅事实, 不是启动时的一张快照。插件被撤下之后,

@@ -159,18 +159,17 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
     claims.checkAll(executors.map(ex => (ex.name, keysOf(ex))))
     verifyCommandsServed(combined, account)
 
-    // 3. 装配
+    // 3. 装配。**先告诉每个执行器要等哪些对齐应答, 再 spawn** ——
+    // spawn 之后它的事件循环立即开跑, 而已经在流动的行情会马上到; 闸门必须在那之前就位。
+    executors.foreach(ex => ex.awaitAlignment(ex.alignmentTargets))
     val ids = executors.map(system.spawn)
     claims.claimAll(executors.zip(ids).map((ex, handle) => (handle, ex.name, keysOf(ex))))
 
-    // 4. 启动对齐：只有实盘需要。
-    // 影子账户从零开始 —— 没有历史仓位与挂单要恢复。拿真实交易所的持仓去对齐一个模拟
-    // 账户是错的：那是别人的仓位。
-    // 用穷举 match 而不是 `== Live`：将来多一种账户类型时这里会编译报错逼人来决定它要不要
-    // 对齐，相等判断则会把它默默归进"影子盘"那一侧。
-    account match
-      case AccountId.Live   => syncAccounts(combined, account)
-      case _: AccountId.Paper => ()
+    // 4. 启动对齐 —— **两种账户都做**。
+    // 影子账户确实没有历史仓位要恢复，但它同样需要那一批"初始零仓"快照: 策略被教导
+    // "拿到初始仓位之前不要动作"，实盘给了、影子不给的话，同一份逻辑在影子盘上永远不交易
+    // —— 虚实分叉，而且恰好废掉影子盘的对照价值。影子柜台的对齐是本地的，不打 REST。
+    syncAccounts(combined, account)
 
     // 5. 行情从此刻开始流动
     requestMarketData(combined)
@@ -221,11 +220,7 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
       // 把它算作接单者的话, 柜台没装也能通过校验, 而订单永远发不出去。
       if bus.directSubscriberCount(OrderIntent, target) == 0 then
         missing += s"下单指令 $target 无人接单: 没有装载该账户在 $exchange 的柜台, 订单永远发不出去"
-      // 只有会发对齐指令的账户才需要有人接 —— 影子账户从零开始, 不对齐
-      val needsSync = account match
-        case AccountId.Live     => true
-        case _: AccountId.Paper => false
-      if needsSync && bus.directSubscriberCount(AccountSync, target) == 0 then
+      if bus.directSubscriberCount(AccountSync, target) == 0 then
         missing += s"账户对齐指令 $target 无人接单: 启动对齐永远不会完成, 策略会一直等下去"
     }
     if missing.nonEmpty then

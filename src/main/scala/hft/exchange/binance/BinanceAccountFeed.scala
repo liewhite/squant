@@ -83,10 +83,9 @@ final class BinanceAccountFeed(
       // 未知状态意味着无法解释交易所的订单状态机，继续运行只会静默发散
       case other => throw IllegalStateException(s"Unknown order status '$other': $o")
     val filledQty = Coin(o.z.asDouble) // 累计成交 —— 记账的依据
-    // 本次成交只是明细 (给绩效/成交记录看), 不参与记账。先报它、后报订单状态:
-    // 同一条推送里的两件事, 顺序由这里决定, 不必依赖交易所各频道的到达次序。
-    if o.l.asDouble > 0 then
-      report(AccountReport.Executed(o.s, side, o.L.asPrice, Coin(o.l.asDouble), o.T))
+    // **先报订单状态、后报成交明细**: 前者驱动记账与仓位快照, 后者只是明细。
+    // 契约并不承诺 Fill 相对 Position 的位置 (Bybit 那是两条独立频道, 没法承诺),
+    // 但同一条消息里的两件事顺序在我们手里 —— 能排就排, 少一处虚实差异。
     report(AccountReport.OrderStatusChanged(
       orderId = o.i.toString,
       clientOrderId = Some(o.c),
@@ -99,6 +98,8 @@ final class BinanceAccountFeed(
       filledQuantity = filledQty,
       timestamp = o.T,
     ))
+    if o.l.asDouble > 0 then
+      report(AccountReport.Executed(o.s, side, o.L.asPrice, Coin(o.l.asDouble), o.T))
 
   private def publishAccountUpdate(msg: AccountUpdateMsg): Unit =
     msg.a.B.foreach(b => report(AccountReport.BalanceChanged(b.a, b.wb.asDouble, msg.E)))

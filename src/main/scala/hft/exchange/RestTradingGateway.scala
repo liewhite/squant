@@ -89,7 +89,7 @@ final class RestTradingGateway(
     event.as(Topics.Clock).foreach { _ =>
       if now - lastReconciledAt >= RestTradingGateway.ReconcileIntervalMs then
         lastReconciledAt = now
-        reconcile()
+        reconcile(now)
     }
     event.as(GatewayInboxes).map(inbox => handle(inbox.report, now)).getOrElse(Vector.empty)
 
@@ -248,7 +248,11 @@ final class RestTradingGateway(
     * 三本账都可能差着一笔。连续 [[RestTradingGateway.DisagreementsBeforeAlarm]] 次
     * 仍然对不上才升级为告警 —— 时序窗口撑不了那么久，撑得住的只有真问题。
     */
-  private def reconcile(): Unit =
+  private def reconcile(now: Timestamp): Unit =
+    // 顺带扫一次记账进度: 只靠订单终态触发的话, 一段时间没有终态就不扫 ——
+    // 而"有成交却长期等不到终态"的告警本来就是为丢推送设的哨兵, 它自己却依赖
+    // 别的订单终态才跑, 那就成了摆设。
+    evictSettled(now)
     syncedSymbols.toVector.sorted.foreach { symbol =>
       val verdicts = RestTradingGateway.compare(
         byOrders = positionOf(symbol).size,
@@ -314,6 +318,36 @@ final class RestTradingGateway(
           throw IllegalStateException(s"撤单结果不确定, 终止: $exchange $symbol ${ref.raw} ${e.message}")
     }
 
+  /** 取一份"仓位与挂单互相一致"的快照 —— 前后两次挂单的已成交量相同即认为中间无成交 */
+  private def fetchConsistentSnapshot(symbols: Set[Symbol], attempt: Int): Vector[Position] =
+    val before = filledByOrder(fetchOrders(symbols))
+    val positions = client.fetchPositions() match
+      case Right(ps) => ps
+      case Left(e)   => throw IllegalStateException(s"$exchange 拉取初始持仓失败: ${e.message}")
+    val after = filledByOrder(fetchOrders(symbols))
+    if before == after then positions
+    else if attempt >= RestTradingGateway.SnapshotAttempts then
+      // 一直有成交进来说明这个账户正忙。快照本身仍然可用 (只是可能差一笔),
+      // 而对账会在几个节拍内发现并报出来 —— 比无限重试卡住启动强。
+      logger.warn(
+        s"$target 连取 $attempt 次仍未拿到互相一致的仓位/挂单快照 (期间一直有成交), " +
+          "本次对齐可能差一笔, 交给三方对账兜底"
+      )
+      positions
+    else
+      logger.info(s"$target 取快照期间有成交进来, 重取 (第 ${attempt + 1} 次)")
+      fetchConsistentSnapshot(symbols, attempt + 1)
+
+  private def filledByOrder(orders: Vector[OrderUpdate]): Map[OrderId, Coin] =
+    orders.map(o => o.orderId -> o.filledQuantity).toMap
+
+  private def fetchOrders(symbols: Set[Symbol]): Vector[OrderUpdate] =
+    symbols.toVector.sortBy(_.toString).flatMap { symbol =>
+      client.fetchPendingOrders(symbol) match
+        case Right(updates) => updates.map(_.copy(account = account))
+        case Left(e)        => throw IllegalStateException(s"$exchange $symbol 拉取既有挂单失败: ${e.message}")
+    }
+
   /** 拉真实持仓并**据此重置账本** —— 对齐是账本唯一的权威初值来源。
     *
     * 这也是漂移之后的修复入口：REST 是快照，不参与推送的流竞争。
@@ -322,8 +356,14 @@ final class RestTradingGateway(
     * 而"这份回报属于哪个账户"是装配期的事实，只有柜台知道。
     */
   override protected def syncPositions(symbols: Set[Symbol]): Vector[Position] =
-    client.fetchPositions() match
-      case Right(positions) =>
+    // 仓位与挂单是两次独立的 REST，中间夹进一笔成交就会让两份快照对不上：
+    // 成交落在"拉仓位"之后、"拉挂单"之前时，账本没含它、记账进度却已含它 ——
+    // 那笔成交从此永久漏记 (推送到达时增量为零)，仓位低估且不会自愈。
+    //
+    // 读一致快照的标准手法：夹着仓位前后各拉一次挂单，两次的已成交量相同即说明
+    // 这中间没有成交发生。静默标的一次就收敛，活跃标的最多重试几轮。
+    fetchConsistentSnapshot(symbols, attempt = 1) match
+      case positions =>
         val mine = positions.filter(p => symbols.contains(p.symbol)).map(_.copy(account = account))
         val refreshed = mine.map(p => p.symbol -> p).toMap
         // **只重置这批标的**。引擎为每批新加的策略都会发一次对齐指令 (symbols 只含那一批),
@@ -337,7 +377,6 @@ final class RestTradingGateway(
         disagreements.filterInPlace((key, _) => !symbols.contains(key._1))
         syncedSymbols ++= symbols
         mine
-      case Left(e) => throw IllegalStateException(s"$exchange 拉取初始持仓失败: ${e.message}")
 
   /** 拉既有挂单，并**用它们的已成交量初始化记账进度**。
     *
@@ -348,11 +387,7 @@ final class RestTradingGateway(
     * 只在"对齐时账户里有部分成交的挂单"才触发，不常见，但一触发就是仓位错。
     */
   override protected def syncPendingOrders(symbols: Set[Symbol]): Vector[OrderUpdate] =
-    val orders = symbols.toVector.sortBy(_.toString).flatMap { symbol =>
-      client.fetchPendingOrders(symbol) match
-        case Right(updates) => updates.map(_.copy(account = account))
-        case Left(e)        => throw IllegalStateException(s"$exchange $symbol 拉取既有挂单失败: ${e.message}")
-    }
+    val orders = fetchOrders(symbols)
     val now = nowMs
     orders.filter(_.filledQuantity.nonZero).foreach { order =>
       settled(order.orderId) = RestTradingGateway.Settlement(order.filledQuantity, firstSeenAt = now, terminalAt = None)
@@ -388,7 +423,10 @@ object RestTradingGateway:
           "**这是我们这边的 bug** —— 少解析了一条推送 / 字段读错 / 去重去多了, 与账户被外部改动无关, 请查适配层"
       case External(byOrders, reported) =>
         s"账本与交易所对不上: 本地=${byOrders.value} 交易所=${reported.value}。" +
-          "强平/手动干预/资金费/漏收回报都会造成。策略正按本地账本决策, 需人工确认; " +
+          "常见成因: 强平 / 手动干预 / 资金费结算 / 漏收订单回报; " +
+          "**若刚启动不久, 也可能是对齐竞态** —— 一张在对齐瞬间恰好完全成交的单, " +
+          "其回报晚于 REST 快照到达, 会被当成新成交重记一遍。" +
+          "策略正按本地账本决策, 需人工确认; " +
           "确认后**先撤掉在途单**再发账户对齐指令让柜台按 REST 快照重置 —— " +
           "有单在途时重置会把一笔既在快照里、回报又还在路上的成交记两遍"
 
@@ -404,6 +442,10 @@ object RestTradingGateway:
       if (byOrders - r).abs.value <= tolerance then Verdict.Agreed("外部") else Verdict.External(byOrders, r)
     }
     internal +: external.toVector
+
+  /** 取一致快照最多试几次。一直失败说明账户正忙, 那时接受一份可能差一笔的快照,
+    * 交给三方对账兜底 —— 比无限重试卡住启动强。 */
+  val SnapshotAttempts: Int = 3
 
   /** 连续对不上多少次才升级为告警。
     *

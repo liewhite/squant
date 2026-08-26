@@ -48,9 +48,11 @@ class PositionOwnershipSpec extends munit.FunSuite:
     while System.nanoTime() < deadline && !cond do Thread.sleep(5)
     assert(cond, s"等待超时: $what")
 
-  test("策略在成交回调里读到的是成交**后**的仓位"):
-    // 仓位快照必须排在成交之前发布。顺序反了策略读到的就是成交前的数,
-    // 对冲量从此一直差一笔 —— 而这不会有任何症状。
+  test("虚拟柜台上, 仓位紧邻在成交之前"):
+    // **这不是契约, 是虚拟柜台能构造出来的性质** —— 撮合内核一次产出三条回报, 顺序在我们
+    // 手里。真实柜台上成交明细走的是另一条渠道 (Bybit 干脆是另一条频道), 位置不承诺。
+    // 所以策略**不该**在成交回调里读仓位; 这条用例只是钉住虚拟柜台不要无谓地偏离。
+    // 真正的契约由"挂单消失的那一刻仓位已经更新"那条盯着。
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus)
@@ -179,3 +181,48 @@ class PositionOwnershipSpec extends munit.FunSuite:
       // 先等终态确实到了策略手里, 否则"没有违规"可能只是还没发生
       eventually("策略应已收到终态回报")(!terminalSeen.isEmpty)
       assertEquals(violations.asScala.toVector, Vector.empty[String])
+
+  test("行情已在流动时装载策略, 它在对齐落地前不动作"):
+    // 撤下一个策略再装回来、实盘与影子先后装载、扫描器先把标的订上了 —— 这些场景下
+    // 行情早就在流。新装的策略 spawn 即收行情, 而初始仓位还在几次 REST 往返之外。
+    // 那一刻它看到"仓位为零、没有挂单", 据此做的第一个决策就是重复开仓。
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+      val decisions = ConcurrentLinkedQueue[Double]()
+
+      /** 每收到一条行情就记一次"此刻看到的仓位" */
+      class Peeker extends Strategy:
+        def orderTimeoutMs: Long = 0L
+        def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (_, ctx, _) =>
+          decisions.add(ctx.state.symbolState(sym).get.positionSize(ex).value)
+          Vector.empty
+        }
+
+      // 柜台已持仓 0.7, 但对齐要等它把快照推过来
+      class HoldingClient extends AcceptingClient:
+        override def fetchPositions() =
+          Right(Vector(Position(AccountId.Live, ex, sym, Coin(0.7), Price(100.0), 0.0)))
+      system.spawn(RestTradingGateway(HoldingClient(), ManualFeed(), AccountId.Live, metas))
+
+      // 行情先流起来 —— 模拟"这个标的早就有别的组件在看"
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 1L), 1L))
+
+      val engineLike = Executor(Peeker(), AccountId.Live)
+      engineLike.awaitAlignment(engineLike.alignmentTargets)
+      system.spawn(engineLike)
+
+      // 此刻策略已在总线上, 行情继续流 —— 但对齐还没发
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 101.0, Coin(1.0), 101.1, Coin(1.0), 2L), 2L))
+      Thread.sleep(100)
+      assert(decisions.isEmpty, s"对齐落地前不该动作, 却已决策 ${decisions.asScala.toVector}")
+
+      // 对齐落地
+      val synced = bus.subscribe(Set(Interest.All(AccountSynced)))
+      bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 1L, Set(sym))))
+      synced.events.receive(): Unit
+      synced.close()
+
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 102.0, Coin(1.0), 102.1, Coin(1.0), 3L), 3L))
+      eventually("对齐之后应开始动作")(!decisions.isEmpty)
+      assertEquals(decisions.asScala.toVector, Vector(0.7), "第一次决策就该看到真实仓位")

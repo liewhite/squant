@@ -141,9 +141,9 @@ final class OkxAccountFeed(
     val fillSz = meta.toCoin(Contracts(d.fillSz.asDouble))
     val filledQty = meta.toCoin(Contracts(d.accFillSz.asDouble))
     val ts = nowMs
-    // 本次成交只是明细, 不参与记账 —— 仓位由下面那条回报的累计成交量驱动
-    if fillSz.nonZero then
-      report(AccountReport.Executed(sym, side, d.fillPx.asPrice, fillSz, ts))
+    // **先报订单状态、后报成交明细**: 前者驱动记账与仓位快照, 后者只是明细。
+    // 契约并不承诺 Fill 相对 Position 的位置, 但同一条消息里的顺序在我们手里 ——
+    // 能排就排, 少一处虚实差异。
     report(AccountReport.OrderStatusChanged(
       orderId = d.ordId,
       clientOrderId = if d.clOrdId.nonEmpty then Some(d.clOrdId) else None,
@@ -156,3 +156,5 @@ final class OkxAccountFeed(
       filledQuantity = filledQty,
       timestamp = ts,
     ))
+    if fillSz.nonZero then
+      report(AccountReport.Executed(sym, side, d.fillPx.asPrice, fillSz, ts))
