@@ -18,6 +18,15 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long) extend
   private val greeksRaw: mutable.Map[(Exchange, String), Greeks] = mutable.Map.empty
   /** 各币种现金余额 (按 (交易所, 币种) 索引)，用于修正 greeks delta 的现货敞口 */
   private val cashBalances: mutable.Map[(Exchange, String), Double] = mutable.Map.empty
+  /** 各 (交易所, 币种) 的 greeks **本地接收时刻** —— 陈旧判断的唯一基准。
+    *
+    * 不能用载荷里的 `timestamp`: 那是**交易所钟**, 而且各家适配层给的还不一致 (有的干脆
+    * 盖本地收到时刻)。拿它去减本地的 `now` 是**跨时钟域相减**, 差出来的是"陈旧度 + 时钟偏斜"
+    * —— 偏斜一大, 陈旧闸门要么永久暂停对冲、要么永远不触发, 两个方向都没有症状。
+    *
+    * 本地钟是唯一我们能连续测量的钟, 所以"多久以前"一律在它上面算。交易所时间戳表示的是
+    * "这件事在对端何时发生", 它有它的用处 (K 线的时间轴), 但不参与与本地时刻的减法。 */
+  private val greeksAt: mutable.Map[(Exchange, String), Timestamp] = mutable.Map.empty
 
   // ==================== 下单接口 ====================
 
@@ -59,6 +68,11 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long) extend
       cashBal <- cashBalances.get((exchange, ccy))
     yield g.copy(delta = g.delta + cashBal)
 
+  /** 这条 greeks 读数到本地多久了 (毫秒)。**本地钟**, 见 [[greeksAt]] —— 陈旧判断用它,
+    * 不要拿载荷里的 `timestamp` 去减 `now`。 */
+  def greeksAgeMs(exchange: Exchange, ccy: String, now: Timestamp): Option[Long] =
+    greeksAt.get((exchange, ccy)).map(now - _)
+
   /** 本策略在所有标的上的挂单 (供停机收尾逐一撤掉) */
   def allPendingOrders: Iterable[PendingOrder] = states.values.flatMap(_.pendingOrders)
 
@@ -80,7 +94,10 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long) extend
       cashBalances((balance.exchange, balance.asset)) = balance.available
     }
     event.as(Topics.AccountInfo).foreach(info => accountInfos(info.exchange) = info)
-    event.as(Topics.Greeks).foreach(g => greeksRaw((g.exchange, g.ccy)) = g)
+    event.as(Topics.Greeks).foreach { g =>
+      greeksRaw((g.exchange, g.ccy)) = g
+      greeksAt((g.exchange, g.ccy)) = event.localTs // 本地钟, 见 greeksAt 的说明
+    }
     event.as(Topics.Clock).foreach(_ => states.values.foreach(_.failOnTimedOutOrders(event.localTs, orderTimeoutMs)))
     // 只有框架内置的按标的路由 topic 才进 SymbolState。用户自定义的、同样以 Instrument 为 key
     // 的 topic (如订阅别的策略在某标的上的指标) 不代表交易该标的，其标的未必注册过 ——

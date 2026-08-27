@@ -46,11 +46,16 @@ import hft.domain.*
   * 反过来也不能不管：那条确认若始终不来，干等就是"从此再不对冲"且没有任何症状。所以超时
   * 会**重发同一张单的撤单**（同一个 id，不可能造出新的孤儿），并由调用方告警。
   *
-  * ## 时钟域
+  * ## 时钟域：一律**本地钟**
   *
-  * [[step]] 的 `now` 与回报里的时间戳必须同一个时钟。注意各交易所适配层给的
-  * `OrderUpdate.timestamp` 并不都是交易所时钟（OKX 私有流盖的是本地收到时刻），
-  * 所以这里只要求"调用方两边用同一个域"，不承诺它是哪一个。
+  * [[step]] 与 [[onOrderUpdate]] 的 `now` 都是**本地处理时刻**，挂单年龄因此算在本地钟上。
+  *
+  * 不用回报里的 `OrderUpdate.timestamp`：那是交易所钟，而各家适配层给的还不一致
+  * （有的干脆盖本地收到时刻）。拿它与本地的 `now` 相减，差出来的是"挂了多久 + 时钟偏斜" ——
+  * 偏斜一大，requote 要么永不触发、要么每拍都触发，两个方向都没有症状。
+  *
+  * **本地钟是唯一我们能连续测量的钟**，所以"多久以前"一律在它上面算。交易所时间戳表示
+  * "这件事在对端何时发生"，它有别的用处（K 线的时间轴），但不参与与本地时刻的减法。
   *
   * @param cancelConfirmMs 撤单请求多久没等到终态回报就重发（见上）
   */
@@ -64,21 +69,21 @@ final class QuoteLeg(val cancelConfirmMs: Long = 3000):
 
   /** 本腿的订单回报驱动状态推进。**Filled 时返回成交价**，供调用方重置自己的判据基准
     * （价格轴策略把对冲中心移到成交价；敞口轴策略不需要，忽略即可）。 */
-  def onOrderUpdate(u: OrderUpdate): Option[Price] =
+  def onOrderUpdate(u: OrderUpdate, now: Timestamp): Option[Price] =
     state match
       case State.Idle => None // 已结束的旧单的迟到消息
       case State.Placing(style) =>
         u.status match
           case OrderStatus.Created => None // 本地态，还不带交易所 id
           case OrderStatus.Pending | OrderStatus.PartiallyFilled(_) =>
-            state = State.Resting(u.orderId, u.timestamp, style); None
+            state = State.Resting(u.orderId, now, style); None
           case OrderStatus.Filled => state = State.Idle; Some(u.price)
           case OrderStatus.Cancelled | OrderStatus.Rejected(_) | OrderStatus.Error(_) =>
             state = State.Idle; None
       case State.Resting(id, _, style) if u.orderId == id =>
         u.status match
           case OrderStatus.Pending | OrderStatus.PartiallyFilled(_) =>
-            state = State.Resting(id, u.timestamp, style); None
+            state = State.Resting(id, now, style); None
           case OrderStatus.Filled => state = State.Idle; Some(u.price)
           case OrderStatus.Cancelled | OrderStatus.Rejected(_) | OrderStatus.Error(_) =>
             state = State.Idle; None

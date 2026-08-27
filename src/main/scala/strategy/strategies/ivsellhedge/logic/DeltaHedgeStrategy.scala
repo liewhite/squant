@@ -168,8 +168,8 @@ final class DeltaHedgeStrategy(
   override def orderTimeoutMs: Long = quotes.maxTtlMs * 3
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
-    .own(Topics.OrderUpdate) { (u, _, _) =>
-      leg.onOrderUpdate(u) // 成交价对敞口轴判据没有意义 (判据是敞口本身), 故不用它重置任何东西
+    .own(Topics.OrderUpdate) { (u, _, now) =>
+      leg.onOrderUpdate(u, now) // 成交价对敞口轴判据没有意义 (判据是敞口本身), 故不用它重置任何东西
       Vector.empty
     }
     .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, now) =>
@@ -196,7 +196,7 @@ final class DeltaHedgeStrategy(
     */
   private def manage(bbo: BBO, localNow: Timestamp, ctx: StrategyContext): Vector[AnyEvent] =
     val style = quotes.styleFor(fastKlines.efficiencyRatio)
-    leg.step(bbo.timestamp, style) match
+    leg.step(localNow, style) match
       case QuoteLeg.Step.Blocked => Vector.empty
       case QuoteLeg.Step.Requote(ref, why) =>
         logRequote(why)

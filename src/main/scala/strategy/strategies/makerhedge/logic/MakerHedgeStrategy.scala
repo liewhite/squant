@@ -97,25 +97,25 @@ final class MakerHedgeStrategy(
   override def orderTimeoutMs: Long = requoteMs * 3
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
-    .own(Topics.OrderUpdate) { (u, _, _) =>
-      leg.onOrderUpdate(u).foreach(px => center = px.value) // 对冲成交 -> 中心重置到成交价
+    .own(Topics.OrderUpdate) { (u, _, now) =>
+      leg.onOrderUpdate(u, now).foreach(px => center = px.value) // 对冲成交 -> 中心重置到成交价
       Vector.empty
     }
-    .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, _) =>
+    .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, now) =>
       val px = b.midPrice.value
       klines.update(b.timestamp, px)
       if center.isNaN then center = px
-      // 用**交易所时钟** b.timestamp 而非处理时刻：requote 判据里的 restingAt 取自订单回报的
-      // 交易所时间戳，两边必须同一个时钟域。混用的话 requote 时机会随投递延迟与时钟偏斜漂移。
-      manage(px, b.timestamp, ctx)
+      // 用**本地处理时刻**：挂单年龄与 greeks 陈旧度都算在本地钟上 (见 QuoteLeg 的"时钟域")。
+      // K 线的时间轴仍用交易所钟 (上一行) —— 那是"这根 bar 属于哪一刻", 不是"多久以前"。
+      manage(px, now, ctx)
     }
     // greeks 的路由键只到交易所，币种在载荷里，故 ccy 仍需自行判断
-    .account(Topics.Greeks) { (g, ctx, _) =>
+    .account(Topics.Greeks) { (g, ctx, now) =>
       if g.ccy != ccy then Vector.empty
       else
         ctx.state.symbolState(symbol).flatMap(_.bbo(exchange)).map { b =>
           greeksRefMid = b.midPrice.value // 记录本次 greeks 对应的现价, 供 gamma 修正
-          manage(b.midPrice.value, b.timestamp, ctx) // 同上: 交易所时钟域
+          manage(b.midPrice.value, now, ctx) // 同上: 本地钟
         }.getOrElse(Vector.empty)
     }
 
@@ -134,8 +134,12 @@ final class MakerHedgeStrategy(
             case None =>
               warnThrottled("greeks/ccy 余额未就绪 -> 未对冲 (检查期权 greeks 流是否在推、ccy 余额是否注入)")
               Vector.empty
-            case Some(g) if maxGreeksStaleMs > 0 && now - g.timestamp > maxGreeksStaleMs =>
-              warnThrottled(s"greeks 陈旧 ${now - g.timestamp}ms > ${maxGreeksStaleMs}ms -> 暂停对冲 (宁可不动也不按过期 delta 乱挂)")
+            // 陈旧度问状态层要 (本地接收时刻), 不拿载荷里的交易所时间戳去减本地的 now ——
+            // 那是跨时钟域相减, 偏斜超过阈值就会永久暂停对冲, 且没有任何症状。
+            case Some(_) if maxGreeksStaleMs > 0 &&
+                ctx.state.greeksAgeMs(exchange, ccy, now).exists(_ > maxGreeksStaleMs) =>
+              val age = ctx.state.greeksAgeMs(exchange, ccy, now).getOrElse(0L)
+              warnThrottled(s"greeks 陈旧 ${age}ms > ${maxGreeksStaleMs}ms -> 暂停对冲 (宁可不动也不按过期 delta 乱挂)")
               Vector.empty
             case Some(greeks) =>
               (for

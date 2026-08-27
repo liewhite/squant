@@ -60,6 +60,12 @@ trait StateView:
   /** 账户级期权希腊字母 (含现货修正)。greeks 与该币种余额均到达才返回 */
   def greeks(exchange: Exchange, ccy: String): Option[Greeks]
 
+  /** 这条 greeks 读数到本地多久了 (毫秒) —— **陈旧判断用它**。
+    *
+    * 载荷里的 `Greeks.timestamp` 是交易所钟 (各家还不一致), 拿它减本地的 `now` 是跨时钟域
+    * 相减, 差出来的是"陈旧度 + 时钟偏斜"。见 [[hft.state.StateManager.greeksAt]]。 */
+  def greeksAgeMs(exchange: Exchange, ccy: String, now: Timestamp): Option[Long]
+
   /** 本策略在所有标的上的挂单 */
   def allPendingOrders: Iterable[PendingOrder]
   def hasPendingOrders(symbol: Symbol): Boolean

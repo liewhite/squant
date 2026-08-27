@@ -112,18 +112,22 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
     val q = placed(feed(runner, bbo(104.0, 8 * hour + 1))).quantity
     assert(math.abs(q.value - 0.1 * (104.0 - 101.0)) < 1e-9, s"qty=${q.value}")
 
-  test("requote 判据用交易所时钟, 不受投递延迟影响"):
-    // restingAt 取自订单回报的**交易所**时间戳; 若 requote 拿本地处理时刻去比,
-    // 两个时钟域一混, 撤单时机就随投递延迟与时钟偏斜漂移。
-    // 这里让 localTs 比 exchangeTs 晚 6 秒 (模拟延迟), 而交易所时钟只过了 2 秒:
-    // 正确行为是**不撤**。此前的测试构造 localTs == exchangeTs, 恰好掩盖了这个区别。
+  test("requote 判据两边同域 —— 一律本地钟"):
+    // 从前 restingAt 取自 OrderUpdate.timestamp、now 取自 BBO.timestamp, 意图是"两边都用
+    // 交易所钟, 于是不受投递延迟影响"。但**那个前提只在 Binance 上成立**: OKX 与 Bybit 的
+    // 适配层根本没解析订单推送里的交易所时间, 盖的是本地收到时刻 —— 那两家上这个减法是
+    // 本地钟 − 交易所钟, 差出来的是"挂了多久 + 时钟偏斜"。偏斜一大, requote 要么永不触发、
+    // 要么每拍都触发, 两个方向都没有症状。
+    //
+    // 现在两边都取本地处理时刻。代价是投递延迟计入挂单年龄 (实盘毫秒级, 而 requote 周期是
+    // 秒级), 换来的是这条判据在三家交易所上都成立。将来若三家都能给出可靠的交易所时间戳,
+    // 可以再改回去 —— 那时"不受投递延迟影响"才是真的。
     val runner = warm(ConstantBand(2.0, 2.0), rawDelta = 0.5)
-    feed(runner, bbo(104.0, 8 * hour))                                      // 下单
-    feed(runner, ordUpd(OrderStatus.Pending, Side.Short, 105.04, 8 * hour))  // 确认, restingAt = 8h
-    val exTs = 8 * hour + 2000  // 交易所时钟只过了 2s (< requoteMs 5s)
+    feed(runner, bbo(104.0, 8 * hour))                                     // 下单
+    feed(runner, ordUpd(OrderStatus.Pending, Side.Short, 105.04, 8 * hour)) // 确认, restingAt = 本地 8h
+    val exTs = 8 * hour + 2000 // 交易所时钟只过了 2s, 但本地已经过了 6s
     val lateDelivery = Event.stamped(Topics.Bbo, BBO(ex, sym, 104.0, Coin(1.0), 104.0, Coin(1.0), exTs), exTs, exTs + 6000)
-    assertEquals(
-      runner.onEvent(lateDelivery, exTs + 6000).flatMap(_.as(OrderIntent)).map(_.outcome),
-      Vector.empty,
-      "交易所时钟只过了 2s, 不该 requote —— 拿本地时刻 (已过 6s) 比就会误撤",
+    assert(
+      runner.onEvent(lateDelivery, 8 * hour + 6000).flatMap(_.as(OrderIntent)).nonEmpty,
+      "本地视角这张单已经挂了 6s > requoteMs 5s -> 该撤了; 判据两边都是本地钟, 不跨域",
     )
