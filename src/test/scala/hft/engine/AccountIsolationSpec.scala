@@ -38,8 +38,8 @@ class AccountIsolationSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val seen = ConcurrentLinkedQueue[String]()
-      system.spawn(Executor(Recorder(seen, "live"), AccountId.Live))
-      system.spawn(Executor(Recorder(seen, "paper"), paper))
+      system.spawn(Executor.readyToTrade(Recorder(seen, "live"), AccountId.Live))
+      system.spawn(Executor.readyToTrade(Recorder(seen, "paper"), paper))
 
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
       bus.publish(Event.local(Topics.Fill, fill(AccountId.Live, 1.0)))

@@ -59,7 +59,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
       val atFill = ConcurrentLinkedQueue[Double]()
       val atPosition = ConcurrentLinkedQueue[Double]()
       system.spawn(PaperCounter(paper, ex, instant, metas))
-      system.spawn(Executor(Recorder(atFill, atPosition), paper))
+      system.spawn(Executor.readyToTrade(Recorder(atFill, atPosition), paper))
 
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 1L), 1L))
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 98.0, Coin(1.0), 98.1, Coin(1.0), 2L), 2L)) // 越价成交
@@ -91,7 +91,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
 
       val strategy = NoFill()
       system.spawn(PaperCounter(paper, ex, instant, metas))
-      val executor = Executor(strategy, paper)
+      val executor = Executor.readyToTrade(strategy, paper)
       assert(
         !executor.subscription.accepts(
           Event.local(Topics.Fill, Fill(paper, ex, sym, Side.Long, 100.0, Coin(0.5), 0L))
@@ -166,7 +166,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
       synced.events.receive(): Unit
       synced.close()
 
-      system.spawn(Executor(Checker(), AccountId.Live))
+      system.spawn(Executor.readyToTrade(Checker(), AccountId.Live))
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 1L), 1L))
 
       val clientOrderId = intents.events.receive().as(OrderIntent).get.outcome match
@@ -208,9 +208,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
       // 行情先流起来 —— 模拟"这个标的早就有别的组件在看"
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 1L), 1L))
 
-      val engineLike = Executor(Peeker(), AccountId.Live)
-      engineLike.awaitAlignment(engineLike.alignmentTargets)
-      system.spawn(engineLike)
+      system.spawn(Executor(Peeker(), AccountId.Live)) // 闸门自带, 无需装配方设置
 
       // 此刻策略已在总线上, 行情继续流 —— 但对齐还没发
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 101.0, Coin(1.0), 101.1, Coin(1.0), 2L), 2L))

@@ -49,7 +49,7 @@ class StrategyMetricsSpec extends munit.FunSuite:
       val mailbox = bus.subscribe(Set(Interest.Keyed(SpreadMetric, Set(inst))))
       ox.forkDiscard { while true do mailbox.events.receive().as(SpreadMetric).foreach(got.add) }
 
-      system.spawn(Executor(Quoting(), AccountId.Live))
+      system.spawn(Executor.readyToTrade(Quoting(), AccountId.Live))
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
 
       await(!got.isEmpty, "应收到指标")
@@ -67,9 +67,9 @@ class StrategyMetricsSpec extends munit.FunSuite:
         def handlers: StrategyHandlers = StrategyHandlers.empty
           .custom(SpreadMetric, Set(inst)) { (s, _, _) => seen.add(s.bps); Vector.empty }
 
-      system.spawn(Executor(Quoting(), AccountId.Live))
+      system.spawn(Executor.readyToTrade(Quoting(), AccountId.Live))
       // 消费方绑在另一个账户上：自定义事件不带账户维度，两边都收得到
-      system.spawn(Executor(Consumer(), AccountId.Paper(1)))
+      system.spawn(Executor.readyToTrade(Consumer(), AccountId.Paper(1)))
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
 
       await(!seen.isEmpty, "另一个策略应收到指标")

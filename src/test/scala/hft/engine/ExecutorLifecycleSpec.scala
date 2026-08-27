@@ -32,7 +32,7 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val intents = bus.subscribe(Set(Interest.All(OrderIntent)))
-      val h = system.spawn(Executor(OneShotMaker(), AccountId.Live))
+      val h = system.spawn(Executor.readyToTrade(OneShotMaker(), AccountId.Live))
 
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
       val placed = intents.events.receive().as(OrderIntent).get.outcome match
@@ -55,7 +55,7 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val intents = bus.subscribe(Set(Interest.All(OrderIntent)))
-      val h = system.spawn(Executor(OneShotMaker(), AccountId.Live))
+      val h = system.spawn(Executor.readyToTrade(OneShotMaker(), AccountId.Live))
 
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
       val placed = intents.events.receive().as(OrderIntent).get.outcome match
@@ -87,7 +87,7 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val intents = bus.subscribe(Set(Interest.All(OrderIntent)))
-      val h = system.spawn(Executor(OneShotMaker(), AccountId.Live))
+      val h = system.spawn(Executor.readyToTrade(OneShotMaker(), AccountId.Live))
       system.stop(h)
       // 哨兵作栅栏: 若收尾误发了信号, 先读到的会是它而不是哨兵
       bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, sentinel)))

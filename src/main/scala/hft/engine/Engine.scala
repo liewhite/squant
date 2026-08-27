@@ -159,9 +159,8 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
     claims.checkAll(executors.map(ex => (ex.name, keysOf(ex))))
     verifyCommandsServed(combined, account)
 
-    // 3. 装配。**先告诉每个执行器要等哪些对齐应答, 再 spawn** ——
-    // spawn 之后它的事件循环立即开跑, 而已经在流动的行情会马上到; 闸门必须在那之前就位。
-    executors.foreach(ex => ex.awaitAlignment(ex.alignmentTargets))
+    // 3. 装配。执行器自带对齐闸门 (见 Executor.awaiting): spawn 之后它的事件循环立即
+    // 开跑, 而已经在流动的行情会马上到 —— 闸门必须在构造时就位, 不能靠装配方记得调一下。
     val ids = executors.map(system.spawn)
     claims.claimAll(executors.zip(ids).map((ex, handle) => (handle, ex.name, keysOf(ex))))
 

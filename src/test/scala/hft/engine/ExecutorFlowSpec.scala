@@ -39,7 +39,7 @@ class ExecutorFlowSpec extends munit.FunSuite:
       val outcomes = bus.subscribe(Set(Interest.All(OrderIntent)))
       val system = ActorSystem(bus)
 
-      system.spawn(Executor(ClockOrderStrategy(), AccountId.Live))
+      system.spawn(Executor.readyToTrade(ClockOrderStrategy(), AccountId.Live))
       bus.publish(Event.local(Topics.Clock, ()))
 
       outcomes.events.receive().as(OrderIntent).get.outcome match
@@ -60,7 +60,7 @@ class ExecutorFlowSpec extends munit.FunSuite:
       val outcomes = bus.subscribe(Set(Interest.All(OrderIntent)))
       val system = ActorSystem(bus)
 
-      system.spawn(Executor(ClockOrderStrategy(), AccountId.Live))
+      system.spawn(Executor.readyToTrade(ClockOrderStrategy(), AccountId.Live))
 
       // 范围外 symbol 事件 (若未被过滤会触发 StateManager 路由 sys.error 使作用域崩溃)
       val other = BBO(Exchange.Binance, "DOGEUSDT", 0.1, Coin(1.0), 0.2, Coin(1.0), 0L)

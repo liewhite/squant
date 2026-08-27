@@ -78,8 +78,8 @@ class LiveAndShadowSpec extends munit.FunSuite:
       system.spawn(PaperCounter(paper, ex, instant, metas))
 
       // 同一份策略逻辑, 两个账户各一个实例
-      system.spawn(Executor(OneShotMaker(), AccountId.Live))
-      system.spawn(Executor(OneShotMaker(), paper))
+      system.spawn(Executor.readyToTrade(OneShotMaker(), AccountId.Live))
+      system.spawn(Executor.readyToTrade(OneShotMaker(), paper))
 
       // 一份行情喂给所有人 (行情无账户归属)
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 1L), 1L))

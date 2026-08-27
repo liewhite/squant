@@ -11,7 +11,7 @@ import hft.strategy.Strategy
   * 只做两件事 —— 声明策略的订阅范围、把策略产出的事件交出去。策略逻辑与状态维护全在
   * [[StrategyRunner]]，与回测共用同一份 (回测在单线程虚拟时间循环里直接调用同一个 runner)。
   */
-final class Executor(
+final class Executor private (
     strategy: Strategy,
     /** 本实例绑定的账户 —— 装配期决定。同一份策略逻辑可以同时跑实盘与影子盘，
       * 两个实例只有这一处不同，策略代码不必知情。
@@ -20,6 +20,8 @@ final class Executor(
       * 是危险侧失效；装配处若留个 `= Live` 的默认值，等于把同一个坑重新挖开 ——
       * 给影子策略装配时忘传账户，它就真金白银在实盘上跑，而编译器不会吭声。 */
     val account: AccountId,
+    /** 是否要等启动对齐落地才叫醒策略。见 [[awaiting]] */
+    awaitAlignment: Boolean,
 ) extends Actor:
   private val runner = StrategyRunner(strategy, account)
 
@@ -36,20 +38,21 @@ final class Executor(
     * 把闸门放在策略这一侧，"对齐先于行情"就从**指令发出顺序**升级为**策略可见顺序**，
     * 上面那几种场景一并覆盖。
     */
-  private var awaiting: Set[AccountExchange] = Set.empty
+  private var awaiting: Set[AccountExchange] = if awaitAlignment then alignmentTargets else Set.empty
 
   override def name: String = s"executor(${strategy.getClass.getSimpleName}@$account)"
 
   /** 本策略的订阅范围 = 策略声明 + 框架补齐。引擎据此校验指令有人接、发对齐与行情订阅指令 */
   def subscription: Subscription = runner.subscription
 
-  /** 本实例要等哪些对齐应答 —— 由引擎在装配时告知 (它才知道这一批发了哪些对齐指令) */
-  def awaitAlignment(targets: Set[AccountExchange]): Unit = awaiting = targets
-
   override def interests: Set[Interest] =
     runner.subscription.interests + Interest.Keyed(AccountSynced, alignmentTargets)
 
-  /** 本策略涉及的 (账户, 交易所) —— 对齐应答按它路由 */
+  /** 本策略涉及的 (账户, 交易所) —— 对齐应答按它路由。
+    *
+    * 由自己算而不是让引擎告知：等谁的对齐，从订阅范围直接读得出来。让装配方传进来的话，
+    * 就多了一个"必须在 spawn 之前调用"的时序约定 —— 而这种约定迟早有人漏掉。
+    */
   def alignmentTargets: Set[AccountExchange] =
     runner.subscription.exchanges.map(AccountExchange(account, _))
 
@@ -71,3 +74,22 @@ final class Executor(
     * 的决定 (换个策略接管、还是真的清掉敞口)，框架替它决定会在撤下实例时制造非预期的市价单。
     */
   override def onStop(now: Timestamp): Vector[AnyEvent] = runner.pendingCancels(now)
+
+object Executor:
+  /** 装进引擎的执行器 —— **自带对齐闸门**：初始仓位落地之前只观察、不动作。
+    *
+    * 闸门在构造时就位，不靠装配方记得调一下 —— spawn 之后事件循环立即开跑，
+    * 那种"必须在某步之前调用"的约定迟早有人漏掉。
+    */
+  def apply(strategy: Strategy, account: AccountId): Executor =
+    new Executor(strategy, account, awaitAlignment = true)
+
+  /** 世界已经就绪的执行器 —— **不等对齐**。
+    *
+    * 给的是那些"前提由调用方自己保证"的场景：单元测试直接喂事件、回测的世界从第一条
+    * 行情开始。它们本身就是那个前提，再等一次对齐只会永远等下去。
+    *
+    * 实盘装配一律走 [[apply]]，那条路上没人替策略保证初始仓位已经到手。
+    */
+  def readyToTrade(strategy: Strategy, account: AccountId): Executor =
+    new Executor(strategy, account, awaitAlignment = false)
