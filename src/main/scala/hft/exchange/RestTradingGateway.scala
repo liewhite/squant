@@ -83,7 +83,7 @@ final class RestTradingGateway(
     case AccountReport.Executed(symbol, side, price, qty, ts) =>
       // 成交明细不进主账本 (仓位由订单回报的累计量驱动)，但要进第二本账 —— 它是对账的
       // 另一条独立渠道，两本对不上就说明我们这边漏了什么。
-      book.recordFill(symbol, side, price, qty)
+      book.recordFill(symbol, side, qty)
       Vector(Event.stamped(Topics.Fill, Fill(account, exchange, symbol, side, price, qty, ts), ts, now))
 
     case AccountReport.OrderStatusChanged(orderId, clientOrderId, symbol, side, status, price, avgFillPrice, quantity, filledQuantity, ts) =>

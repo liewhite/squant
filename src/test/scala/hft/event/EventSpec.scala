@@ -40,7 +40,7 @@ class EventSpec extends munit.FunSuite:
 
   test("载荷类型相同的两个 topic 互不串味"):
     // Position 与 Fill 都按 Instrument 路由；判别靠 topic 身份而非载荷结构
-    val pos = Position(AccountId.Live, ex, sym, 1.0, 100.0, 0.0)
+    val pos = Position(AccountId.Live, ex, sym, 1.0)
     val ev: AnyEvent = Event.local(Topics.Position, pos)
     assert(ev.as(Topics.Position).isDefined)
     assertEquals(ev.as(Topics.Fill), None)

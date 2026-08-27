@@ -219,7 +219,7 @@ final case class SimState(
   /** 本账本当下这个标的的仓位快照 —— 构造与真实柜台同一份 */
   private[sim] def positionEvent(exchange: Exchange, symbol: Symbol, now: Timestamp): AnyEvent =
     hft.exchange.TradingGateway.positionEvent(
-      ledger.positions.getOrElse(symbol, Position.empty(account, exchange, symbol)),
+      Position(account, exchange, symbol, ledger.positions.get(symbol).fold(Coin.Zero)(_.size)),
       now,
     )
 

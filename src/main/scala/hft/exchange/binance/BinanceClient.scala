@@ -222,8 +222,6 @@ final class BinanceClient private[binance] (
             exchange = Exchange.Binance,
             symbol = p.symbol,
             size = Coin(p.positionAmt.asDouble),
-            entryPrice = p.entryPrice.asPrice,
-            unrealizedPnl = p.unRealizedProfit.asDouble,
           )
         }
         .toVector

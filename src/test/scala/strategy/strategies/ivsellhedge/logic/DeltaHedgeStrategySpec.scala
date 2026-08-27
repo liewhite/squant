@@ -56,7 +56,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
     OptionExposure(ex, ccy, Coin(optionDelta), Coin(gamma), Coin(coin), Price(spot), iv, 2, ts), ts, ts)
 
   private def position(size: Double, ts: Timestamp) =
-    Event.stamped(Topics.Position, Position(AccountId.Live, ex, sym, Coin(size), 3000.0, 0.0), ts, ts)
+    Event.stamped(Topics.Position, Position(AccountId.Live, ex, sym, Coin(size)), ts, ts)
 
   private def placed(out: Vector[OutcomeEvent]): Order = out match
     case Vector(OutcomeEvent.PlaceOrders(os, _)) => os.head

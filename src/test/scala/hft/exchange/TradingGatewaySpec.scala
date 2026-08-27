@@ -136,14 +136,21 @@ class TradingGatewaySpec extends munit.FunSuite:
       assertEquals(positionSizes(seen), Vector(0.3, 0.8), "记的是增量, 报的是新仓位")
     }
 
-  test("订单回报触发的记账用**成交均价**, 不是委托价"):
-    // 市价单的委托价是空的 (多家给 0)。拿它记账会把持仓均价记成 0, 平仓时算出一笔
-    // 巨额假亏损 —— 净值从此失真, 而没有任何报错。
+  test("成交均价为零 -> 拒绝入账, 不发仓位"):
+    // 市价单的委托价是空的 (多家给 0)。柜台的账本如今只记数量, 零价不再污染均价, 但它仍是
+    // **适配层填错了价格字段**最可靠的信号 —— 同一条回报的价格还会流进成交记录与绩效统计。
+    withFeed { (feed, seen) =>
+      feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.5, orderPrice = 0.0, avgFill = 0.0))
+      eventually(kinds(seen).toString)(kinds(seen).size == 1)
+      assertEquals(kinds(seen), Vector("orderUpdate"), "订单状态照发, 但那一笔没有入账 -> 没有仓位事件")
+    }
+
+  test("记账认的是成交均价那一路 —— 委托价为空照样入账"):
     withFeed { (feed, seen) =>
       feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.5, orderPrice = 0.0, avgFill = 101.5))
       eventually(kinds(seen).toString)(kinds(seen).size == 2)
-      val position = seen.asScala.toVector.flatMap(_.as(Topics.Position)).head
-      assertEqualsDouble(position.entryPrice.value, 101.5, 1e-12, "持仓均价必须来自成交侧, 不能是委托价")
+      assertEquals(kinds(seen), Vector("position", "orderUpdate"))
+      assertEquals(positionSizes(seen), Vector(0.5))
     }
 
   test("本地累加的浮点尾巴不产生幻影成交"):
@@ -196,7 +203,7 @@ class TradingGatewaySpec extends munit.FunSuite:
       // 对齐时账户里已有一张成交了 0.3 的挂单, 仓位也已是 0.3
       class PartialClient extends QuietClient:
         override def fetchPositions() =
-          Right(Vector(Position(AccountId.Live, Exchange.Binance, "BTCUSDT", Coin(0.3), Price(100.0), 0.0)))
+          Right(Vector(Position(AccountId.Live, Exchange.Binance, "BTCUSDT", Coin(0.3))))
         override def fetchPendingOrders(symbol: Symbol) = Right(Vector(
           OrderUpdate(AccountId.Live, "o1", Some("c1"), Exchange.Binance, "BTCUSDT", Side.Long,
             OrderStatus.PartiallyFilled(Coin(0.3)), Price(100.0), Coin(1.0), Coin(0.3), 1L)
@@ -225,7 +232,7 @@ class TradingGatewaySpec extends munit.FunSuite:
       val ethMeta = SymbolMeta(Exchange.Binance, eth, 0.1, 0.001, 0.001, 1.0)
       class TwoSymbolClient extends QuietClient:
         override def fetchPositions() = Right(Vector(
-          Position(AccountId.Live, Exchange.Binance, "BTCUSDT", Coin(0.5), Price(100.0), 0.0)
+          Position(AccountId.Live, Exchange.Binance, "BTCUSDT", Coin(0.5))
         ))
       ActorSystem(bus).spawn(RestTradingGateway(TwoSymbolClient(), feed, AccountId.Live, metas + (eth -> ethMeta)))
 

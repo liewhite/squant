@@ -202,7 +202,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
       // 柜台已持仓 0.7, 但对齐要等它把快照推过来
       class HoldingClient extends AcceptingClient:
         override def fetchPositions() =
-          Right(Vector(Position(AccountId.Live, ex, sym, Coin(0.7), Price(100.0), 0.0)))
+          Right(Vector(Position(AccountId.Live, ex, sym, Coin(0.7))))
       system.spawn(RestTradingGateway(HoldingClient(), ManualFeed(), AccountId.Live, metas))
 
       // 行情先流起来 —— 模拟"这个标的早就有别的组件在看"

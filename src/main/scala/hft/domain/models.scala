@@ -165,14 +165,32 @@ final case class Fill(
     timestamp: Timestamp,
 )
 
-/** 仓位。size 为正表示多头，为负表示空头 */
+/** 仓位 —— **只有数量**，size 为正表示多头，为负表示空头。
+  *
+  * ## 为什么没有均价与未实现盈亏
+  *
+  * 这是总线上的**仓位快照**，要在所有交易所、真假柜台、回测四种形态下含义一致。
+  * 而那两个数不是每家都给得出：
+  *
+  *   - **未实现盈亏**要估值价，真实柜台不订阅行情、算不了 —— 从前它由
+  *     `TradingGateway.positionEvent` 一律强制归零，等于一个恒为 0 的字段占着位置。
+  *   - **持仓均价**各家口径不一 (有的空仓时给空串, 有的干脆不给)，读不到就填 0；
+  *     而 0 均价一旦流进盈亏计算，就是一笔凭空的巨额假亏损，且没有任何报错。
+  *
+  * **一个"有的交易所填不出、于是填 0"的字段，比没有这个字段危险得多** —— 缺字段是
+  * 编译期就要面对的事，填 0 是运行期悄悄算错的事。所以按最小可用抽象来：只留数量。
+  *
+  * 均价确实需要的地方是**账本内部**的已实现盈亏 —— 那是本地撮合自己算出来的
+  * (见 [[Ledger.Holding]])，永远有值，与交易所给不给无关。两者分开之后，
+  * "这个均价是谁算的"不再含糊。
+  *
+  * 要盈亏读 [[AccountInfo]] 的净值，那是柜台确实算得出的。
+  */
 final case class Position(
     account: AccountId,
     exchange: Exchange,
     symbol: Symbol,
     size: Coin,
-    entryPrice: Price,
-    unrealizedPnl: Double,
 ):
   /** 判断是否空仓 (epsilon 比较避免浮点精度问题) */
   def isEmpty: Boolean = size.isZero
@@ -187,7 +205,7 @@ object Position:
   val Epsilon: Double = 1e-10
 
   def empty(account: AccountId, exchange: Exchange, symbol: Symbol): Position =
-    Position(account, exchange, symbol, Coin.Zero, Price.Zero, 0.0)
+    Position(account, exchange, symbol, Coin.Zero)
 
 /** 资产余额 */
 final case class Balance(

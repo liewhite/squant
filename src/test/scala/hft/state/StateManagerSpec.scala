@@ -75,7 +75,7 @@ class StateManagerSpec extends munit.FunSuite:
     val state = StateManager(Set("BTCUSDT"), orderTimeoutMs = 0L)
     val ex = Exchange.Binance
 
-    state.apply(Event.local(Topics.Position, Position(AccountId.Live, ex, "BTCUSDT", Coin(2.0), 100.0, 0.0)))
+    state.apply(Event.local(Topics.Position, Position(AccountId.Live, ex, "BTCUSDT", Coin(2.0))))
     assertEqualsDouble(state.symbolState("BTCUSDT").get.positionSize(ex).value, 2.0, 1e-12, "仓位快照必须落到 SymbolState")
 
     val order = Order("", ex, "BTCUSDT", Side.Long, OrderType.Limit(99.0, TimeInForce.GTC), 1.0, reduceOnly = false, clientOrderId = "c1")

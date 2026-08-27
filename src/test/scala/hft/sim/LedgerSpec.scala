@@ -61,7 +61,8 @@ class LedgerSpec extends munit.FunSuite:
     val markOf = (_: Symbol) => Price(150.0)
     assertEquals(l.equity(markOf), 10_000.0 + (150.0 - 100.0) * 2.0) // 10100
     assertEquals(l.notional(markOf), 2.0 * 150.0) // 300
-    assertEquals(l.openPositions(markOf).head.unrealizedPnl, 100.0)
+    // openPositions 是**总线形态**, 只有数量 —— 未实现盈亏由 equity 表达 (见 Position 的说明)
+    assertEquals(l.openPositions(ex).head.size.value, 2.0)
 
   test("无估值价格 (mark<=0) 时未实现盈亏记 0"):
     val l = empty.applyFill(ex, sym, Side.Long, 100.0, Coin(2.0))

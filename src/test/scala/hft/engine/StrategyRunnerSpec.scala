@@ -18,7 +18,7 @@ class StrategyRunnerSpec extends munit.FunSuite:
 
   test("补齐持仓与订单回报 —— 策略不该有机会漏订这两样"):
     val sub = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
-    val position = Event.local(Topics.Position, Position(AccountId.Live, ex, "BTCUSDT", 1.0, 100.0, 0.0))
+    val position = Event.local(Topics.Position, Position(AccountId.Live, ex, "BTCUSDT", 1.0))
     val orderUpdate = Event.local(
       Topics.OrderUpdate,
       OrderUpdate(AccountId.Live, "1", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Filled, 100.0, Coin(1.0), Coin(1.0), 0L),

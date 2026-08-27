@@ -272,8 +272,6 @@ final class BybitClient private[bybit] (
                 exchange = Exchange.Bybit,
                 symbol = sym,
                 size = signedSize,
-                entryPrice = Price(d.avgPrice.asDoubleOrZero),
-                unrealizedPnl = d.unrealisedPnl.asDoubleOrZero,
               )
             }
           }.toVector

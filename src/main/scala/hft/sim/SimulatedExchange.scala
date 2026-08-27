@@ -170,7 +170,7 @@ final class SimulatedExchange(
     TradingGateway.AccountSnapshot(positions, restingOrders(symbols))
 
   /** 本柜台当前的持仓快照 (供测试与绩效统计) */
-  def positions: Vector[Position] = state.ledger.openPositions(state.markOf)
+  def positions: Vector[Position] = state.ledger.openPositions(exchange)
 
   /** 当前挂单簿里还有几张单 (供测试观察撮合进度) */
   def restingCount: Int = state.resting.size

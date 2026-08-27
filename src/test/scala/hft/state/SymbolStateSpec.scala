@@ -84,7 +84,7 @@ class SymbolStateSpec extends munit.FunSuite:
 
   test("仓位快照始终覆盖 —— 柜台发的每一条都比上一条新"):
     val state = SymbolState(symbol)
-    val initial = Position(AccountId.Live, Exchange.Binance, symbol, size = 1.0, entryPrice = 50000.0, unrealizedPnl = 0.0)
+    val initial = Position(AccountId.Live, Exchange.Binance, symbol, size = 1.0)
     state.apply(Event.at(Topics.Position, initial, t0))
     assertEqualsDouble(state.positionSize(Exchange.Binance).value, 1.0, 1e-12)
 

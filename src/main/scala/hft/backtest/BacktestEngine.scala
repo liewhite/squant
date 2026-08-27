@@ -137,7 +137,7 @@ final class BacktestEngine(
       fills = fillCount,
       marketEvents = marketEvents,
       outOfOrderEvents = outOfOrderEvents,
-      positions = state.ledger.openPositions(state.markOf),
+      positions = state.ledger.openPositions(exchange),
       firstTs = firstTs,
       lastTs = now,
     )

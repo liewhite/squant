@@ -1,10 +1,19 @@
 package hft.domain
 
-/** 纯账本：仓位 + 现金，不可变、无副作用、无锁，可脱离线程/延迟同步单测。
+/** 纯账本：持仓 + 现金，不可变、无副作用、无锁，可脱离线程/延迟同步单测。
   *
-  * 仓位 size 带符号 (正多负空)，entryPrice 为持仓均价，现金累加已实现盈亏。
+  * 持仓 size 带符号 (正多负空)，[[Ledger.Holding.entryPrice]] 为持仓均价，现金累加已实现盈亏。
+  *
+  * ## 账本条目与总线仓位是两个类型
+  *
+  * 账本条目 ([[Ledger.Holding]]) 带均价，因为已实现盈亏要用它；总线上的 [[Position]] 只有
+  * 数量。分开的理由是**均价的出处不同**：账本里的均价是本地撮合逐笔加权算出来的，永远有值；
+  * 而交易所报的均价各家口径不一、拿不到就得填 0，那种 0 流进盈亏计算就是一笔凭空的假亏损。
+  *
+  * 从前两者是同一个类型，于是"这个均价是谁算的"含糊不清，`unrealizedPnl` 还被发布路径
+  * 一律强制归零 —— 一个恒为 0 的字段占着位置。
   */
-final case class Ledger(account: AccountId, positions: Map[Symbol, Position], cash: Double):
+final case class Ledger(account: AccountId, positions: Map[Symbol, Ledger.Holding], cash: Double):
 
   /** 账户读数快照 —— 净值与名义价值的**唯一构造处**。
     *
@@ -26,7 +35,7 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Position], ca
     val signed = side match
       case Side.Long  => qty
       case Side.Short => -qty
-    val pos = positions.getOrElse(symbol, Position.empty(account, exchange, symbol))
+    val pos = positions.getOrElse(symbol, Ledger.Holding.empty)
     val oldSize = pos.size
     val newSize = oldSize + signed
     if oldSize.isZero || (oldSize > Coin.Zero) == (signed > Coin.Zero) then
@@ -47,19 +56,36 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Position], ca
 
   /** 账户净值 = 现金 + 未实现盈亏 (markOf 提供各 symbol 的估值价格) */
   def equity(markOf: Symbol => Price): Double =
-    cash + positions.values.map(p => Ledger.unrealizedPnl(p, markOf(p.symbol))).sum
+    cash + positions.map((sym, h) => Ledger.unrealizedPnl(h, markOf(sym))).sum
 
   /** 总持仓名义价值 (用于杠杆率) */
   def notional(markOf: Symbol => Price): Double =
-    positions.values.map(p => p.size.abs.notional(markOf(p.symbol)).value).sum
+    positions.map((sym, h) => h.size.abs.notional(markOf(sym)).value).sum
 
-  /** 非空仓位 (回填最新未实现盈亏) */
-  def openPositions(markOf: Symbol => Price): Vector[Position] =
-    positions.values.filterNot(_.isEmpty).map(p => p.copy(unrealizedPnl = Ledger.unrealizedPnl(p, markOf(p.symbol)))).toVector
+  /** 非空持仓的**总线形态** —— 只有数量 (见 [[Position]] 关于均价与盈亏的说明)。
+    *
+    * `markOf` 不再需要: 从前它用来回填 `unrealizedPnl`, 而那个字段已经不在 Position 上了。
+    */
+  def openPositions(exchange: Exchange): Vector[Position] =
+    positions.iterator
+      .filterNot((_, h) => h.isEmpty)
+      .map((sym, h) => Position(account, exchange, sym, h.size))
+      .toVector
 
 object Ledger:
   def empty(account: AccountId, cash: Double): Ledger = Ledger(account, Map.empty, cash)
 
+  /** 账本里的一条持仓：数量 + **本地算出来的**均价。
+    *
+    * 均价在这里永远有值 —— 它由 [[Ledger.applyFill]] 逐笔加权得出，不来自交易所。
+    * 这正是它可以安全参与盈亏计算、而总线上的 [[Position]] 不带它的原因。
+    */
+  final case class Holding(size: Coin, entryPrice: Price):
+    def isEmpty: Boolean = size.isZero
+
+  object Holding:
+    val empty: Holding = Holding(Coin.Zero, Price.Zero)
+
   /** 未实现盈亏：(标记价 - 均价) * 带符号仓位；无估值价格时记 0 */
-  private def unrealizedPnl(pos: Position, mark: Price): Double =
-    if mark <= Price.Zero then 0.0 else pos.size.pnl(pos.entryPrice, mark).value
+  private def unrealizedPnl(h: Holding, mark: Price): Double =
+    if mark <= Price.Zero then 0.0 else h.size.pnl(h.entryPrice, mark).value

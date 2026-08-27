@@ -19,7 +19,7 @@ class PositionBookSpec extends munit.FunSuite:
   private def book(dust: Double = 1e-9) = PositionBook(account, ex, _ => dust)
 
   private def position(symbol: Symbol, size: Double) =
-    Position(account, ex, symbol, Coin(size), Price(100.0), 0.0)
+    Position(account, ex, symbol, Coin(size))
 
   private def pending(orderId: String, symbol: Symbol, filled: Double) =
     OrderUpdate(account, orderId, Some("c1"), ex, symbol, Side.Long, OrderStatus.PartiallyFilled(Coin(filled)),
@@ -172,7 +172,7 @@ class PositionBookSpec extends munit.FunSuite:
     settledDelta(b, "o1", btc, 0.5)      // 订单回报账 = 0.5
     b.observeReported(btc, Coin(0.9))    // 交易所说 0.9
     // 成交明细账也记上, 免得内部比对先喊起来
-    b.recordFill(btc, Side.Long, Price(100.0), Coin(0.5))
+    b.recordFill(btc, Side.Long, Coin(0.5))
 
     def externalAlarms(now: Long) =
       b.audit(now).collect { case PositionBook.Alarm.Disagreement(_, v: PositionBook.Verdict.External) => v }
@@ -186,7 +186,7 @@ class PositionBookSpec extends munit.FunSuite:
     val b = book()
     b.align(Set(btc), Vector.empty, Vector.empty, now = 0L)
     settledDelta(b, "o1", btc, 0.5)
-    b.recordFill(btc, Side.Long, Price(100.0), Coin(0.5))
+    b.recordFill(btc, Side.Long, Coin(0.5))
 
     b.observeReported(btc, Coin(0.9)); b.audit(1L); b.audit(2L) // 攒了两次
     b.observeReported(btc, Coin(0.5)); b.audit(3L)              // 追上了
@@ -199,7 +199,7 @@ class PositionBookSpec extends munit.FunSuite:
     val b = book()
     b.align(Set(btc), Vector.empty, Vector.empty, now = 0L)
     settledDelta(b, "o1", btc, 0.5)
-    b.recordFill(btc, Side.Long, Price(100.0), Coin(0.3)) // 明细少了一笔
+    b.recordFill(btc, Side.Long, Coin(0.3)) // 明细少了一笔
 
     val alarms = (1 to 3).flatMap(i => b.audit(i.toLong)).collect {
       case PositionBook.Alarm.Disagreement(_, v: PositionBook.Verdict.Internal) => v
@@ -211,5 +211,5 @@ class PositionBookSpec extends munit.FunSuite:
     val b = book()
     b.align(Set(btc), Vector.empty, Vector.empty, now = 0L)
     settledDelta(b, "o1", btc, 0.5)
-    b.recordFill(btc, Side.Long, Price(100.0), Coin(0.5))
+    b.recordFill(btc, Side.Long, Coin(0.5))
     assert((1 to 5).flatMap(i => b.audit(i.toLong)).isEmpty, "无从比较, 不该报")

@@ -222,12 +222,12 @@ object TradingGateway:
 
   /** 仓位快照事件 —— 真假柜台同一份构造。
     *
-    * **不含未实现盈亏**（恒置 0）：那要估值价，而真实柜台不订阅行情、算不了。两边都留 0
-    * 是有意的 —— 一边有值一边没有，策略读到的东西就随部署形态而变。要盈亏读
-    * [[Topics.AccountInfo]] 的净值，那是柜台确实算得出的。
+    * 从前这里要把 `unrealizedPnl` 强制归零 (真实柜台不订阅行情、算不出它, 而一边有值
+    * 一边没有会让策略读到的东西随部署形态而变)。现在 [[Position]] 干脆只有数量,
+    * 这一步随之消失 —— **不需要归零的字段, 才是真的不会被谁读走**。
     */
   def positionEvent(position: Position, exchangeTs: Timestamp, localTs: Timestamp): AnyEvent =
-    Event.stamped(Topics.Position, position.copy(unrealizedPnl = 0.0), exchangeTs, localTs)
+    Event.stamped(Topics.Position, position, exchangeTs, localTs)
 
   /** 两个时间戳同源的简写 —— 本地产生的仓位快照 (对齐、虚拟柜台撮合) 用它 */
   def positionEvent(position: Position, now: Timestamp): AnyEvent = positionEvent(position, now, now)

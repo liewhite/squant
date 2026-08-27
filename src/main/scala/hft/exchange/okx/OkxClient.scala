@@ -316,8 +316,6 @@ final class OkxClient private[okx] (
             exchange = Exchange.Okx,
             symbol = sym,
             size = meta.toCoin(Contracts(d.pos.asDouble)), // 张 -> 币; OKX 的 pos 正多负空
-            entryPrice = Price(d.avgPx.asDoubleOrZero),    // 空仓时是空串
-            unrealizedPnl = d.upl.asDoubleOrZero,
           )
         }.toVector
       }
