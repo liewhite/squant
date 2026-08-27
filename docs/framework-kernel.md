@@ -14,6 +14,22 @@
 
 不能从其中一张图猜另一张图。订阅行情只代表想接收数据，不代表发布者必须存在；能够发布命令也无法从订阅声明中推导出来，因此硬依赖必须显式声明。父子关系表达所有权，不表达消息流。
 
+```mermaid
+flowchart TB
+  Engine[Engine\n应用装配门面] --> System[ActorSystem\n生命周期事务协调]
+  System --> Runtime[ActorRuntime\nHandle / Context / 受管资源]
+  System --> Graph[ComponentGraph\n能力校验 / 停机拓扑]
+  System --> Monitor[MailboxMonitor\n积压与处理耗时]
+  System --> Bus[EventBus\n数据路由 / 命令基数]
+
+  Session[StrategySession\n租约 / 对齐 / 就绪] -->|owns| Executor[Executor\nStrategy + StateManager]
+  System --> Session
+  System --> Plugins[行情 / 柜台 / 时钟 / 观察者插件]
+  Session --> Bus
+  Executor --> Bus
+  Plugins --> Bus
+```
+
 ## 最小接口
 
 `Actor` 是唯一的组件形态：
@@ -22,7 +38,8 @@
 - `commandHandlers` 声明本组件实际执行的命令，普通订阅不能冒充处理者。
 - `capabilities` 声明存储、时钟等非消息能力；命令能力由 `commandHandlers` 自动派生。
 - `requirements` 声明正确运行不可缺少的通用能力。
-- `onStart` 获取资源、创建子组件和受管任务。
+- `onPrepare` 只做可回滚的本地装配：登记资源、同步创建子组件。
+- `onStart` 在能力已激活后建立外部连接、创建受管任务和发起握手。
 - `onEvent` 串行处理输入并产出消息。
 - `onStop` 在依赖仍可用时完成最后业务收尾。
 
@@ -43,14 +60,31 @@
 
 1. 纯校验：检查能力提供者基数和全部硬依赖，不产生订阅或启动副作用。
 2. 接线：一次性为整批组件建立邮箱，使同批依赖与顺序无关。
-3. 启动：依次执行 `onStart`；其中同步嵌套 `spawn` 的组件加入同一个事务。
-4. 提交：全部启动成功后才原子激活命令处理能力，再开启事件循环。
+3. 准备：执行 `onPrepare`；其中同步嵌套 `spawn` 的组件加入同一个事务。
+4. 激活：整批命令能力一次性可见，执行 `onStart`；事件循环仍在栅栏后。
+5. 运行：全部启动成功后打开事件循环；失败则按拓扑执行补偿停止。
 
-启动期间普通观察事件可以进入邮箱排队，但命令处理能力尚不可见，因此发布者不会把命令成功投给随后回滚的组件。任何启动钩子失败，系统按依赖拓扑执行 `onStop`、释放受管资源、停止任务并撤销订阅。清理错误作为 suppressed error 附到原始启动错误，根因不会被覆盖；某一项清理失败也不会跳过其余清理。
+```mermaid
+flowchart LR
+  Snapshot[快照声明] --> Validate[校验能力与依赖]
+  Validate --> Wire[建立邮箱]
+  Wire --> Prepare[onPrepare\n禁止命令副作用]
+  Prepare --> Activate[激活命令处理能力]
+  Activate --> Start[onStart\n允许外部握手]
+  Start --> Running[Running\n打开事件循环]
+  Prepare -.失败.-> Rollback[拓扑回滚]
+  Start -.失败.-> Compensate[onStop 补偿停止]
+  Rollback --> Terminal[Stopped / Failed]
+  Compensate --> Terminal
+```
 
-`onStart` 允许获取并登记资源、创建受管任务和子组件，但禁止在提交前发布 `CommandTopic`。普通事件先缓存在所属组件，整棵事务树提交后才对总线可见；事务回滚则直接丢弃。仅让新组件邮箱排队并不足够，因为已经 Running 的策略可能把一条启动期行情立刻转成不可逆下单命令。
+`onPrepare` 期间普通观察事件可以进入本地缓冲，但命令处理能力尚不可见，也禁止组件发布命令；准备失败可以完整回滚。进入 `onStart` 时处理能力已经可见，插件可以发起账户对齐等外部握手，但外部世界不可事务回滚，因此此后的保证是执行 `onStop` 补偿，而不是虚构“原子撤销”。清理错误作为 suppressed error 附到原始启动错误，根因不会被覆盖；某一项清理失败也不会跳过其余清理。
 
-`onStart` 内的子组件装配必须由钩子线程同步完成。只要父组件仍属于未退出的装配事务，受管任务就不能异步 `spawn`；否则新子组件可能错过事务成员快照。最外层 `spawn/spawnAll` 返回后，受管任务可正常动态创建子组件。
+`onPrepare` 允许获取并登记可回滚资源和同步创建子组件，禁止发布 `CommandTopic`。普通事件先缓存在所属组件，准备成功后才对总线可见；准备回滚则直接丢弃。仅让新组件邮箱排队并不足够，因为已经 Running 的策略可能把一条准备期行情立刻转成不可逆下单命令。
+
+`onPrepare` 内的子组件装配必须由钩子线程同步完成；`onStart` 不再允许改变本次事务成员。组件进入 `Running` 后可以动态创建子组件，届时它是独立装配事务。
+
+策略侧同样只有一棵所有权树：`StrategySession` 持有 `(账户, 标的)` 独占租约、对齐状态与 Executor 子组件。停止会话时先停 Executor 并发出撤单，再释放租约；隔离时资源不释放，租约自然保留。Engine 因此不读取 `ActorState` 推断是否释放 claim，也不再维护一套平行的对齐线程和回滚流程。
 
 ## 命令能力
 
@@ -78,11 +112,11 @@
 
 ## 停机与失败
 
-组件状态为 `Wired -> Starting -> Committing -> Running -> Stopping -> Stopped/Failed/Quarantined`，句柄公开当前状态、受管任务数、资源数和 `mailboxHealth`。邮箱健康快照包含当前积压、高水位、最老事件年龄上界、正在处理事件的持续时间、已处理数与处理耗时；内核按阈值统一告警，不把“慢但没抛异常”的静默失效留给每个插件自行发现。`Committing` 表示事件循环已就绪、处理能力与启动期输出正在原子提交。
+组件状态为 `Wired -> Preparing -> Prepared -> Starting -> Running -> Stopping -> Stopped/Failed/Quarantined`，句柄公开当前状态、受管任务数、资源数和 `mailboxHealth`。邮箱健康快照包含当前积压、高水位、最老事件年龄上界、正在处理事件的持续时间、已处理数与处理耗时；内核按阈值统一告警，不把“慢但没抛异常”的静默失效留给每个插件自行发现。
 
 停止一组组件时，系统从所有权树和硬依赖图计算拓扑顺序：依赖方先于提供方、子组件先于父组件；无约束节点才用逆装配序稳定排序。每个组件关闭并排空邮箱，执行 `onStop`，逆序释放资源，等待任务退出，最后从系统摘除。若所有权与依赖形成环，装配在运行副作用前失败，因为不存在满足契约的停机顺序。
 
-`onStart`、事件循环、受管任务、`onStop`、资源释放和任务退出超时都不能静默失败。单组件停止超过宽限期时，错误包含组件状态、邮箱积压、in-flight 时长和线程栈。Java interrupt 不能安全强杀不合作的插件，因此系统不会谎称它已经停止：组件进入 `Quarantined`，全部 Actor 输出立即熔断，尚未释放的资源、独占 claim 与依赖关系保留，不再继续拆除其依赖，整套系统拒绝新装配并 fail-fast 到进程退出。资源 cleanup 超时同样隔离，不能越过仍在执行的后登记 cleanup 并发释放更早资源。
+`onPrepare`、`onStart`、事件循环、受管任务、`onStop`、资源释放和任务退出超时都不能静默失败。单组件停止超过宽限期时，错误包含组件状态、邮箱积压、in-flight 时长和线程栈。Java interrupt 不能安全强杀不合作的插件，因此系统不会谎称它已经停止：组件进入 `Quarantined`，全部 Actor 输出立即熔断，尚未释放的资源、独占 claim 与依赖关系保留，不再继续拆除其依赖，整套系统拒绝新装配并 fail-fast 到进程退出。资源 cleanup 超时同样隔离，不能越过仍在执行的后登记 cleanup 并发释放更早资源。
 
 普通运行失败仍触发全系统有序停机；后续清理失败被聚合，但不会阻断其他组件收尾。内核不做局部自动重启，因为它无法替插件决定外部副作用和状态的接管语义。`Quarantined` 更不允许局部恢复：线程仍存在时，任何“替换成功”都是假的。
 
@@ -94,7 +128,7 @@
 - 私有消息空间必须用 `childSystem` 创建，不能自行创建一个失去失败链接的 `ActorSystem`。
 - 正确运行必需的能力必须声明为 `Requirement`，不能等超时或空结果暴露。
 - 命令必须使用 `CommandTopic`，不能用普通广播事件伪装副作用请求。
-- `onStart/onEvent/onStop/release` 必须是有界操作；阻塞 IO 应放入受管任务并用 `manage` 登记关闭手段。失败必须向上传播，禁止捕获后丢弃。
+- `onPrepare/onStart/onEvent/onStop/release` 必须是有界操作；阻塞 IO 应放入受管任务并用 `manage` 登记关闭手段。失败必须向上传播，禁止捕获后丢弃。
 - 新增领域能力通过新增 topic、actor 或领域接口完成，不在 `ActorSystem`/`EventBus` 增加交易品种分支。
 
 因此期权字段不要求改 Actor 内核。IV、到期时间、行权价和希腊值属于期权插件的数据模型与 topic 载荷；内核限制的是组件行为的安全边界，不限制交易品种的字段集合。

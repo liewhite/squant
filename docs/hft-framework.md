@@ -18,9 +18,9 @@
 事件，区别只在 topic：
 
 ```
-行情插件 ──┐                       ┌── Executor (Strategy + StateManager) ──┐
-柜台插件 ──┼──> bus (topic 路由) ──┤                                        │ 下单指令
-时钟插件 ──┘                       └── 观察者                               │
+行情插件 ──┐                       ┌── StrategySession ──> Executor ──┐
+柜台插件 ──┼──> bus (topic 路由) ──┤                                  │ 下单指令
+时钟插件 ──┘                       └── 观察者                         │
      ▲                                                                      │
      └──────────────────────────────────────────────────────────────────────┘
 ```
@@ -91,8 +91,9 @@ object AlphaSignal extends Topic[Symbol, Score]("alphaSignal"):
 实盘与影子柜台各自只处理自己的键。若改成全量订阅再各自过滤，新增账户或交易所时不会有
 任何一处编译失败，失效方式是静默双执行或静默不执行。
 
-**唯一性约束**（`InstrumentClaims`，装配期 fail-fast）：一个 `(账户, 标的)` 最多归一个策略
-实例。实盘与影子盘跑同一标的是允许的 —— 账户不同，键就不同。
+**唯一性约束**（`InstrumentClaims` 租约，prepare 阶段 fail-fast）：一个 `(账户, 标的)` 最多归一个
+策略会话。租约由 `StrategySession` 作为受管资源持有，停止时自动释放，隔离时保留。实盘与影子盘
+跑同一标的是允许的 —— 账户不同，键就不同。
 
 ### 影子盘：与实盘并行的虚拟柜台
 
@@ -303,11 +304,11 @@ def handlers = StrategyHandlers.empty
 | `kernel` | `Capability`/`CapabilityProvider`/`Cardinality` — 无领域含义的装配协议 |
 | `domain` | 纯数据模型: Order/Position/BBO/FundingRate/SymbolMeta 等，零行为依赖 |
 | `event` | `Topic`/`Event`/`Interest`/`Subscription`/`EventBus` — 事件与投递的全部基础设施 |
-| `actor` | `Actor`/`ActorContext`/`ActorSystem` — 组件的装配与生命周期树 |
+| `actor` | `ActorSystem`（事务协调）、`ActorRuntime`（运行身份）、`ComponentGraph`（依赖图）、`MailboxMonitor`（健康监督） |
 | `state` | `SymbolState`/`StateManager` (策略视角的聚合状态) |
 | `event` (指令面) | `Commands` — 行情订阅 / 账户对齐 / 下单撤单三条指令及其载荷 |
 | `exchange` | 插件形态 `MarketFeed` / `TradingGateway` / `RestTradingGateway` / `AccountFeed`；传输层 `ExchangeClient` / `TradingClient`；`WsLoop` (通用连接泵) |
-| `engine` | `Engine` (装配 + 契约校验 + 生命周期)、`Executor` (策略插件)、`StrategyRunner` (纯逻辑核心)、`Clock` |
+| `engine` | `Engine`（应用门面）、`StrategySession`（租约 + 对齐 + 所有权）、`Executor`（策略驱动）、`StrategyRunner`（纯逻辑）、`Clock` |
 | `strategy` | `Strategy` / `StrategyHandlers` / `StrategyContext` — 策略契约与能力面 |
 | `sim` | `SimState` (撮合状态机) / `Ledger` / `Matcher` / `Counter` (柜台核心) / `SimulatedExchange` / `PaperCounter` |
 | `backtest` | `MarketDataProvider` 抽象 + `BacktestEngine` (虚拟时间驱动) + 各交易所数据实现 |
@@ -390,18 +391,20 @@ def handlers = StrategyHandlers.empty
 
 #### 已知限制
 
-- `onStart` 里的 `fork` 是受管任务；`stop` 会中断并限时等待，外部连接用 `manage` 逆序释放。
+- `onPrepare` 只做可回滚装配并同步创建子组件；此时命令不可见、也禁止发布命令。
+- `onStart` 里的 `fork` 是受管任务；此时能力已激活，可以发起外部握手。`stop` 会中断并限时等待，外部连接用 `manage` 逆序释放。
   阻塞在 socket 读上的任务必须登记连接关闭动作；若仍未在时限内退出，组件进入
   `Quarantined`，保留尚未释放的资源、独占权与依赖，系统拒绝继续装配或拆图，不能静默假装
   已经停止。
-- `onStart` 里的子组件必须同步 `spawn` 并加入同一启动事务；受管任务要等父组件进入 Running
-  后才能动态 `spawn`。启动事务提交前禁止发布命令，避免回滚无法撤销外部副作用。
+- `onPrepare` 里的子组件必须同步 `spawn` 并加入同一事务；组件进入 Running 后才能动态
+  `spawn`。`onStart` 的外部副作用失败走 `onStop` 补偿，不声称可以原子撤销。
 
 ### 并发模型
 
 - 所有组件事件循环和受管任务都由 `ActorSystem` 监督，任一组件崩溃会先触发全系统有序停机。
   **不做局部重启** —— 一个崩掉的策略留下的挂单与仓位归谁管没有好答案，而重启后的启动对齐有答案。
-- 每个策略一个 `Executor`，独占虚拟线程串行消费事件，策略与状态无锁。
+- 每个策略一个 `StrategySession`，它拥有租约、对齐状态和一个 `Executor` 子组件；Executor 独占
+  虚拟线程串行消费事件，策略与状态无锁。
 - `WsLoop` 每条连接两个虚拟线程: 发送线程是连接唯一写入者 (Pong 回应也经出站 channel)，
   接收线程重组分片文本帧后回调；任一侧出错即异常上抛终止 (不重连)。
 - `RestTradingGateway` 每个 REST 调用 fork 独立虚拟线程，下单互不阻塞，也不阻塞柜台的事件循环。
