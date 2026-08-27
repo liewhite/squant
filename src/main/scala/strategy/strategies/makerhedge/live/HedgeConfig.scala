@@ -60,6 +60,9 @@ final case class BybitHedgeConfig(
     apiKey: String,
     apiSecret: String,
     tuning: HedgeTuning,
+    /** **目前只对期权腿生效, 置 true 会被启动器拒绝启动。**
+      * 永续的 REST/WS 客户端工厂里写死了主网地址, 签名上没有环境参数 —— 半个开关比没有开关
+      * 更危险 (期权去测试网、对冲腿在主网下真单), 所以宁可不启动。 */
     testnet: Boolean = false,
 )
 
@@ -70,6 +73,7 @@ final case class OkxHedgeConfig(
     passphrase: String,
     tuning: HedgeTuning,
     quote: String = "USDT",
+    /** **目前只对期权腿生效, 置 true 会被启动器拒绝启动**, 理由见 [[BybitHedgeConfig.testnet]] */
     simulated: Boolean = false,
 )
 

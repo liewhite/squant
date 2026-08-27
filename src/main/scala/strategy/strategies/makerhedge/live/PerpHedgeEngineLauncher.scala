@@ -33,6 +33,17 @@ import sttp.client4.DefaultSyncBackend
     case Left(e)  => logger.error(s"加载配置失败 ($confPath): $e"); sys.exit(1)
   if conf.apiKey.isEmpty || conf.apiSecret.isEmpty then
     logger.error(s"配置 $confPath 缺 apiKey/apiSecret (读期权/永续持仓 + 下单需签名), 退出"); sys.exit(1)
+
+  // **非主网配置一律拒绝启动** —— 理由同 OKX 侧: BybitClient.trading / BybitMarketFeed /
+  // BybitAccountFeed 都恒连主网 (工厂里写死 RestBaseUrl 与 WsUrl), testnet 只传给了
+  // BybitOptionsClient。配置写 testnet=true 的结果是期权腿去测试网、**对冲腿的永续在主网
+  // 真金白银下单**, 而日志还打印着 "testnet"。在框架支持环境切换之前, 宁可不启动。
+  if conf.testnet then
+    logger.error(
+      s"配置 $confPath 要求测试网 (testnet=true), 但永续腿 (BybitClient/BybitMarketFeed/BybitAccountFeed) " +
+        "目前只连主网 —— 期权腿会去测试网而对冲腿在主网真实下单, 两条腿的持仓互不相干。拒绝启动。"
+    )
+    sys.exit(1)
   val t = conf.tuning
   val credentials = Some(BybitCredentials(conf.apiKey, conf.apiSecret))
 

@@ -172,6 +172,9 @@ final case class OkxIvSellHedgeConfig(
     passphrase: String,
     tuning: IvSellTuning,
     quote: String = "USDT",
+    /** **目前只对期权腿生效, 置 true 会被启动器拒绝启动。**
+      * 永续的 REST/WS 客户端工厂里写死了主网地址 —— 半个开关比没有开关更危险
+      * (期权去模拟盘、对冲腿在主网下真单)。 */
     simulated: Boolean = false,
 )
 

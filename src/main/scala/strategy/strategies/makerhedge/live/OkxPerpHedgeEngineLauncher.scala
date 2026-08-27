@@ -38,6 +38,22 @@ import sttp.client4.DefaultSyncBackend
     case Left(e)  => logger.error(s"加载配置失败 ($confPath): $e"); sys.exit(1)
   if conf.apiKey.isEmpty || conf.apiSecret.isEmpty || conf.passphrase.isEmpty then
     logger.error(s"配置 $confPath 缺 apiKey/apiSecret/passphrase (读期权/永续持仓 + 下单需签名), 退出"); sys.exit(1)
+
+  // **非主网配置一律拒绝启动** —— 这里的"模拟盘"目前只到期权腿。
+  //
+  // OkxClient.trading / OkxMarketFeed / OkxAccountFeed 都恒连主网 (工厂里写死 RestBaseUrl 与
+  // 两条 WsUrl, 签名上根本没有环境这个参数), 而 simulated 只传给了 OkxOptionsClient。
+  // 于是配置写 simulated=true、日志大声打印"模拟盘"、期权腿确实去了模拟环境, 而**对冲腿的
+  // 永续在主网真金白银下单** —— 两条腿的持仓从此互不相干, delta 对冲对着一个不存在的敞口做。
+  //
+  // 在框架把"连的是不是真钱"变成一个贯穿三件套的类型之前, 宁可不启动: 让人以为在模拟盘
+  // 而实际在下真单, 是这套系统能犯的最贵的错。
+  if conf.simulated then
+    logger.error(
+      s"配置 $confPath 要求模拟盘 (simulated=true), 但永续腿 (OkxClient/OkxMarketFeed/OkxAccountFeed) " +
+        "目前只连主网 —— 期权腿会去模拟环境而对冲腿在主网真实下单, 两条腿的持仓互不相干。拒绝启动。"
+    )
+    sys.exit(1)
   val t = conf.tuning
   val credentials = Some(OkxCredentials(conf.apiKey, conf.apiSecret, conf.passphrase))
 
