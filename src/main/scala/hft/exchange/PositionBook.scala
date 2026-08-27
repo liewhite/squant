@@ -69,7 +69,11 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
     disagreements.filterInPlace((key, _) => !symbols.contains(key._1))
     // 记账进度不清空：这批标的还活着的订单会被下面的挂单快照覆盖，已终态的靠墓碑自然过期。
     // 清掉反而会让晚到的回报从零重记。
-    pendingOrders.filter(_.filledQuantity.nonZero).foreach { order =>
+    //
+    // 挂单同样按 `symbols` 过滤：账本重置与进度重置**必须同批**。放进一张别批标的的挂单，
+    // 它的记账进度会被刷成快照值而对应账本没跟着重置 —— 增量差额从此永久漏记, 仓位错且无症状。
+    // 这条不变量收在这里, 不能指望每个调用方都只传本批的挂单。
+    pendingOrders.filter(o => symbols.contains(o.symbol) && o.filledQuantity.nonZero).foreach { order =>
       settled(order.orderId) = Settlement(order.filledQuantity, firstSeenAt = now, terminalAt = None)
     }
     managed ++= symbols
@@ -83,9 +87,14 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
   def settle(orderId: OrderId, symbol: Symbol, side: Side, price: Price, cumulative: Coin, now: Timestamp): Settled =
     val already = settled.get(orderId).map(_.cumulative).getOrElse(Coin.Zero)
     val delta = cumulative - already
+    val dust = dustOf(symbol)
     // 半个最小变动单位以下视作零 —— 两个精确值相减仍会留下浮点尾巴
     // (0.8 - 0.3 = 0.5000000000000001)，严格比较会让它产出一笔量级 1e-16 的幻影成交
-    if delta.value <= dustOf(symbol) then Settled.Unchanged
+    if delta.value <= dust then
+      // 明显的倒退与浮点尾巴区分开：两者都不入账 (记账只认单调增的累计量)，
+      // 但倒退值得留一条线索 —— 它多半只是乱序后到的旧推送, 也可能是适配层读错了字段,
+      // 而在本地这两者无从分辨。判定留在这里, 要不要出声由柜台决定。
+      if delta.value < -dust then Settled.Regressed(cumulative, already) else Settled.Unchanged
     else if price.value <= 0.0 then
       // 修过一次的 bug 值得一道守卫：拿委托价（市价单为空）记账会把持仓均价记成 0，
       // 平仓时算出巨额假亏损而毫无报错。以后任何适配层填错价格字段，这里立刻可见。
@@ -183,10 +192,17 @@ object PositionBook:
   def retains(settlement: Settlement, now: Timestamp): Boolean =
     settlement.terminalAt.forall(at => now - at <= SettledRetentionMs)
 
-  /** 记一笔账的三种结局 */
+  /** 记一笔账的几种结局 */
   enum Settled:
     case Recorded(delta: Coin, position: Position)
+    /** 增量在尘埃量级以内 —— 重复推送, 或这条回报没带来新成交 */
     case Unchanged
+    /** 累计量比已记的还少。**不入账**, 因为记账只认单调增的累计量。
+      *
+      * 绝大多数情况是乱序后到的旧推送 (完全正常), 少数情况是适配层读错了字段。
+      * 两者在本地分辨不了, 所以这不是告警, 只是一条排查时用得上的线索。
+      */
+    case Regressed(cumulative: Coin, already: Coin)
     case Rejected(reason: String)
 
   /** 比对的种类 —— 决定了不一致该怎么处理 */

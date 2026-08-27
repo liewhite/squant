@@ -29,6 +29,7 @@ class PositionBookSpec extends munit.FunSuite:
     b.settle(orderId, symbol, Side.Long, Price(100.0), Coin(cumulative), now) match
       case PositionBook.Settled.Recorded(delta, _) => Some(delta.value)
       case PositionBook.Settled.Unchanged          => None
+      case PositionBook.Settled.Regressed(_, _)    => None // 同样不入账; 单独一条用例盯着它
       case PositionBook.Settled.Rejected(reason)   => fail(s"unexpected rejection: $reason")
 
   // ==================== 记账 ====================
@@ -47,6 +48,21 @@ class PositionBookSpec extends munit.FunSuite:
     assertEquals(settledDelta(b, "o1", btc, 0.5), None)
     assertEquals(settledDelta(b, "o1", btc, 0.3), None, "倒退更不该记")
     assertEqualsDouble(b.positionOf(btc).size.value, 0.5, 1e-12)
+
+  test("明显的倒退与浮点尾巴分开报 —— 都不入账, 但前者留得下线索"):
+    // 倒退绝大多数是乱序后到的旧推送 (正常), 少数是适配层读错了字段, 本地分辨不了。
+    // 所以它不是告警, 但也不该跟"没有变化"混在一起 —— 排查时这是唯一的线索。
+    val b = book(dust = 0.0005)
+    b.align(Set(btc), Vector.empty, Vector.empty, now = 0L)
+    settledDelta(b, "o1", btc, 0.8)
+    b.settle("o1", btc, Side.Long, Price(100.0), Coin(0.3), 0L) match
+      case PositionBook.Settled.Regressed(cumulative, already) =>
+        assertEqualsDouble(cumulative.value, 0.3, 1e-12)
+        assertEqualsDouble(already.value, 0.8, 1e-12)
+      case other => fail(s"倒退该说得出口: $other")
+    assertEquals(b.settle("o1", btc, Side.Long, Price(100.0), Coin(0.8 - 1e-9), 0L), PositionBook.Settled.Unchanged,
+      "尾巴量级的回退只是浮点噪声, 不是倒退")
+    assertEqualsDouble(b.positionOf(btc).size.value, 0.8, 1e-12, "两者都不入账")
 
   test("成交均价为零 -> 拒绝入账"):
     // 拿委托价 (市价单为空) 记账会把持仓均价记成 0, 平仓时算出巨额假亏损而毫无报错
@@ -80,6 +96,34 @@ class PositionBookSpec extends munit.FunSuite:
     val b = book()
     b.align(Set(btc), Vector(position(btc, 0.3)), Vector(pending("o1", btc, 0.3)), now = 0L)
     assertEquals(settledDelta(b, "o1", btc, 0.5), Some(0.2))
+    assertEqualsDouble(b.positionOf(btc).size.value, 0.5, 1e-12)
+
+  test("对齐只吃本批标的的挂单 —— 账本重置与进度重置必须同批"):
+    // 传进来一张别批标的的挂单: 它的记账进度若被刷成快照值, 而对应账本没跟着重置,
+    // 那笔差额就永久漏记了。调用方今天恰好只拉本批, 但这条不变量得由账本自己守。
+    val b = book()
+    b.align(Set(btc), Vector(position(btc, 0.5)), Vector.empty, now = 0L)
+    settledDelta(b, "o2", eth, 0.4) // ETH 还没纳入管辖, 但记账进度确实记下了 0.4
+
+    b.align(Set(btc), Vector(position(btc, 0.5)), Vector(pending("o2", eth, 0.9)), now = 1L)
+    assertEqualsDouble(settledDelta(b, "o2", eth, 0.6).getOrElse(fail("这笔增量该记进去")), 0.2, 1e-12,
+      "ETH 的进度不该被这次 BTC 的对齐改写 —— 否则这条回报会被算成负增量而永久漏记")
+
+  test("同一标的再次对齐: 账本与进度一起换成新快照, 增量从新基线算"):
+    val b = book()
+    b.align(Set(btc), Vector(position(btc, 0.3)), Vector(pending("o1", btc, 0.3)), now = 0L)
+    // 这张单在两次对齐之间又成交了一些, 第二次快照里仓位与已成交量一起前进
+    b.align(Set(btc), Vector(position(btc, 0.7)), Vector(pending("o1", btc, 0.7)), now = 1L)
+    assertEqualsDouble(b.positionOf(btc).size.value, 0.7, 1e-12, "账本认快照")
+    assertEqualsDouble(settledDelta(b, "o1", btc, 0.9).getOrElse(fail("这笔增量该记进去")), 0.2, 1e-12,
+      "进度也认快照, 增量按新基线算")
+
+  test("拒绝入账不推进记账进度 —— 下一条带真价格的回报要记全额"):
+    // 价格填错时若把进度推到 0.5, 这笔成交就再也没有机会入账了。
+    val b = book()
+    b.align(Set(btc), Vector.empty, Vector.empty, now = 0L)
+    b.settle("o1", btc, Side.Long, Price(0.0), Coin(0.5), 0L)
+    assertEquals(settledDelta(b, "o1", btc, 0.5), Some(0.5), "进度没被那次拒绝推走")
     assertEqualsDouble(b.positionOf(btc).size.value, 0.5, 1e-12)
 
   test("对齐之前什么标的都不管 —— 那时既不知道管什么, 账本也没初值"):

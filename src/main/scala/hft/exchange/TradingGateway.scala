@@ -147,12 +147,13 @@ abstract class TradingGateway extends Actor:
     */
   private def runSync(request: AccountSyncRequest): Vector[AnyEvent] =
     gatewayLogger.info(s"启动对齐 $target: ${request.symbols.mkString(",")} (req=${request.requestId})")
+    val snapshot = syncSnapshot(request.symbols)
     TradingGateway.syncEvents(
       request,
       exchange,
-      positions = syncPositions(request.symbols),
+      positions = snapshot.positions,
       accountInfo = currentAccountInfo(),
-      pendingOrders = syncPendingOrders(request.symbols),
+      pendingOrders = snapshot.pendingOrders,
     )
 
   // ==================== 子类实现 ====================
@@ -175,11 +176,17 @@ abstract class TradingGateway extends Actor:
 
   protected def cancelOrder(symbol: Symbol, ref: OrderRef, now: Timestamp): Unit
 
-  /** 查这些标的当前的持仓。没返回的标的由基类补零仓，实现方不必凑齐 */
-  protected def syncPositions(symbols: Set[Symbol]): Vector[Position]
-
-  /** 查这些标的当前的挂单 */
-  protected def syncPendingOrders(symbols: Set[Symbol]): Vector[OrderUpdate]
+  /** 拉一份账户当下的样子：这些标的的持仓与挂单。没返回的标的由基类补零仓，实现方不必凑齐。
+    *
+    * **一次调用返回两者**，因为它们必须来自同一次读取：真实柜台要拉两趟 REST，中间夹进
+    * 一笔成交就会让两份对不上 —— 账本没含它、记账进度却已含它，那笔成交从此永久漏记
+    * (见 [[RestTradingGateway.syncSnapshot]] 的一致性重取)。
+    *
+    * 拆成两个回调的话，实现方只能用一个可变字段在两次调用之间传递快照，
+    * 而"仓位先查、挂单后查"这条约定就只靠基类调用处的书写顺序维系 —— 那种约定迟早有人漏掉。
+    * 一次原子读取是这个接口的形状本身该说清的事。
+    */
+  protected def syncSnapshot(symbols: Set[Symbol]): TradingGateway.AccountSnapshot
 
   /** 当前账户净值与名义价值。失败即抛 —— 风控拿它决策，读不到就不该继续跑 */
   protected def currentAccountInfo(): AccountInfo
@@ -210,6 +217,9 @@ abstract class TradingGateway extends Actor:
       s"reduceOnly=${order.reduceOnly} clientOrderId=${order.clientOrderId}"
 
 object TradingGateway:
+  /** 账户当下的样子 —— 持仓与挂单，**同一次读取的结果**。见 [[TradingGateway.syncSnapshot]] */
+  final case class AccountSnapshot(positions: Vector[Position], pendingOrders: Vector[OrderUpdate])
+
   /** 仓位快照事件 —— 真假柜台同一份构造。
     *
     * **不含未实现盈亏**（恒置 0）：那要估值价，而真实柜台不订阅行情、算不了。两边都留 0

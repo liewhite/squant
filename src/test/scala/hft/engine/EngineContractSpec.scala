@@ -49,10 +49,9 @@ class EngineContractSpec extends munit.FunSuite:
     override protected def metaOf(symbol: Symbol): SymbolMeta = meta
     override protected def placeAligned(order: Order, now: Timestamp): Unit = log.add(s"place:${order.symbol}"): Unit
     override protected def cancelOrder(symbol: Symbol, ref: OrderRef, now: Timestamp): Unit = ()
-    override protected def syncPositions(symbols: Set[Symbol]): Vector[Position] =
+    override protected def syncSnapshot(symbols: Set[Symbol]): TradingGateway.AccountSnapshot =
       log.add(s"sync:$exch:${symbols.toVector.sorted.mkString(",")}")
-      Vector.empty
-    override protected def syncPendingOrders(symbols: Set[Symbol]): Vector[OrderUpdate] = Vector.empty
+      TradingGateway.AccountSnapshot(Vector.empty, Vector.empty)
     override protected def currentAccountInfo(): AccountInfo = AccountInfo(acct, exch, 10_000.0, 0.0)
 
   test("没有装行情插件 -> 拒绝启动, 而不是让策略订个空"):

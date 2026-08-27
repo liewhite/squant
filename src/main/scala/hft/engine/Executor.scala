@@ -100,7 +100,8 @@ object Executor:
     * 给的是那些"前提由调用方自己保证"的场景：单元测试直接喂事件、回测的世界从第一条
     * 行情开始。它们本身就是那个前提，再等一次对齐只会永远等下去。
     *
-    * 实盘装配一律走 [[apply]]，那条路上没人替策略保证初始仓位已经到手。
+    * 实盘装配一律走 [[apply]]，那条路上没人替策略保证初始仓位已经到手 —— 这句话不能只写在
+    * 文档里，所以收成 `private[hft]`：框架内的测试与回测够得着，框架外的装配代码够不着。
     */
-  def readyToTrade(strategy: Strategy, account: AccountId): Executor =
+  private[hft] def readyToTrade(strategy: Strategy, account: AccountId): Executor =
     new Executor(strategy, account, awaitAlignment = false)

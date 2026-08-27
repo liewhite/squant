@@ -126,7 +126,15 @@ final class RestTradingGateway(
         )
         // localTs 取本地时刻 —— 它是延迟度量的基准, 盖成交易所时间会让事件看起来零延迟
         Vector(TradingGateway.positionEvent(position, ts, now))
-      case PositionBook.Settled.Unchanged        => Vector.empty
+      case PositionBook.Settled.Unchanged => Vector.empty
+      case PositionBook.Settled.Regressed(cumulative, already) =>
+        // 不出声到 warn: 乱序后到的旧推送本就是常态路径, 报出来只会变成噪声。
+        // 但适配层读错字段的表现也是它 —— 留一条 debug, 排查时这是唯一线索。
+        logger.debug(
+          s"$target $symbol order=$orderId 累计成交量倒退: 这条报 ${cumulative.value}, 已记 ${already.value} —— " +
+            "不入账。多半是乱序后到的旧推送; 若持续出现, 查适配层是否读错了累计量字段"
+        )
+        Vector.empty
       case PositionBook.Settled.Rejected(reason) => logger.error(s"!!! $target $reason"); Vector.empty
 
   private def report(alarm: PositionBook.Alarm): Unit = alarm match
@@ -143,9 +151,14 @@ final class RestTradingGateway(
     * `sizeStep` 是**张**，而账本比的是币 (见 [[SymbolMeta.minOrderSize]] 的说明)：
     * 直接拿它当阈值，在 contractSize=0.01 的品种上会把阈值放大一百倍，
     * 于是真实成交被静默丢弃 —— 不入账、不发回报、连告警都没有。
+    *
+    * 缺规格时走 [[metaOf]] 抛错而不是退回一个默认值：退回 0 的话对账容差也成了 0，
+    * 两本各自累加的浮点账会以 1e-16 的差异连续几拍报出"这是我们这边的 bug"。
+    * 而这个分支本就该不可达 —— [[syncSnapshot]] 在对齐入口挡过了。
     */
   private def dustOf(symbol: Symbol): Double =
-    metas.get(symbol).map(meta => meta.toCoin(Contracts(meta.sizeStep)).value / 2).getOrElse(0.0)
+    val meta = metaOf(symbol)
+    meta.toCoin(Contracts(meta.sizeStep)).value / 2
 
   override protected def metaOf(symbol: Symbol): SymbolMeta =
     metas.getOrElse(symbol, sys.error(s"$exchange 没有 $symbol 的合约规格, 无法发单 (装配时未加载?)"))
@@ -194,20 +207,17 @@ final class RestTradingGateway(
     * 读一致快照的标准手法：夹着仓位前后各拉一次挂单，两次的已成交量相同即说明这中间
     * 没有成交发生。静默标的一次就收敛。
     */
-  override protected def syncPositions(symbols: Set[Symbol]): Vector[Position] =
+  override protected def syncSnapshot(symbols: Set[Symbol]): TradingGateway.AccountSnapshot =
+    // 先确认这批标的都有合约规格。对齐是它们进入本柜台视野的**唯一入口**，
+    // 在这里挡住, 后面的 dustOf / metaOf 就都落在"必然有规格"的前提上 (缺失即抛)。
+    symbols.foreach(metaOf)
     val (positions, orders) = consistentSnapshot(symbols, attempt = 1)
     val mine = positions.filter(p => symbols.contains(p.symbol)).map(_.copy(account = account))
     book.align(symbols, mine, orders, nowMs)
     orders.filter(_.filledQuantity.nonZero).foreach { order =>
       logger.info(s"接管既有挂单 $target ${order.symbol} order=${order.orderId} 已成交 ${order.filledQuantity.value}")
     }
-    pendingSnapshot = orders
-    mine
-
-  /** [[syncPositions]] 顺手取到的挂单 —— 基类紧接着会问一次，别再打一遍 REST */
-  private var pendingSnapshot: Vector[OrderUpdate] = Vector.empty
-
-  override protected def syncPendingOrders(symbols: Set[Symbol]): Vector[OrderUpdate] = pendingSnapshot
+    TradingGateway.AccountSnapshot(mine, orders)
 
   private def consistentSnapshot(symbols: Set[Symbol], attempt: Int): (Vector[Position], Vector[OrderUpdate]) =
     val before = fetchOrders(symbols)
