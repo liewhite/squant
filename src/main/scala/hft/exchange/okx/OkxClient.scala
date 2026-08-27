@@ -89,10 +89,9 @@ class OkxPublicClient protected[okx] (
     publicGet[InstrumentsResp]("/api/v5/public/instruments?instType=SWAP").flatMap { resp =>
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator
-          // 只取配置 quote 的永续 (e.g. "-USDT-SWAP")
-          .filter(_.instId.contains(s"-$quote-SWAP"))
+          // 只取配置 quote 的永续 —— 判定收在 fromOkx 里 (见它的说明), 这里不再重复一遍
           .flatMap { d =>
-            fromOkx(d.instId).map { sym =>
+            fromOkx(d.instId, quote).map { sym =>
               SymbolMeta(
                 exchange = Exchange.Okx,
                 symbol = sym,
@@ -244,7 +243,7 @@ final class OkxClient private[okx] (
     signedRequest[PendingResp](Method.GET, path).flatMap { resp =>
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator.flatMap { d =>
-          fromOkx(d.instId).map { sym =>
+          fromOkx(d.instId, quote).map { sym =>
             val filled = metaOf(sym).toCoin(Contracts(d.accFillSz.asDouble))
             OrderUpdate(
               account = AccountId.Live,
@@ -299,15 +298,18 @@ final class OkxClient private[okx] (
     * **对齐要用 REST**: 它查的是快照, 不参与推送的流竞争。这与对账用推送 (便宜、及时) 是
     * 两件事 —— 检测用推送, 修复用 REST。
     *
-    * 没有合约规格的品种跳过 (非配置 quote 的、币本位的 SWAP): 张->币换不了, 而柜台只会问
-    * 它对齐的那几个标的。
+    * `instType=SWAP` 返回的是**全部计价币种**的永续 (USDT / USDC / 币本位)。非本 quote 的
+    * 在 [[fromOkx]] 就被挡掉了 —— 挡不住的话, `ETH-USD-SWAP` 会和 `ETH-USDT-SWAP` 收敛成
+    * 同一个 `"ETH"`, 拿 USDT 的 ctVal 去换币本位的张数, 还会在下面 `toMap` 时静默覆盖真的
+    * 那一行。剩下的若仍缺合约规格 (新上市还没进 metas) 也跳过: 张->币换不了, 而柜台只会
+    * 问它对齐的那几个标的。
     */
   override def fetchPositions(): Either[ExchangeError, Vector[Position]] =
     signedRequest[PositionsResp](Method.GET, "/api/v5/account/positions?instType=SWAP").flatMap { resp =>
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator.flatMap { d =>
           for
-            sym <- fromOkx(d.instId)
+            sym <- fromOkx(d.instId, quote)
             meta <- symbolMetas.get(sym)
           yield Position(
             account = AccountId.Live,

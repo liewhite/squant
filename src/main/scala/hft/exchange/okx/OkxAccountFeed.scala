@@ -121,7 +121,7 @@ final class OkxAccountFeed(
   /** 交易所报的仓位 —— 交给柜台对账, 不进总线 */
   private def publishPosition(d: PositionData): Unit =
     for
-      sym <- fromOkx(d.instId)
+      sym <- fromOkx(d.instId, client.quote)
       meta <- metaOf(sym)
     do report(AccountReport.PositionReported(sym, meta.toCoin(Contracts(d.pos.asDouble)), nowMs))
 
@@ -132,7 +132,7 @@ final class OkxAccountFeed(
     d.details.foreach(detail => report(AccountReport.BalanceChanged(detail.ccy, detail.cashBal.asDouble, ts)))
 
   private def publishOrder(d: OrderPushData): Unit =
-    val sym = fromOkx(d.instId).getOrElse(throw IllegalStateException(s"Unknown OKX instId in order: '${d.instId}'"))
+    val sym = fromOkx(d.instId, client.quote).getOrElse(throw IllegalStateException(s"Unknown OKX instId in order: '${d.instId}'"))
     val meta = metaOf(sym).getOrElse(throw IllegalStateException(s"No SymbolMeta for OKX order symbol: $sym"))
     val side = d.side match
       case "buy"  => Side.Long

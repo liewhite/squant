@@ -27,7 +27,33 @@ final case class HedgeTuning(
     tightAtr: Double = 1.0,
     looseAtr: Double = 2.0,
     maxHedgeQty: Double = 5.0,
-)
+):
+  /** [[klineBar]] 换算成毫秒 —— 与它是**同一个事实**的两种表示。
+    *
+    * 预热取数用粒度串 (交易所要), K 线序列聚合用毫秒 (策略要)。从前只有串, 策略那边就用了
+    * 构造参数的默认值 1h —— 配置改成半小时的话, 预热数据会被按 1h 打时间戳喂进 1h 序列,
+    * ATR/均线静默算错。粒度只配一处, 毫秒由它派生。
+    *
+    * 两家的串格式不同 (Bybit 是分钟数 `"60"`, OKX 是 `"1H"`), 所以两种都认。
+    * 认不出就抛: 配置写错该在启动时大声失败。
+    */
+  def klineBarMs: Long =
+    val m = 60_000L
+    klineBar match
+      case s if s.nonEmpty && s.forall(_.isDigit) => s.toLong * m // Bybit: 分钟数
+      case "1m"                                   => m
+      case "3m"                                   => 3 * m
+      case "5m"                                   => 5 * m
+      case "15m"                                  => 15 * m
+      case "30m"                                  => 30 * m
+      case "1H"                                   => 60 * m
+      case "2H"                                   => 120 * m
+      case "4H"                                   => 240 * m
+      case "6H"                                   => 360 * m
+      case "12H"                                  => 720 * m
+      case "1D"                                   => 1440 * m
+      case other =>
+        sys.error(s"无法识别的 K 线粒度 '$other' —— Bybit 用分钟数 (如 \"60\"), OKX 用 \"1H\"/\"30m\" 这类串")
 
 /** Bybit 永续对冲配置 (JSON)。**含 API 密钥 -> 配置文件务必 chmod 600 且勿入库** (已 .gitignore)。 */
 final case class BybitHedgeConfig(

@@ -106,6 +106,10 @@ final class BacktestEngine(
 
   /** 跑完整个数据源，返回汇总结果。 */
   def run(): BacktestResult =
+    // 先让每个策略就绪, 再放第一条行情 —— 与实盘 Executor.onStart 同一个时机、同一个入口。
+    // 回测默认不注入 history, 于是 prepare 通常是空转; 但把它调起来, "就绪逻辑只写一遍"
+    // 才在两条路径上都成立 (策略若在 prepare 里做了别的准备, 回测同样跑得到)。
+    runners.foreach(_.prepare())
     val src = source.events().buffered
     if !src.hasNext then
       logger.warn("no market data; empty backtest")

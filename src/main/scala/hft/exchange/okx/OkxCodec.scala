@@ -20,11 +20,20 @@ private[okx] object OkxCodec:
   def toOkx(symbol: Symbol, quote: String): String = s"$symbol-$quote-SWAP"
   def toOkxIndex(symbol: Symbol, quote: String): String = s"$symbol-$quote"
 
-  /** "BTC-USDT-SWAP" -> Some("BTC")；非永续 instId 返回 None */
-  def fromOkx(instId: String): Option[Symbol] =
+  /** `"BTC-USDT-SWAP"` -> `Some("BTC")`；**计价币不是 `quote` 的、非永续的，一律 None**。
+    *
+    * quote 必须在这里检查, 不能留给调用方。框架的 `Symbol` 只有基础币, 于是币本位的
+    * `ETH-USD-SWAP` 与 `ETH-USDT-SWAP` 会收敛成同一个 `"ETH"` —— 而私有流按 instType
+    * **全量**订阅、`/account/positions` 也返回**全部**计价币种的永续。漏检一处, 币本位的
+    * 仓位与订单回报就会被当成 USDT 合约记账: 拿错的 ctVal 换张成币, 还会在对齐快照
+    * `toMap` 时静默覆盖真正的那一行。
+    *
+    * 这条检查一旦散在各入口, 总有一个入口会忘 —— 本文件原先三个全量入口就漏了两个。
+    */
+  def fromOkx(instId: String, quote: String): Option[Symbol] =
     instId.split('-') match
-      case Array(base, _, "SWAP") => Some(base)
-      case _                      => None
+      case Array(base, q, "SWAP") if q == quote => Some(base)
+      case _                                    => None
 
   /** "BTC-USDT" -> Some("BTC") */
   def fromOkxIndex(instId: String): Option[Symbol] =

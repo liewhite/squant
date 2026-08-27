@@ -44,7 +44,8 @@ final class MakerHedgeStrategy(
     maxHedgeQty: Coin = Coin(Double.MaxValue),
     /** 取历史 K 线的通道 —— `(粒度毫秒, 根数) => 最旧->最新的 (high, low, close)`。
       * [[prepare]] 在开跑前用它把 ATR/均线喂热。默认不预热 (回测与单测自己喂, 见 [[prewarm]]) */
-    history: (Long, Int) => Either[String, Seq[(Double, Double, Double)]] = (_, _) => Right(Seq.empty),
+    history: (Long, Int) => Either[String, Seq[(Double, Double, Double)]] =
+      (_, _) => Left("没有接预热数据源"),
 ) extends Strategy:
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[MakerHedgeStrategy])
   private var warnCnt = 0L
@@ -81,9 +82,9 @@ final class MakerHedgeStrategy(
         prewarm(bars)
         logger.warn(s"[$symbol] 预热 ${bars.size} 根 ${klines.periodMs}ms K 线 -> ATR/均线就绪")
       case Right(_) =>
-        logger.warn(s"[$symbol] 未预热 (没有接预热数据源): ATR/均线要靠实时 BBO 慢热")
-      case Left(e) =>
-        logger.error(s"[$symbol] 预热失败, ATR/均线将靠实时 BBO 慢热: $e")
+        logger.warn(s"[$symbol] 预热取到空 (这个标的没有那么长的历史?): ATR/均线要靠实时 BBO 慢热")
+      case Left(why) =>
+        logger.error(s"[$symbol] 未预热, ATR/均线将靠实时 BBO 慢热 —— $why")
 
   /** 喂历史 (high, low, close) 进 K 线 (h/l/c 当三笔 tick), 使 ATR/均线在开机即就绪,
     * 避免实盘冷启动需等数十根 BBO 累积才敢对冲。最旧->最新。 */

@@ -34,6 +34,15 @@ final class StrategyRunner(
 
   val state: StateManager = StateManager(subscription.instruments.map(_.symbol), strategy.orderTimeoutMs)
 
+  /** 让策略把自己准备好 —— 见 [[Strategy.prepare]]。**允许阻塞**。
+    *
+    * 实盘由 [[Executor.onStart]] 调, 回测由 [[hft.backtest.BacktestEngine.run]] 调,
+    * 两条路径共用这一个入口: 就绪逻辑写一遍、两边都跑得到。少了任何一边, 一个把关键
+    * 就绪逻辑写进 prepare 的策略就会在那条路径上静默地不就绪 —— 而"实盘与回测分叉"
+    * 恰恰是把预热收进 prepare 想消灭的东西。
+    */
+  def prepare(): Unit = strategy.prepare()
+
   /** 这条事件是否归本策略。判据来自 [[Subscription]]，与总线索引同源 */
   def accepts(event: AnyEvent): Boolean = subscription.accepts(event)
 

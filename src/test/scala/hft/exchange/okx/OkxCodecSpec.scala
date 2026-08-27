@@ -14,11 +14,16 @@ class OkxCodecSpec extends munit.FunSuite:
   test("symbol <-> instId 转换"):
     assertEquals(toOkx("BTC", "USDT"), "BTC-USDT-SWAP")
     assertEquals(toOkxIndex("BTC", "USDT"), "BTC-USDT")
-    assertEquals(fromOkx("BTC-USDT-SWAP"), Some("BTC"))
+    assertEquals(fromOkx("BTC-USDT-SWAP", "USDT"), Some("BTC"))
+    // 计价币不符一律不认。框架的 Symbol 只有基础币, 认了的话币本位的 ETH-USD-SWAP
+    // 会和 ETH-USDT-SWAP 撞成同一个 "ETH" —— 而私有流与 /account/positions 都是全量的。
+    assertEquals(fromOkx("ETH-USD-SWAP", "USDT"), None, "币本位永续不归本柜台管")
+    assertEquals(fromOkx("ETH-USDC-SWAP", "USDT"), None, "USDC 永续同理")
+    assertEquals(fromOkx("ETH-USD-SWAP", "USD"), Some("ETH"), "配了币本位就该认")
     assertEquals(fromOkxIndex("BTC-USDT"), Some("BTC"))
     // 非永续 / 非指数格式返回 None
-    assertEquals(fromOkx("BTC-USDT"), None)
-    assertEquals(fromOkx("BTC-USDT-FUTURES"), None)
+    assertEquals(fromOkx("BTC-USDT", "USDT"), None)
+    assertEquals(fromOkx("BTC-USDT-FUTURES", "USDT"), None)
     assertEquals(fromOkxIndex("BTC-USDT-SWAP"), None)
 
   test("订单状态映射"):

@@ -85,7 +85,8 @@ final class DeltaHedgeStrategy(
     minHedgeQty: Coin = Coin(0.001),
     maxHedgeQty: Coin = Coin(Double.MaxValue),
     maxExposureStaleMs: Long = 0L,
-    history: (Long, Int) => Either[String, Seq[(Double, Double, Double)]] = (_, _) => Right(Seq.empty),
+    history: (Long, Int) => Either[String, Seq[(Double, Double, Double)]] =
+      (_, _) => Left("没有接预热数据源"),
 ) extends Strategy:
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[DeltaHedgeStrategy])
   /** **按类别**分别节流：共用一个计数器的话，一条高频告警会把另一条低频但更重要的
@@ -141,18 +142,21 @@ final class DeltaHedgeStrategy(
     * 为它拒绝启动不划算。但每一条都说清降级后果，否则日志里只剩一句无从判断的失败。
     */
   override def prepare(): Unit =
-    warm(macdKlines, "MACD", "启动期方向恒为 0, 死区退化为对称")
-    warm(fastKlines, "σ 与 ER", "启动期 σ 取下限 (对冲偏频但安全), ER 按单边处理 (报价更贵)")
+    // 喂热走 prewarm* —— 与回测/单测同一个入口, "怎么喂"这件事只有一处实现
+    warm(macdKlines, prewarmMacd, "MACD", "启动期方向恒为 0, 死区退化为对称")
+    warm(fastKlines, prewarmFast, "σ 与 ER", "启动期 σ 取下限 (对冲偏频但安全), ER 按单边处理 (报价更贵)")
 
-  private def warm(series: KlineSeries, what: String, degraded: String): Unit =
+  private def warm(series: KlineSeries, feedIn: Seq[(Double, Double, Double)] => Unit, what: String, degraded: String): Unit =
     history(series.periodMs, series.maxBars) match
       case Right(bars) if bars.nonEmpty =>
-        feed(series, bars, series.periodMs)
+        feedIn(bars)
         logger.warn(s"[$symbol] 预热 ${bars.size} 根 ${series.periodMs}ms K 线 -> $what 就绪")
       case Right(_) =>
-        logger.warn(s"[$symbol] $what 未预热 (没有接预热数据源): $degraded")
-      case Left(e) =>
-        logger.error(s"[$symbol] $what 预热失败, 将靠实时 BBO 慢热: $degraded —— $e")
+        // 接了数据源但拿回空: 多半是新上市、没有那么长的历史。与"没接"分开说, 否则排障会
+        // 被引去查装配而不是查数据。
+        logger.warn(s"[$symbol] $what 预热取到空 (这个标的没有那么长的历史?): $degraded")
+      case Left(why) =>
+        logger.error(s"[$symbol] $what 未预热, 将靠实时 BBO 慢热 —— $why: $degraded")
 
   private def feed(series: KlineSeries, bars: Seq[(Double, Double, Double)], barMs: Long): Unit =
     bars.zipWithIndex.foreach { case ((h, l, c), i) =>

@@ -74,7 +74,7 @@ final class OkxMarketFeed(
     case other   => logger.warn(s"ignoring OKX public event '$other': $text")
 
   private def requireSymbol(instId: String): Symbol =
-    fromOkx(instId).getOrElse(throw IllegalStateException(s"Unknown OKX instId: '$instId'"))
+    fromOkx(instId, quote).getOrElse(throw IllegalStateException(s"Unknown OKX instId: '$instId'"))
 
   // OKX bbo-tbt 盘口数量单位为合约张数，统一换算为币本位 (策略层永远看币本位，与 Binance BBO 一致)
   private def publishBbo(instId: String, d: BboData): Unit =
