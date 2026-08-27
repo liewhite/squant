@@ -106,6 +106,18 @@ class EngineContractSpec extends munit.FunSuite:
       val e = intercept[IllegalStateException](engine.install(RecordingGateway(ex, AccountId.Live, log)))
       assert(e.getMessage.contains("已经有接单者"), e.getMessage)
 
+  test("两台柜台都从 Engine.start 的 plugins 进 -> 同样要拒绝"):
+    // 这是实盘装配的真实形状 (四个启动器一律 Engine.start(plugins = Vector(gateway, feed))),
+    // 而从前 start 是直接 spawn、不走 install, 于是那道闸在生产路径上从未生效过。
+    supervised:
+      val log = ConcurrentLinkedQueue[String]()
+      val e = intercept[IllegalStateException](
+        Engine.start(plugins =
+          Vector(RecordingGateway(ex, AccountId.Live, log), RecordingGateway(ex, AccountId.Live, log))
+        )
+      )
+      assert(e.getMessage.contains("已经有接单者"), e.getMessage)
+
   test("同一个交易所上装两个柜台, 账户不同 -> 允许 (实盘与影子盘并行的前提)"):
     supervised:
       val log = ConcurrentLinkedQueue[String]()

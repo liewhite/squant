@@ -146,6 +146,21 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
     * 敞口对冲。
     *
     * 前两步都排在 spawn 之前：起来了再拒绝，就得再把它停回去。
+    *
+    * ## 一个实例只装一次 —— 这是**调用方的职责**
+    *
+    * `Strategy` 的可变状态 (指标序列、判据基准、挂单槽) 都挂在实例上，`handlers` 是捕获
+    * 它们的闭包。所以**同一个实例不要装两次**，实盘与影子盘并行时给每个账户 `new` 一个：
+    *
+    * {{{
+    * engine.addStrategy(MyStrategy(...), AccountId.Live)      // 各 new 一个
+    * engine.addStrategy(MyStrategy(...), AccountId.Paper(1))
+    * }}}
+    *
+    * 框架不替你查这件事。标的独占按 `(账户, 标的)` 登记，两个账户本就该放行 (那正是影子盘
+    * 存在的前提)；而"这两次传进来的是不是同一个对象"是调用方一眼可见、框架却只能靠身份
+    * 比较去猜的事 —— 猜错的方向 (误拒一个合法的复用) 比它想防的问题更难查。
+    * 需要同一份逻辑跑多个账户，就写一个产生实例的函数，别复用实例。
     */
   def addStrategies(strategies: Seq[Strategy], account: AccountId): Seq[ActorHandle] = synchronized {
     if strategies.isEmpty then return Vector.empty
@@ -308,7 +323,12 @@ object Engine:
   def start(plugins: Seq[Actor] = Vector.empty, clockIntervalMs: Long = 1000)(using Ox): Engine =
     val bus = EventBus()
     val system = ActorSystem(bus)
-    system.spawn(Clock(clockIntervalMs))
-    plugins.foreach(system.spawn)
+    val engine = Engine(bus, system)
+    // 一律走 install, 不直接 spawn —— **装配路径只留一条, 独占柜台检查才覆盖得到**。
+    // 从前这里是 plugins.foreach(system.spawn), 而 rejectDuplicateGateway 只挂在 install 上;
+    // 实盘装配又一律把柜台放进 plugins, 于是那道闸从来没有拦过任何东西, 而它要防的
+    // "两个柜台接同一个 (账户, 交易所)" 在运行期唯一的症状是仓位莫名其妙翻倍。
+    engine.install(Clock(clockIntervalMs))
+    plugins.foreach(engine.install)
     logger.info(s"Engine started with ${plugins.size} plugins")
-    Engine(bus, system)
+    engine
