@@ -11,6 +11,7 @@ import ox.supervised
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.jdk.CollectionConverters.*
 import hft.TestUnits.given
+import hft.TestCommandSink
 
 /** 账户隔离：同一份策略逻辑跑在实盘与影子账户上，两个实例互不串味。
   *
@@ -59,8 +60,14 @@ class AccountIsolationSpec extends munit.FunSuite:
   test("下单意图按 (账户, 交易所) 路由到各自柜台"):
     supervised:
       val bus = EventBus()
+      val system = ActorSystem(bus)
       val live = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, ex)))))
       val shadow = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(paper, ex)))))
+      system.spawn(TestCommandSink(
+        "order-sinks",
+        OrderIntent,
+        Set(AccountExchange(AccountId.Live, ex), AccountExchange(paper, ex)),
+      ))
 
       val order = OutcomeEvent.CancelOrder(ex, sym, OrderRef.ByClientId("c1"))
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, order)))
@@ -74,8 +81,14 @@ class AccountIsolationSpec extends munit.FunSuite:
     // 路由键少了交易所维度时, 两个柜台都会收到同一条意图 —— 静默双执行, 没有任何症状。
     supervised:
       val bus = EventBus()
+      val system = ActorSystem(bus)
       val binance = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, Exchange.Binance)))))
       val okx = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, Exchange.Okx)))))
+      system.spawn(TestCommandSink(
+        "order-sinks",
+        OrderIntent,
+        Set(AccountExchange(AccountId.Live, Exchange.Binance), AccountExchange(AccountId.Live, Exchange.Okx)),
+      ))
 
       bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live,
         OutcomeEvent.CancelOrder(Exchange.Okx, sym, OrderRef.ByClientId("okx-1")))))

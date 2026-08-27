@@ -12,6 +12,7 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.atomic.AtomicReference
 import scala.jdk.CollectionConverters.*
 import hft.TestUnits.given
+import hft.TestCommandSink
 
 /** 监督者：按影子盘战绩起停实盘实例。 */
 class SupervisorSpec extends munit.FunSuite:
@@ -108,7 +109,8 @@ class SupervisorSpec extends munit.FunSuite:
       val promoted = ConcurrentLinkedQueue[Instrument]()
       val demoted = ConcurrentLinkedQueue[ActorHandle]()
       val intents = ConcurrentLinkedQueue[OutcomeEvent]()
-      val mailbox = bus.subscribe(Set(Interest.All(OrderIntent)))
+      val mailbox = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, ex)))))
+      system.spawn(TestCommandSink("order-sink", OrderIntent, Set(AccountExchange(AccountId.Live, ex))))
       ox.forkDiscard { while true do mailbox.events.receive().as(OrderIntent).foreach(i => intents.add(i.outcome)) }
 
       // 先晋升, 再降级
@@ -143,7 +145,8 @@ class SupervisorSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val intents = ConcurrentLinkedQueue[OutcomeEvent]()
-      val mailbox = bus.subscribe(Set(Interest.All(OrderIntent)))
+      val mailbox = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, ex)))))
+      system.spawn(TestCommandSink("order-sink", OrderIntent, Set(AccountExchange(AccountId.Live, ex))))
       ox.forkDiscard { while true do mailbox.events.receive().as(OrderIntent).foreach(i => intents.add(i.outcome)) }
       val demoted = ConcurrentLinkedQueue[ActorHandle]()
       val promoted = ConcurrentLinkedQueue[Instrument]()

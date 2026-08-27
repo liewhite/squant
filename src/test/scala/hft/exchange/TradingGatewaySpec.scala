@@ -318,17 +318,20 @@ class TradingGatewaySpec extends munit.FunSuite:
     val ev = incomes.receive()
     ev.as(Topics.OrderUpdate).getOrElse(fail(s"unexpected event: $ev"))
 
-  private def runGateway(client: TradingClient)(body: (EventBus, ox.channels.Source[AnyEvent]) => Unit): Unit =
+  private def runGateway(client: TradingClient)(
+      body: (EventBus, ox.channels.Source[AnyEvent], ActorSystem) => Unit
+  ): Unit =
     supervised:
       val bus = EventBus()
       val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
-      ActorSystem(bus).spawn(RestTradingGateway(client, SilentFeed, AccountId.Live, metas))
-      body(bus, incomes.events)
+      val system = ActorSystem(bus)
+      system.spawn(RestTradingGateway(client, SilentFeed, AccountId.Live, metas))
+      body(bus, incomes.events, system)
 
   test("dry-run (DryRunClient): 信号以 OrderUpdate(Error) 回流清理 pending"):
     // dry-run 不是柜台里的开关, 而是换一个客户端实现 —— 它以 4xx 拒单返回,
     // 走的正是既有的"确定性失败"通道, 所以这里的期望与真实拒单那条用例完全一致。
-    runGateway(DryRunClient(StubClient(Right("ignored")))) { (bus, incomes) =>
+    runGateway(DryRunClient(StubClient(Right("ignored")))) { (bus, incomes, _) =>
       bus.publish(intentOf(orderOf(0.001)))
       val update = receivedError(incomes)
       assertEquals(update.clientOrderId, Some("c1"))
@@ -336,7 +339,7 @@ class TradingGatewaySpec extends munit.FunSuite:
     }
 
   test("交易所明确拒单 (4xx): OrderUpdate(Error) 回流策略"):
-    runGateway(StubClient(Left(ExchangeError.Http(400, """{"code":-2019,"msg":"Margin is insufficient."}""")))) { (bus, incomes) =>
+    runGateway(StubClient(Left(ExchangeError.Http(400, """{"code":-2019,"msg":"Margin is insufficient."}""")))) { (bus, incomes, _) =>
       bus.publish(intentOf(orderOf(0.001)))
       val update = receivedError(incomes)
       assertEquals(update.clientOrderId, Some("c1"))
@@ -345,7 +348,7 @@ class TradingGatewaySpec extends munit.FunSuite:
 
   test("精度收不下的单: 不发往交易所, 以同一种拒单回流"):
     // 客户端的 placeOrder 会 fail —— 它被触达就说明这一单不该发却发了。
-    runGateway(StubClient(Left(ExchangeError.Network("客户端不该被触达")))) { (bus, incomes) =>
+    runGateway(StubClient(Left(ExchangeError.Network("客户端不该被触达")))) { (bus, incomes, _) =>
       bus.publish(intentOf(orderOf(0.0004))) // 低于 minOrderSize, 且取整后为 0
       val update = receivedError(incomes)
       assertEquals(update.clientOrderId, Some("c1"))
@@ -356,8 +359,8 @@ class TradingGatewaySpec extends munit.FunSuite:
 
   test("网络错误下单结果不确定 -> 抛错终止作用域"):
     intercept[IllegalStateException] {
-      runGateway(StubClient(Left(ExchangeError.Network("connection reset")))) { (bus, incomes) =>
+      runGateway(StubClient(Left(ExchangeError.Network("connection reset")))) { (bus, _, system) =>
         bus.publish(intentOf(orderOf(0.001)))
-        incomes.receive() // 阻塞至下单 fork 失败取消作用域
+        system.awaitShutdown()
       }
     }

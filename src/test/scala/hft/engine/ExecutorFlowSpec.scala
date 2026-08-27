@@ -7,6 +7,7 @@ import hft.state.StateManager
 import hft.event.Commands.{AccountOutcome, OrderIntent, OutcomeEvent}
 import hft.strategy.{Strategy, StrategyHandlers}
 import ox.supervised
+import hft.TestCommandSink
 import hft.TestUnits.given
 
 /** Executor 集成测试: 通过 EventBus + ActorSystem 驱动完整的 事件 -> 策略 -> 信号 链路 */
@@ -36,8 +37,9 @@ class ExecutorFlowSpec extends munit.FunSuite:
   test("事件驱动策略产出信号: 生成 clientOrderId, 数量与价格原样交给柜台"):
     supervised:
       val bus = EventBus()
-      val outcomes = bus.subscribe(Set(Interest.All(OrderIntent)))
+      val outcomes = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, Exchange.Binance)))))
       val system = ActorSystem(bus)
+      system.spawn(TestCommandSink("order-sink", OrderIntent, Set(AccountExchange(AccountId.Live, Exchange.Binance))))
 
       system.spawn(Executor.readyToTrade(ClockOrderStrategy(), AccountId.Live))
       bus.publish(Event.local(Topics.Clock, ()))
@@ -57,8 +59,9 @@ class ExecutorFlowSpec extends munit.FunSuite:
   test("订阅范围外的 symbol 事件被过滤，不触达策略"):
     supervised:
       val bus = EventBus()
-      val outcomes = bus.subscribe(Set(Interest.All(OrderIntent)))
+      val outcomes = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, Exchange.Binance)))))
       val system = ActorSystem(bus)
+      system.spawn(TestCommandSink("order-sink", OrderIntent, Set(AccountExchange(AccountId.Live, Exchange.Binance))))
 
       system.spawn(Executor.readyToTrade(ClockOrderStrategy(), AccountId.Live))
 

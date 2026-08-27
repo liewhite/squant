@@ -1,9 +1,9 @@
 package hft.exchange
 
-import hft.actor.{Actor, ActorContext}
+import hft.actor.{Actor, ActorContext, ActorSystem}
 import hft.domain.*
 import hft.event.Commands.{AccountSync, AccountSyncReport, AccountSyncRequest, AccountSynced, OrderIntent, OutcomeEvent}
-import hft.event.{AnyEvent, Event, Interest, Topics}
+import hft.event.{AnyEvent, CommandHandler, Event, EventBus, Interest, Topics}
 import org.slf4j.LoggerFactory
 
 /** 柜台插件：**一个账户在一个交易所上的执行与汇报**。
@@ -53,7 +53,7 @@ import org.slf4j.LoggerFactory
   *
   * ## 没有凭证就不装柜台
   *
-  * "这个交易所能不能下单"因此是**装配期的事实** (装没装柜台)，由引擎的指令面校验回答，
+  * "这个交易所能不能下单"因此是**装配期的事实** (装没装柜台)，由内核的命令能力校验回答，
   * 不是运行时才发现的错误 —— 从前那是一条在调用链上传递的 `Auth` 错误值。
   */
 abstract class TradingGateway extends Actor:
@@ -81,16 +81,21 @@ abstract class TradingGateway extends Actor:
   /** 由框架在 [[onStart]] 注入，之后只读 */
   @volatile private var ctx: ActorContext = scala.compiletime.uninitialized
 
-  final override def interests: Set[Interest] = Set(
-    Interest.Keyed(OrderIntent, Set(target)),
-    Interest.Keyed(AccountSync, Set(target)),
-  ) ++ extraInterests
+  final override def interests: Set[Interest] = extraInterests
+
+  final override def commandHandlers: Set[CommandHandler] = Set(
+    CommandHandler.command(OrderIntent, target),
+    CommandHandler.command(AccountSync, target),
+  ) ++ extraCommandHandlers
 
   /** 柜台自身还要收的事件 —— 新增能力靠新增声明, 不必改基类。
     *
     * 虚拟柜台用它订阅行情 (撮合的输入就是行情)。真实柜台不需要：它的撮合在交易所那边。
     */
   protected def extraInterests: Set[Interest] = Set.empty
+
+  /** 柜台额外承担的命令能力。与观察性 [[extraInterests]] 分开，避免观察者被当成执行者。 */
+  protected def extraCommandHandlers: Set[CommandHandler] = Set.empty
 
   final override def onStart(context: ActorContext): Unit =
     ctx = context
@@ -199,6 +204,12 @@ abstract class TradingGateway extends Actor:
   /** 在本插件的作用域内 fork 一条线程 (常驻私有流循环, 或一次性的 REST 调用) */
   protected final def fork(body: => Unit): Unit = ctx.fork(body)
 
+  /** 把连接、订阅或嵌套系统登记到本插件作用域 */
+  protected final def manage[A](resource: A)(release: A => Unit): A = ctx.manage(resource)(release)
+
+  /** 创建使用私有总线的子系统；其停机与失败自动链接到本柜台。 */
+  protected final def childSystem(bus: EventBus): ActorSystem = ctx.childSystem(bus)
+
   /** 把一条外部线程来的输入排进自己的邮箱 —— **不经总线**，见 [[hft.actor.ActorContext.tell]] */
   protected final def tell(event: AnyEvent): Unit = ctx.tell(event)
 
@@ -208,9 +219,6 @@ abstract class TradingGateway extends Actor:
     * 仍由 actor 线程串行处理。因此柜台的状态依旧只有一个写者。
     */
   protected final def schedule(delayMs: Long, event: AnyEvent): Unit = ctx.scheduleEvent(delayMs, event)
-
-  /** 本插件所在的并发作用域 —— 只有需要装嵌套组件的柜台 (虚拟柜台) 才用得着 */
-  protected final def scope: ox.Ox = ctx.scope
 
   private def describe(order: Order): String =
     s"$exchange ${order.symbol} ${order.side} ${order.orderType} qty=${order.quantity} " +

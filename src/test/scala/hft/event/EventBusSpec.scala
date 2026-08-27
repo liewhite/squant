@@ -1,6 +1,7 @@
 package hft.event
 
 import hft.domain.*
+import hft.kernel.Cardinality
 import ox.supervised
 import hft.TestUnits.given
 
@@ -13,6 +14,9 @@ class EventBusSpec extends munit.FunSuite:
 
   private def bboOf(i: Instrument) = BBO(i.exchange, i.symbol, 100.0, Coin(1.0), 100.1, Coin(1.0), t0)
   private def tradeOf(i: Instrument) = MarketTrade(i.exchange, i.symbol, 1.0, 1.0, isBuyerMaker = false, t0)
+
+  private object TestCommand extends CommandTopic[String, String]("testCommand", Cardinality.ExactlyOne):
+    def keyOf(payload: String): String = payload
 
   test("按 key 定向: 只有订阅了该标的的订阅者收到"):
     supervised:
@@ -81,6 +85,25 @@ class EventBusSpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       bus.publish(Event.at(Topics.Bbo, bboOf(btc), t0))
+
+  test("命令运行期基数不满足立即失败, 普通事件仍允许无人消费"):
+    supervised:
+      val bus = EventBus()
+      val none = intercept[IllegalStateException](bus.publish(Event.local(TestCommand, "k")))
+      assert(none.getMessage.contains("实际 0 个"), none.getMessage)
+
+      val observer = bus.subscribe(Set(Interest.Keyed(TestCommand, Set("k"))))
+      val a = bus.subscribe(Set.empty, Set(CommandHandler.command(TestCommand, "k")))
+      bus.publish(Event.local(TestCommand, "k"))
+      assertEquals(observer.events.receive().as(TestCommand), Some("k"), "观察者能收到命令但不承担处理能力")
+      a.close()
+
+      val first = bus.subscribe(Set.empty, Set(CommandHandler.command(TestCommand, "k")))
+      val duplicate = intercept[IllegalStateException] {
+        bus.subscribe(Set.empty, Set(CommandHandler.command(TestCommand, "k")))
+      }
+      assert(duplicate.getMessage.contains("激活后将有 2 个"), duplicate.getMessage)
+      first.close(); observer.close()
 
   test("退订后不再收到事件"):
     supervised:

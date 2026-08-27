@@ -4,6 +4,9 @@ import ox.channels.{Channel, Source}
 
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.CopyOnWriteArrayList
+import java.util.concurrent.atomic.AtomicLong
+import java.util.{Collections, IdentityHashMap}
+import scala.jdk.CollectionConverters.*
 
 /** 按 (topic, key) 建索引的发布订阅总线。
   *
@@ -21,23 +24,25 @@ import java.util.concurrent.CopyOnWriteArrayList
   *
   * ## 并发
   *
-  * 发布远多于订阅，故索引用 [[ConcurrentHashMap]] + [[CopyOnWriteArrayList]]：
-  * 投递路径无锁、无分配；订阅路径 (罕见) 复制一次数组。
+  * 发布远多于订阅，故索引用 [[ConcurrentHashMap]] + [[CopyOnWriteArrayList]]。普通事件的热路径
+  * 无锁；命令发布是低频控制路径，会与处理者注册串行化，确保“检查基数”和“交付命令”看到
+  * 同一个处理者集合。
   */
 final class EventBus:
   /** 一个 topic 的投递索引：按 key 定向的订阅者 + 该 topic 的全量订阅者 */
   private final class TopicIndex:
-    val byKey: ConcurrentHashMap[Any, CopyOnWriteArrayList[Channel[AnyEvent]]] = ConcurrentHashMap()
-    val all: CopyOnWriteArrayList[Channel[AnyEvent]] = CopyOnWriteArrayList()
+    val byKey: ConcurrentHashMap[Any, CopyOnWriteArrayList[EventBus.Mailbox]] = ConcurrentHashMap()
+    val handlersByKey: ConcurrentHashMap[Any, CopyOnWriteArrayList[EventBus.Mailbox]] = ConcurrentHashMap()
+    val all: CopyOnWriteArrayList[EventBus.Mailbox] = CopyOnWriteArrayList()
 
   private val topics: ConcurrentHashMap[Topic[?, ?], TopicIndex] = ConcurrentHashMap()
 
   /** 无差别收下一切的订阅者，见 [[subscribeAll]]。通常为空，热路径上只是一次长度检查 */
-  private val everything: CopyOnWriteArrayList[Channel[AnyEvent]] = CopyOnWriteArrayList()
+  private val everything: CopyOnWriteArrayList[EventBus.Mailbox] = CopyOnWriteArrayList()
 
   /** 订阅/退订的互斥锁。
     *
-    * 只锁冷路径 —— [[publish]] 不参与，热路径仍然无锁。
+    * 普通事件的 [[publish]] 不参与；命令发布参与，以消除基数检查与退订之间的竞态。
     *
     * 没有它会丢注册：B 的 subscribe 取到某个 key 槽的列表、尚未 add，A 的退订恰好把这个
     * 已空的槽从索引里摘掉，B 随后 add 进一个孤儿列表 —— B 永远收不到该 key 的事件，
@@ -59,7 +64,24 @@ final class EventBus:
     * 补了一条覆盖全部标的的 —— 两个 Interest 不相等 (Set 去重不了) 但 key 相交。
     * 更隐蔽的是它会让实盘与回测分叉：回测走 [[Subscription.accepts]]，那是布尔判定、天然幂等。
     */
-  def subscribe(interests: Set[Interest]): EventBus.Mailbox = registrationLock.synchronized {
+  def subscribe(interests: Set[Interest]): EventBus.Mailbox = subscribeObservations(interests)
+
+  /** 测试与框架内部使用：建立观察邮箱后立即激活命令处理。 */
+  private[hft] def subscribe(
+      interests: Set[Interest],
+      commandHandlers: Set[CommandHandler],
+  ): EventBus.Mailbox =
+    val mailbox = subscribeObservations(interests)
+    try
+      activateHandlers(Vector(mailbox -> commandHandlers))
+      mailbox
+    catch
+      case e: Throwable =>
+        mailbox.close()
+        mailbox.done()
+        throw e
+
+  private[hft] def subscribeObservations(interests: Set[Interest]): EventBus.Mailbox = registrationLock.synchronized {
     val ch = Channel.unlimited[AnyEvent]
     val allTopics: Set[Topic[?, ?]] = interests.collect { case Interest.All(t) => t }
     val keyedByTopic: Map[Topic[?, ?], Set[Any]] =
@@ -68,13 +90,49 @@ final class EventBus:
           acc.updated(t, acc.getOrElse(t, Set.empty) ++ keys.toSet[Any])
         case (acc, _) => acc
       }
-    allTopics.foreach(t => indexOf(t).all.add(ch))
+    lazy val mailbox: EventBus.Mailbox = EventBus.Mailbox(
+      ch,
+      () => registrationLock.synchronized(remove(mailbox, allTopics, keyedByTopic, mailbox.handledByTopic)),
+    )
+    allTopics.foreach(t => indexOf(t).all.add(mailbox))
     keyedByTopic.foreach { (t, keys) =>
       val idx = indexOf(t)
-      keys.foreach(k => idx.byKey.computeIfAbsent(k, _ => CopyOnWriteArrayList()).add(ch))
+      keys.foreach(k => idx.byKey.computeIfAbsent(k, _ => CopyOnWriteArrayList()).add(mailbox))
     }
-    EventBus.Mailbox(ch, () => registrationLock.synchronized(remove(ch, allTopics, keyedByTopic)))
+    mailbox
   }
+
+  /** 一批组件的 `onStart` 全部成功后，原子激活其命令处理能力。
+    *
+    * 启动钩子运行期间邮箱已经能接观察事件，但命令处理者尚不可见；因此外部发布者不会把一条
+    * 命令成功交给随后回滚的组件。整批先校验再登记，也不会暴露半激活状态。
+    */
+  private[hft] def activateHandlers(bindings: Seq[(EventBus.Mailbox, Set[CommandHandler])]): Unit =
+    registrationLock.synchronized {
+      val requested = bindings.flatMap { (mailbox, handlers) =>
+        if mailbox.handledByTopic.nonEmpty then
+          throw IllegalStateException("同一个邮箱不能重复激活命令处理能力")
+        handlers.map(handler => ((handler.topic, handler.key), mailbox))
+      }
+      requested.groupMap(_._1)(_._2).foreach { case ((topic, key), mailboxes) =>
+        val added = mailboxes.distinct.size
+        val total = Option(topics.get(topic))
+          .flatMap(idx => Option(idx.handlersByKey.get(key)))
+          .fold(added)(_.size + added)
+        if !topic.cardinality.accepts(total) then
+          throw IllegalStateException(
+            s"命令 $topic@$key 要求${topic.cardinality.explain}处理者, 激活后将有 $total 个"
+          )
+      }
+      bindings.foreach { (mailbox, handlers) =>
+        val handledByTopic = handlers.groupMap(_.topic)(_.key)
+        handledByTopic.foreach { (topic, keys) =>
+          val idx = indexOf(topic)
+          keys.foreach(key => idx.handlersByKey.computeIfAbsent(key, _ => CopyOnWriteArrayList()).add(mailbox))
+        }
+        mailbox.handledByTopic = handledByTopic
+      }
+    }
 
   /** 无差别订阅本总线上的**一切** —— 给**中继**用，不给业务组件用。
     *
@@ -86,13 +144,15 @@ final class EventBus:
     * 用户自定义的行情源就会在那里静默消失 (契约校验通过、订阅指令也转下去了，
     * 数据却没人接着往外送)，而这正是本架构最忌讳的失效形态。
     *
-    * 中继务必跳过指令面事件 (见 [[Commands.all]])：指令是从主总线**流进来**的，
+    * 中继务必跳过 [[CommandTopic]]：指令是从主总线**流进来**的，
     * 原样转回去会让它在两条总线之间无限弹跳。
     */
   def subscribeAll(): EventBus.Mailbox = registrationLock.synchronized {
     val ch = Channel.unlimited[AnyEvent]
-    everything.add(ch)
-    EventBus.Mailbox(ch, () => registrationLock.synchronized(everything.remove(ch): Unit))
+    lazy val mailbox: EventBus.Mailbox =
+      EventBus.Mailbox(ch, () => registrationLock.synchronized(everything.remove(mailbox): Unit))
+    everything.add(mailbox)
+    mailbox
   }
 
   /** 某个 (topic, key) 槽上的订阅者数 —— 供观测与测试确认退订确实摘干净了。
@@ -105,39 +165,9 @@ final class EventBus:
       Option(idx.byKey.get(key)).fold(0)(_.size) + idx.all.size
     }
 
-  /** 这条 `(topic, key)` 上有没有人接。
-    *
-    * **指令面契约校验的唯一依据**（见 [[Commands]]）：引擎在装配期用它确认策略将要发出的
-    * 每一条指令都有接单者，没有就拒绝启动。校验的是订阅事实本身，因此不需要任何插件
-    * 额外声明"我提供什么" —— 订阅是它为了工作本来就必须做的事，多一份声明就多一处
-    * 会写错、会漏写的事实。
-    */
-  def hasSubscriber[K](topic: Topic[K, ?], key: K): Boolean = subscriberCount(topic, key) > 0
-
-  /** 定向订阅了这个 `(topic, key)` 的订阅者数 —— **不含**该 topic 的全量订阅者。
-    *
-    * 指令面的契约校验用的是它，而不是 [[subscriberCount]]：两者的差别正是
-    * **接单者与旁观者的差别**。一个订了 `Interest.All(OrderIntent)` 的意图记录器是旁观者，
-    * 它不会执行任何订单；若把它算作接单者，柜台没装也能通过校验，而订单永远发不出去 ——
-    * 那恰是这道校验存在的全部理由要防的那种零症状失效。
-    *
-    * 反过来，接单者**必然**是定向订阅的：它服务的是某个确定的账户/交易所，
-    * 全量订阅意味着它连"哪些单归自己"都没想清楚。
-    */
-  def directSubscriberCount[K](topic: Topic[K, ?], key: K): Int =
-    Option(topics.get(topic)).fold(0)(idx => Option(idx.byKey.get(key)).fold(0)(_.size))
-
-  /** 擦除了 key 类型的同一个查询 —— 只给"从一份 [[Interest]] 声明反查"用
-    * (那里的 key 类型已被擦除)。限定 `private[hft]`: 公开面留给类型安全的那一个,
-    * 免得业务代码拿一个类型对不上的 key 查出个永远为假的答案。 */
-  private[hft] def hasAnySubscriber(topic: Topic[?, ?], key: Any): Boolean =
-    Option(topics.get(topic)).exists { idx =>
-      !idx.all.isEmpty || Option(idx.byKey.get(key)).exists(!_.isEmpty)
-    }
-
-  /** [[directSubscriberCount]] 的擦除版，理由同上 */
-  private[hft] def hasAnyDirectSubscriber(topic: Topic[?, ?], key: Any): Boolean =
-    Option(topics.get(topic)).exists(idx => Option(idx.byKey.get(key)).exists(!_.isEmpty))
+  /** 显式声明会处理这个命令键的组件数；普通订阅者不计入。 */
+  def handlerCount[K](topic: CommandTopic[K, ?], key: K): Int =
+    Option(topics.get(topic)).fold(0)(idx => Option(idx.handlersByKey.get(key)).fold(0)(_.size))
 
   /** 把一条 channel 从它登记过的每个槽里摘除。
     *
@@ -145,17 +175,28 @@ final class EventBus:
     * 与总订阅者数无关。空掉的 key 槽一并删除，否则长期起停会攒下一堆空列表。
     */
   private def remove(
-      ch: Channel[AnyEvent],
+      mailbox: EventBus.Mailbox,
       allTopics: Set[Topic[?, ?]],
       keyedByTopic: Map[Topic[?, ?], Set[Any]],
+      handledByTopic: Map[CommandTopic[?, ?], Set[Any]],
   ): Unit =
-    allTopics.foreach(t => Option(topics.get(t)).foreach(_.all.remove(ch)))
+    allTopics.foreach(t => Option(topics.get(t)).foreach(_.all.remove(mailbox)))
     keyedByTopic.foreach { (t, keys) =>
       Option(topics.get(t)).foreach { idx =>
         keys.foreach { k =>
           Option(idx.byKey.get(k)).foreach { subscribers =>
-            subscribers.remove(ch)
+            subscribers.remove(mailbox)
             if subscribers.isEmpty then idx.byKey.remove(k, subscribers)
+          }
+        }
+      }
+    }
+    handledByTopic.foreach { (topic, keys) =>
+      Option(topics.get(topic)).foreach { idx =>
+        keys.foreach { key =>
+          Option(idx.handlersByKey.get(key)).foreach { handlers =>
+            handlers.remove(mailbox)
+            if handlers.isEmpty then idx.handlersByKey.remove(key, handlers)
           }
         }
       }
@@ -168,21 +209,65 @@ final class EventBus:
     * 不该把发布方 (另一个 actor 的事件循环) 炸掉、进而级联终止整个引擎。
     */
   def publish(event: AnyEvent): Unit =
-    if !everything.isEmpty then everything.forEach(ch => ch.sendOrClosed(event): Unit)
-    val idx = topics.get(event.topic)
-    if idx != null then
-      idx.all.forEach(ch => ch.sendOrClosed(event): Unit)
-      val keyed = idx.byKey.get(event.key)
-      if keyed != null then keyed.forEach(ch => ch.sendOrClosed(event): Unit)
+    event.topic match
+      case command: CommandTopic[?, ?] =>
+        // 命令的基数检查与向这批确定接收者入队在同一个注册锁临界区内，避免检查后退订。
+        registrationLock.synchronized {
+          val idx = topics.get(command)
+          val handlers =
+            Option(idx)
+              .flatMap(i => Option(i.handlersByKey.get(event.key)))
+              .fold(Vector.empty[EventBus.Mailbox])(_.asScala.toVector)
+          if !command.cardinality.accepts(handlers.size) then
+            throw IllegalStateException(
+              s"命令 $command@${event.key} 要求${command.cardinality.explain}处理者, 实际 ${handlers.size} 个"
+            )
+          val recipientMap = IdentityHashMap[EventBus.Mailbox, java.lang.Boolean]()
+          val recipients = Collections.newSetFromMap(recipientMap)
+          everything.forEach(ch => recipients.add(ch): Unit)
+          if idx != null then
+            idx.all.forEach(ch => recipients.add(ch): Unit)
+            Option(idx.byKey.get(event.key)).foreach(_.forEach(ch => recipients.add(ch): Unit))
+          handlers.foreach(ch => recipients.add(ch): Unit)
+          recipients.forEach(_.offer(event))
+        }
+      case _ =>
+        if !everything.isEmpty then everything.forEach(_.offer(event))
+        val idx = topics.get(event.topic)
+        if idx != null then
+          idx.all.forEach(_.offer(event))
+          val keyed = idx.byKey.get(event.key)
+          if keyed != null then keyed.forEach(_.offer(event))
 
 object EventBus:
+  /** 无界邮箱的只读健康快照。`oldestEventAgeMs` 是保守上界：队列未清空时不为每条热路径
+    * 事件额外分配时间戳对象，因此它可能高估、绝不会低估最老消息的等待时间。 */
+  final case class MailboxHealth(
+      queued: Long,
+      highWaterMark: Long,
+      oldestEventAgeMs: Long,
+      inFlightAgeMs: Long,
+      processed: Long,
+      lastProcessingNanos: Long,
+      maxProcessingNanos: Long,
+  )
+
   /** 一个订阅者的邮箱：事件流 + 退订句柄。
     *
     * 退订不是可选的收尾动作 —— 订阅者停掉后若不从索引摘除，它那条无界 channel 会继续
     * 累积事件直到进程退出。动态起停策略的场景下这就是一条稳定的内存泄漏。
     */
-  final class Mailbox private[event] (channel: Channel[AnyEvent], remove: () => Unit) extends AutoCloseable:
+  final class Mailbox private[event] (private[event] val channel: Channel[AnyEvent], remove: () => Unit) extends AutoCloseable:
     private var removed = false
+    private[event] var handledByTopic: Map[CommandTopic[?, ?], Set[Any]] = Map.empty
+    private val queued = AtomicLong(0)
+    private val highWaterMark = AtomicLong(0)
+    private val oldestEnqueueNanos = AtomicLong(0)
+    private val processed = AtomicLong(0)
+    private val inFlightStartedNanos = AtomicLong(0)
+    private val lastProcessingNanos = AtomicLong(0)
+    private val maxProcessingNanos = AtomicLong(0)
+    private val queueHealthLock = new Object
 
     /** 本邮箱的事件流。消费到 [[done]] 之后排空为止 (`Source.foreach` 正是这个语义) */
     def events: Source[AnyEvent] = channel
@@ -195,7 +280,57 @@ object EventBus:
       *
       * 用 `sendOrClosed`：邮箱可能正在停机，向一个正在退出的 actor 投递失败是正常竞态。
       */
-    private[hft] def offer(event: AnyEvent): Unit = channel.sendOrClosed(event): Unit
+    private[hft] def offer(event: AnyEvent): Unit =
+      queueHealthLock.synchronized {
+        val depth = queued.incrementAndGet()
+        if depth == 1 then oldestEnqueueNanos.set(System.nanoTime())
+        highWaterMark.accumulateAndGet(depth, Math.max)
+        channel.sendOrClosed(event) match
+          case _: ox.channels.ChannelClosed => markConsumedLocked()
+          case _                            => ()
+      }
+
+    /** 由 ActorSystem 消费并统一记录处理耗时；插件不能绕过该入口消费 actor 邮箱。 */
+    private[hft] def consumeEach(process: AnyEvent => Unit): Unit =
+      channel.foreach { event =>
+        markConsumed()
+        val started = System.nanoTime()
+        inFlightStartedNanos.set(started)
+        try process(event)
+        finally
+          val elapsed = System.nanoTime() - started
+          inFlightStartedNanos.compareAndSet(started, 0L)
+          processed.incrementAndGet()
+          lastProcessingNanos.set(elapsed)
+          maxProcessingNanos.accumulateAndGet(elapsed, Math.max)
+      }
+
+    private def markConsumed(): Unit =
+      queueHealthLock.synchronized(markConsumedLocked())
+
+    private def markConsumedLocked(): Unit =
+      val remaining = queued.decrementAndGet()
+      if remaining <= 0 then
+        queued.set(0)
+        oldestEnqueueNanos.set(0)
+
+    private[hft] def health: MailboxHealth = queueHealthLock.synchronized {
+      val depth = queued.get
+      val oldest = oldestEnqueueNanos.get
+      val inFlight = inFlightStartedNanos.get
+      val now = System.nanoTime()
+      val ageMs = if depth == 0 || oldest == 0 then 0L else (now - oldest) / 1_000_000L
+      val inFlightAgeMs = if inFlight == 0 then 0L else (now - inFlight) / 1_000_000L
+      MailboxHealth(
+        depth,
+        highWaterMark.get,
+        ageMs,
+        inFlightAgeMs,
+        processed.get,
+        lastProcessingNanos.get,
+        maxProcessingNanos.get,
+      )
+    }
 
     /** 从总线摘除，不再有新事件进来。幂等 —— 停机路径上重复调用是常态。
       *

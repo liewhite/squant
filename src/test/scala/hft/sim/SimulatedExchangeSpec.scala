@@ -34,9 +34,10 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   private val metas = Map[Symbol, SymbolMeta](sym -> meta)
 
   /** 可手动喂行情的假上游行情源。柜台把它装在自己的私有总线上 */
-  private class FakeMarketFeed extends MarketFeed:
+  private class FakeMarketFeed(publishOnConnect: Boolean = false) extends MarketFeed:
     override def exchange: Exchange = ex
-    override protected def connect(): Unit = ()
+    override protected def connect(): Unit =
+      if publishOnConnect then emitBbo(50000, 50001, 1)
     override protected def subscribeToExchange(kinds: Set[SubscriptionKind]): Unit = ()
     /** 外部喂一条盘口 —— 走的正是真实行情源发布事件的那条路径 */
     def emitBbo(bid: Price, ask: Price, ts: Timestamp): Unit =
@@ -196,6 +197,17 @@ class SimulatedExchangeSpec extends munit.FunSuite:
 
       upstream.emitCustom(42.0, 1)
       eventually("自定义行情应被转发到主总线")(seen.asScala.toVector == Vector(42.0))
+
+  test("上游在 onStart 立即发布的首条行情不会落入中继订阅窗口之前"):
+    supervised:
+      val bus = EventBus()
+      val seen = ConcurrentLinkedQueue[Timestamp]()
+      val mailbox = bus.subscribe(Set(Interest.All(Topics.Bbo)))
+      fork { mailbox.events.foreach(event => if event.is(Topics.Bbo) then seen.add(event.exchangeTs)) }
+      val upstream = FakeMarketFeed(publishOnConnect = true)
+      ActorSystem(bus).spawn(SimulatedExchange(upstream, metas, SimConfig(0, 0, 10_000), AccountId.Live))
+
+      eventually("首条行情应穿过已先建立的私有总线中继")(seen.asScala.toVector == Vector(1L))
 
   test("行情订阅指令不会在两条总线之间弹跳"):
     // 指令是从主总线流进替身、再转给私有总线上游的。若中继把它原样转回主总线,

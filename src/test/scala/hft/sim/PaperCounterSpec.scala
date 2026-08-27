@@ -60,17 +60,20 @@ class PaperCounterSpec extends munit.FunSuite:
       assertEquals(fill.symbol, sym)
       assertEqualsDouble(fill.size.value, 0.5, 1e-12)
 
-  test("不接实盘账户的下单意图"):
+  test("不接实盘账户的下单意图, 无实盘柜台时立即暴露"):
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
       system.spawn(PaperCounter(paper, ex, instant, metas))
 
-      // 实盘意图: 柜台不该撮合它
-      bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, buyLimit(99.0, 0.5, "live1"))))
+      // 实盘意图: 影子柜台不算它的处理者；无人处理必须立即失败，不能静默丢弃。
+      val missing = intercept[IllegalStateException] {
+        bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, buyLimit(99.0, 0.5, "live1"))))
+      }
+      assert(missing.getMessage.contains("实际 0 个"), missing.getMessage)
       bus.publish(Event.at(Topics.Bbo, bbo(98.0, 98.1), 1L))
-      // 影子意图作栅栏: 它成交了就说明前面那条确实被忽略而不是还没处理
+      // 影子意图仍由自己的柜台处理。
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 0.25, "p1"))))
       bus.publish(Event.at(Topics.Bbo, bbo(97.0, 97.1), 2L))
 

@@ -1,7 +1,8 @@
 package hft.actor
 
 import hft.domain.Timestamp
-import hft.event.{AnyEvent, Interest}
+import hft.event.{AnyEvent, CommandHandler, Interest}
+import hft.kernel.CapabilityProvider
 
 /** 引擎里一个有生命周期的组件。
   *
@@ -25,13 +26,12 @@ import hft.event.{AnyEvent, Interest}
   * 三条路都会走到它：显式 [[ActorSystem.stop]]、[[ActorSystem.requestShutdown 请求停机]]
   * (含中断信号)、以及**任何组件的失败**。最后一条是有意的 —— 私有流断线一类的子任务失败
   * 从前直接炸穿作用域、把所有 `onStop` 一并跳过，于是撤单指令漏发、挂单留在交易所无人
-  * 跟踪。现在失败先触发一遍有序停机 (逆装配序, 每个 `onStop` 都跑到)，收尾完了才让进程
+  * 跟踪。现在失败先触发一遍依赖拓扑停机 (每个 `onStop` 都跑到)，收尾完了才让进程
   * 非零退出：**fail-fast 与"收尾要跑到"不冲突，只是先后问题**。
   *
-  * **[[onStart]] 里 fork 的线程不受 [[ActorSystem.stop]] 控制**，它们的生命周期绑在根作用域
-  * 上，随进程结束。要能被动态起停的 actor 必须走事件驱动形态，或者在自己的循环里用
-  * [[ActorContext.sleepUnlessStopped]] 代替裸 sleep。这条限制是如实的：一个阻塞在 socket
-  * 读上的线程没有办法被协作式地叫停，而假装能停会让停机链在那里静默地等下去。
+  * [[ActorContext.fork]] 创建的任务受组件作用域管理：停止时先发停止信号并中断，资源释放后
+  * 等待退出；超时或异常都会成为可见的停机失败。外部连接等资源用 [[ActorContext.manage]]
+  * 登记，框架会在 `onStop` 之后逆序释放，避免任务或连接悄悄活过所属组件。
   */
 trait Actor:
   /** 诊断用名字，进日志与错误信息 */
@@ -39,6 +39,19 @@ trait Actor:
 
   /** 要收哪些事件。空集 = 纯生产者，不消费任何事件 */
   def interests: Set[Interest] = Set.empty
+
+  /** 本组件实际执行的命令。声明本身同时建立投递与能力，不从普通订阅方式猜测。 */
+  def commandHandlers: Set[CommandHandler] = Set.empty
+
+  /** 本组件提供的非命令能力。命令能力由 [[commandHandlers]] 自动派生，无需重复声明。 */
+  def capabilities: Set[CapabilityProvider] = Set.empty
+
+  /** 正常运行所必需的命令处理能力。
+    *
+    * 消息流不能推出硬依赖：观察者订阅一条行情，不代表没有它就必须停；策略能发布下单命令，
+    * 却无法从 `interests` 看出它依赖柜台。因此硬依赖单独声明，由系统在任何启动副作用之前校验。
+    */
+  def requirements: Set[Requirement] = Set.empty
 
   /** 启动钩子：fork 自己的常驻线程、spawn 子 actor。在开始消费事件之前调用一次 */
   def onStart(ctx: ActorContext): Unit = ()

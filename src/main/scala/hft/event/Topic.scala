@@ -1,5 +1,7 @@
 package hft.event
 
+import hft.kernel.{Capability, Cardinality}
+
 /** 事件族 —— 框架面向用户的**开放扩展点**。
   *
   * 一个 Topic 同时钉死两件事：这一族事件按什么**路由** (`K`)、载荷是什么**类型** (`P`)。
@@ -50,6 +52,15 @@ abstract class Topic[K, P](val name: String):
   final override def hashCode: Int = System.identityHashCode(this)
 
   override def toString: String = name
+
+/** 命令 Topic：发布时必须满足 [[cardinality]]，否则立即失败。
+  *
+  * 处理能力只由 [[CommandHandler]] 显式形成；[[Interest]] 无论全量还是定向都只是观察者，
+  * 不计入处理者基数。
+  */
+abstract class CommandTopic[K, P](name: String, val cardinality: Cardinality) extends Topic[K, P](name):
+  /** 命令处理者自动提供的生命周期能力；装配器只看这个通用契约，不依赖 EventBus 内部索引。 */
+  final val capability: Capability[K] = Capability(s"command:$name", cardinality)
 
 /** 公共行情 topic 的标记类型。
   *

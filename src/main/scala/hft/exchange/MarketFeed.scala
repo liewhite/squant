@@ -3,7 +3,7 @@ package hft.exchange
 import hft.actor.{Actor, ActorContext}
 import hft.domain.{Exchange, SubscriptionKind, Timestamp}
 import hft.event.Commands.MarketSubscription
-import hft.event.{AnyEvent, Interest}
+import hft.event.{AnyEvent, CommandHandler}
 import org.slf4j.LoggerFactory
 
 /** 行情插件：接**行情订阅指令**，把对应的公共行情发布到总线。
@@ -44,7 +44,7 @@ abstract class MarketFeed extends Actor:
   /** 由框架在 [[onStart]] 注入，之后只读 */
   @volatile private var ctx: ActorContext = scala.compiletime.uninitialized
 
-  final override def interests: Set[Interest] = Set(Interest.Keyed(MarketSubscription, Set(exchange)))
+  final override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(MarketSubscription, exchange))
 
   final override def onStart(context: ActorContext): Unit =
     ctx = context
@@ -69,8 +69,8 @@ abstract class MarketFeed extends Actor:
 
   /** 建立连接、fork 常驻收流线程。此时 [[publish]] / [[fork]] 已可用。
     *
-    * 这里 fork 的线程**不受停机控制**，随进程结束 —— 一个阻塞在 socket 读上的线程没有
-    * 办法被协作式地叫停，而假装能停会让停机链在那里静默地等下去。
+    * 这里 fork 的线程归属行情组件：停止时会收到中断并等待退出。连接本身若需要显式关闭，
+    * 实现应通过组件作用域登记释放动作，以确保阻塞读能够被唤醒。
     */
   protected def connect(): Unit
 
@@ -84,3 +84,6 @@ abstract class MarketFeed extends Actor:
 
   /** 在本插件的作用域内 fork 一条线程 */
   protected final def fork(body: => Unit): Unit = ctx.fork(body)
+
+  /** 把连接等外部资源登记到本插件作用域 */
+  protected final def manage[A](resource: A)(release: A => Unit): A = ctx.manage(resource)(release)

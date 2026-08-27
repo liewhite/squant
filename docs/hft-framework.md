@@ -5,11 +5,11 @@
 
 | 概念 | hft-engine-rs (Rust) | 本框架 (Scala) |
 |---|---|---|
-| 并发原语 | tokio task + kameo Actor | ox 虚拟线程 fork + Channel |
+| 并发原语 | tokio task + kameo Actor | Java 虚拟线程 + ox Channel |
 | 消息投递 | kameo PubSub (unbounded mailbox) | `EventBus` (按 (topic, key) 建索引，每订阅者一条 `Channel.unlimited`) |
 | 事件扩展 | 封闭 enum + `CustomEvent` (类型擦除, 复用行情的 scope) | 开放的 `Topic[K, P]` (自带路由键类型与载荷类型) |
 | 状态串行化 | actor mailbox | 每策略独占一个虚拟线程串行消费 |
-| 监督 | spawn_link 级联退出 | ox `supervised` 作用域级联取消 |
+| 监督 | spawn_link 级联退出 | `ActorSystem` 自有监督线程 + 依赖拓扑停机 |
 | HTTP/WS | reqwest + tokio-tungstenite | sttp client4 `DefaultSyncBackend` (同步阻塞，虚拟线程友好) |
 
 ## 事件流
@@ -42,9 +42,9 @@
 | 无人订阅 | 正常（某标的这刻没成交不是错误） | **致命**，且零症状 |
 | 校验 | 不校验 | 装配期：每条指令必须有接单者 |
 
-引擎在 `addStrategies` 时查一次总线"这条 (topic, key) 有没有订阅者"，没有就拒绝启动。
-查的是**订阅事实本身**，因此不需要任何插件声明"我提供什么" —— 订阅是它为了工作本来
-就必须做的事，多一份声明就多一处会漏写的事实。
+命令协议用 `CommandTopic` 声明处理者基数，组件用 `CommandHandler` 承担执行，用 `Requirement`
+声明硬依赖。普通 `Interest` 始终只是观察者，不会冒充处理能力。非消息模块通过通用 `Capability`
+参与同一套装配与卸载校验。完整的非交易内核契约见 [框架内核契约](framework-kernel.md)。
 
 ### Topic: 事件的开放扩展点
 
@@ -71,7 +71,7 @@ object AlphaSignal extends Topic[Symbol, Score]("alphaSignal"):
 | `Instrument` | Bbo / Trade / MarkPrice / IndexPrice / FundingRate | 公共行情，**无账户归属**，一份服务所有账户 |
 | `AccountInstrument` | Position / OrderUpdate / Fill | 私有回报，账户流推送 |
 | `AccountExchange` | Balance / AccountInfo / Greeks | 账户级读数 |
-| `AccountId` | OrderIntent | 策略信号，按账户路由到各自出口 |
+| `AccountExchange` | OrderIntent | 策略信号，按账户与交易所路由到唯一柜台 |
 | 无 | Clock | 全局节拍，用 `Interest.All` 订阅 |
 
 ### 账户维度
@@ -87,9 +87,9 @@ object AlphaSignal extends Topic[Symbol, Score]("alphaSignal"):
 账户级读数同时按交易所过滤，是另一条越界防线：策略读不到自己没订阅的交易所的净值，
 而杠杆闸门正是拿净值算的。
 
-`OrderIntent` 也按账户路由，于是"这条信号该由谁执行"由投递层回答：实盘出口订阅
-`{Live}`，每个虚拟柜台订阅自己那个 `Paper(n)`，两个出口互不知情。若改成全量订阅再各自
-过滤，新增一类账户时两处都不会编译失败，失效方式是静默双执行或静默不执行。
+`OrderIntent` 按 `(账户, 交易所)` 路由，于是"这条信号该由谁执行"由投递层回答：
+实盘与影子柜台各自只处理自己的键。若改成全量订阅再各自过滤，新增账户或交易所时不会有
+任何一处编译失败，失效方式是静默双执行或静默不执行。
 
 **唯一性约束**（`InstrumentClaims`，装配期 fail-fast）：一个 `(账户, 标的)` 最多归一个策略
 实例。实盘与影子盘跑同一标的是允许的 —— 账户不同，键就不同。
@@ -287,7 +287,7 @@ def handlers = StrategyHandlers.empty
 
 1. `EventBus` 据此建投递索引（两次哈希查表，不遍历订阅者）；
 2. 回测在单线程循环里用 `Subscription.accepts` 过滤（没有总线，但判据必须与实盘同一份）；
-3. `SubscriptionKind.from` 据此派生要向交易所订阅的行情流。
+3. `Subscription.marketStreams` 经各 `MarketTopic.streamKind` 派生要向交易所订阅的行情流。
 
 写成 `Event => Boolean` 会同时丢掉可索引与可自省，后者意味着策略得把订阅范围再声明一遍 ——
 同一事实两处写，迟早错开。
@@ -300,6 +300,7 @@ def handlers = StrategyHandlers.empty
 
 | 模块 | 职责 |
 |---|---|
+| `kernel` | `Capability`/`CapabilityProvider`/`Cardinality` — 无领域含义的装配协议 |
 | `domain` | 纯数据模型: Order/Position/BBO/FundingRate/SymbolMeta 等，零行为依赖 |
 | `event` | `Topic`/`Event`/`Interest`/`Subscription`/`EventBus` — 事件与投递的全部基础设施 |
 | `actor` | `Actor`/`ActorContext`/`ActorSystem` — 组件的装配与生命周期树 |
@@ -337,8 +338,10 @@ def handlers = StrategyHandlers.empty
 - **配置错误即终止**: 缺 SymbolMeta、缺 client/connector、启动对齐失败 (除"未配置
   凭证"这一确定安全的例外) 都在装配/首次使用时抛错。
 
-ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内的 fork，异常到达 fork
-边界即级联取消整个作用域并从 main 抛出，进程以非零码退出。
+`ActorSystem` 自己监督事件循环、受管任务与子系统。第一个失败先触发依赖拓扑停机，全部
+`onStop` 与资源清理完成后，`awaitShutdown` 把原始异常重新抛给启动器，使进程以非零码退出。
+离开一个 ox scope 不会自动回收 ActorSystem；应用启动器必须以 `awaitShutdown` 作为最后一行，
+嵌套消息空间则必须通过 `ActorContext.childSystem` 绑定到父组件。
 
 ### 两种插件形态
 
@@ -374,26 +377,29 @@ ox 监督树天然支撑该模型：所有组件都是 `supervised` 作用域内
   事件。纯函数形态 —— 可单测、可回测、**可被动态起停**。
 - **自驱动**（WS 连接、定时器、REST 轮询）：在 `onStart` 里 fork 自己的常驻线程。
 
-**生命周期树**：`ActorContext.spawn` 起的是子 actor。停一个 actor 时先递归停完它的子孙、
-等到它们的 `onStop` 真正跑完，再停它自己 —— 没有任何地方需要知道整棵树的形状，
-每层只管自己那层，递归自然成立。
+**生命周期与依赖**：`ActorContext.spawn` 建立父子所有权，`requirements` 声明运行期硬依赖。
+停机时框架合并两者计算拓扑：子组件先于父组件、依赖方先于提供方。装配顺序只用于无约束
+节点的稳定排序，不承担正确性。
 
 **停机是协作式的**，不用中断：中断会把 actor 打断在任意一行上，而它可能正处在
 "已发出下单请求、尚未登记 pending"这类不能被腰斩的位置。自驱动循环用
 `ctx.sleepUnlessStopped(ms)` 代替裸 `Thread.sleep` 就能被叫停。
 
-**收尾在退订之前**：`onStop` 可以产出最后一批事件（`Executor` 在这里撤掉本策略的挂单），
-那时总线与下游都还活着。顺序反了就是漏发指令。
+**收尾时依赖仍可用**：组件先停止接收新消息并排空自己的邮箱，再执行 `onStop`；它声明的
+下游依赖此时仍在运行，可以接住最后一批命令（`Executor` 在这里撤掉本策略的挂单）。
 
 #### 已知限制
 
-- `onStart` 里 fork 的线程不受 `stop` 控制，生命周期绑在根作用域上。
-  一个阻塞在 socket 读上的线程没法被协作式叫停，假装能停会让停机链在那里静默等下去。
-  要能动态起停的 actor 必须走事件驱动形态。
+- `onStart` 里的 `fork` 是受管任务；`stop` 会中断并限时等待，外部连接用 `manage` 逆序释放。
+  阻塞在 socket 读上的任务必须登记连接关闭动作；若仍未在时限内退出，组件进入
+  `Quarantined`，保留尚未释放的资源、独占权与依赖，系统拒绝继续装配或拆图，不能静默假装
+  已经停止。
+- `onStart` 里的子组件必须同步 `spawn` 并加入同一启动事务；受管任务要等父组件进入 Running
+  后才能动态 `spawn`。启动事务提交前禁止发布命令，避免回滚无法撤销外部副作用。
 
 ### 并发模型
 
-- 所有组件都是 `supervised` 作用域内的虚拟线程 fork，任一组件崩溃级联终止整个作用域 (对应 kameo spawn_link)。
+- 所有组件事件循环和受管任务都由 `ActorSystem` 监督，任一组件崩溃会先触发全系统有序停机。
   **不做局部重启** —— 一个崩掉的策略留下的挂单与仓位归谁管没有好答案，而重启后的启动对齐有答案。
 - 每个策略一个 `Executor`，独占虚拟线程串行消费事件，策略与状态无锁。
 - `WsLoop` 每条连接两个虚拟线程: 发送线程是连接唯一写入者 (Pong 回应也经出站 channel)，

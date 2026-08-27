@@ -4,7 +4,7 @@ import hft.actor.ActorSystem
 import hft.domain.*
 import hft.engine.Executor
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
-import hft.event.Commands.{AccountSync, AccountSyncRequest, AccountSynced, OrderIntent, OutcomeEvent}
+import hft.event.Commands.{AccountSync, AccountSyncRequest, AccountSynced, MarketSubscription, OrderIntent, OutcomeEvent}
 import hft.exchange.{AccountFeed, AccountReport, RestTradingGateway, TradingClient}
 import hft.sim.{PaperCounter, SimConfig}
 import hft.strategy.{Strategy, StrategyHandlers}
@@ -204,6 +204,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
         override def fetchPositions() =
           Right(Vector(Position(AccountId.Live, ex, sym, Coin(0.7))))
       system.spawn(RestTradingGateway(HoldingClient(), ManualFeed(), AccountId.Live, metas))
+      system.spawn(hft.TestCommandSink("market-sink", MarketSubscription, Set(ex)))
 
       // 行情先流起来 —— 模拟"这个标的早就有别的组件在看"
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 1L), 1L))

@@ -1,6 +1,7 @@
 package hft.event
 
 import hft.domain.*
+import hft.kernel.Cardinality
 
 /** 指令面 —— 总线上"请做什么"的那一半。
   *
@@ -10,10 +11,9 @@ import hft.domain.*
   * 没有持仓，都不是错误。指令面则**必须有接单者** —— 一条没人接的指令是静默失效：
   * 行情永远不会到、订单永远不会发出、启动对齐永远不完成，而没有任何外在症状。
   *
-  * 引擎因此在装配期查一次总线：策略会发出的每一条指令，其 `(topic, key)` 上必须已经有
-  * 订阅者 (见 [[EventBus.hasSubscriber]])。**这条校验不需要任何插件声明"我提供什么"** ——
-  * 订阅本身就是声明，而订阅是插件为了工作本来就必须做的事。多一份 `provides` 声明就多一处
-  * 会写错、会漏写的事实，而漏写的表现是启动被误拒。
+  * 命令 topic 自带处理者基数，组件通过硬依赖声明自己需要哪些键。ActorSystem 在装配、发布
+  * 和动态停止时校验。处理者通过 `CommandHandler` 显式承担命令；普通订阅始终只是观察者，
+  * 不会因为监控或审计一条命令而改变执行基数。
   *
   * ## 为什么指令走总线而不是直接调用
   *
@@ -40,7 +40,8 @@ object Commands:
     */
   final case class MarketSubscriptionRequest(exchange: Exchange, kinds: Set[SubscriptionKind])
 
-  object MarketSubscription extends Topic[Exchange, MarketSubscriptionRequest]("marketSubscription"):
+  object MarketSubscription
+      extends CommandTopic[Exchange, MarketSubscriptionRequest]("marketSubscription", Cardinality.AtLeastOne):
     def keyOf(payload: MarketSubscriptionRequest): Exchange = payload.exchange
 
   // ==================== 启动对齐 ====================
@@ -64,7 +65,8 @@ object Commands:
   ):
     def target: AccountExchange = AccountExchange(account, exchange)
 
-  object AccountSync extends Topic[AccountExchange, AccountSyncRequest]("accountSync"):
+  object AccountSync
+      extends CommandTopic[AccountExchange, AccountSyncRequest]("accountSync", Cardinality.ExactlyOne):
     def keyOf(payload: AccountSyncRequest): AccountExchange = payload.target
 
   /** "对齐已推完"。
@@ -130,26 +132,6 @@ object Commands:
     *
     * 策略不订阅本 topic，故信号不会回流给任何策略。
     */
-  object OrderIntent extends Topic[AccountExchange, AccountOutcome]("orderIntent"):
+  object OrderIntent
+      extends CommandTopic[AccountExchange, AccountOutcome]("orderIntent", Cardinality.ExactlyOne):
     def keyOf(payload: AccountOutcome): AccountExchange = payload.target
-
-  // ==================== 分组 ====================
-
-  /** 全部指令 topic —— "这是不是一条指令"的唯一判据。
-    *
-    * 应答 ([[AccountSynced]]) 不在其中: 它是**回答**不是请求, 没有"必须有人接"的要求
-    * (发出时等待方可能已经收够了)。
-    */
-  val all: Set[Topic[?, ?]] = Set(MarketSubscription, AccountSync, OrderIntent)
-
-  /** **恰好一个接单者**的指令。
-    *
-    * 两个柜台接同一个 `(账户, 交易所)` 就是静默双执行 —— 同一条下单意图被投递给两者，
-    * 各下一次单，而没有任何症状。路由键带上交易所维度防住的是"拆出多个柜台"这一种成因，
-    * 防不住"同一个键上装了两台"；后者只能靠装配期数一数。
-    *
-    * [[MarketSubscription]] 不在其中：一个交易所挂多个行情插件是正常的
-    * (一个接盘口与成交、一个接期权希腊值)，它们各自认领认得的流类型。
-    * 行情多订一次最多浪费一次往返，与多下一次单不是一回事。
-    */
-  val exclusive: Set[Topic[?, ?]] = Set(AccountSync, OrderIntent)

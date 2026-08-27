@@ -7,6 +7,7 @@ import hft.state.StateManager
 import hft.event.Commands.{AccountOutcome, OrderIntent, OutcomeEvent}
 import hft.strategy.{Strategy, StrategyHandlers}
 import ox.supervised
+import hft.TestCommandSink
 import hft.TestUnits.given
 
 /** 撤下一个策略实例时的收尾语义。 */
@@ -55,7 +56,8 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus)
-      val intents = bus.subscribe(Set(Interest.All(OrderIntent)))
+      val intents = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, ex)))))
+      system.spawn(TestCommandSink("order-sink", OrderIntent, Set(AccountExchange(AccountId.Live, ex))))
       val h = system.spawn(Executor.readyToTrade(OneShotMaker(), AccountId.Live))
 
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
@@ -78,7 +80,8 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus)
-      val intents = bus.subscribe(Set(Interest.All(OrderIntent)))
+      val intents = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, ex)))))
+      system.spawn(TestCommandSink("order-sink", OrderIntent, Set(AccountExchange(AccountId.Live, ex))))
       val h = system.spawn(Executor.readyToTrade(OneShotMaker(), AccountId.Live))
 
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
@@ -110,7 +113,8 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus)
-      val intents = bus.subscribe(Set(Interest.All(OrderIntent)))
+      val intents = bus.subscribe(Set(Interest.Keyed(OrderIntent, Set(AccountExchange(AccountId.Live, ex)))))
+      system.spawn(TestCommandSink("order-sink", OrderIntent, Set(AccountExchange(AccountId.Live, ex))))
       val h = system.spawn(Executor.readyToTrade(OneShotMaker(), AccountId.Live))
       system.stop(h)
       // 哨兵作栅栏: 若收尾误发了信号, 先读到的会是它而不是哨兵

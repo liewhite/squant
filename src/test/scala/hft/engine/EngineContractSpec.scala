@@ -1,7 +1,7 @@
 package hft.engine
 
 import hft.domain.*
-import hft.event.Commands.{AccountSync, MarketSubscription}
+import hft.event.Commands.{AccountSync, AccountSyncReport, MarketSubscription}
 import hft.event.{AnyEvent, Interest, Topics}
 import hft.exchange.{MarketFeed, TradingGateway}
 import hft.strategy.{Strategy, StrategyHandlers}
@@ -21,6 +21,20 @@ class EngineContractSpec extends munit.FunSuite:
   private val sym = "BTCUSDT"
   private val inst = Instrument(ex, sym)
   private val meta = SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
+
+  test("账户对齐按 target 去重, 重复应答不能冒充另一个柜台"):
+    val liveBinance = AccountExchange(AccountId.Live, Exchange.Binance)
+    val liveOkx = AccountExchange(AccountId.Live, Exchange.Okx)
+    val tracker = SyncTracker(Set(liveBinance, liveOkx), requestId = 7L)
+
+    tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Binance, 7L))
+    tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Binance, 7L))
+    tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Okx, 6L))
+    assert(!tracker.await(1), "重复或旧请求应答不能让等待提前完成")
+    assertEquals(tracker.pending, Set(liveOkx))
+
+    tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Okx, 7L))
+    assert(tracker.await(1))
 
   /** 指令投递是异步的 (经总线进插件邮箱)，断言要等它到达 */
   private def eventually(what: => String)(cond: => Boolean): Unit =
@@ -104,7 +118,7 @@ class EngineContractSpec extends munit.FunSuite:
       val log = ConcurrentLinkedQueue[String]()
       val engine = Engine.start(plugins = Vector(RecordingGateway(ex, AccountId.Live, log)))
       val e = intercept[IllegalStateException](engine.install(RecordingGateway(ex, AccountId.Live, log)))
-      assert(e.getMessage.contains("已经有接单者"), e.getMessage)
+      assert(e.getMessage.contains("已有提供者或本批重复提供"), e.getMessage)
 
   test("两台柜台都从 Engine.start 的 plugins 进 -> 同样要拒绝"):
     // 这是实盘装配的真实形状 (四个启动器一律 Engine.start(plugins = Vector(gateway, feed))),
@@ -116,7 +130,7 @@ class EngineContractSpec extends munit.FunSuite:
           Vector(RecordingGateway(ex, AccountId.Live, log), RecordingGateway(ex, AccountId.Live, log))
         )
       )
-      assert(e.getMessage.contains("已经有接单者"), e.getMessage)
+      assert(e.getMessage.contains("已有提供者或本批重复提供"), e.getMessage)
 
   test("同一个交易所上装两个柜台, 账户不同 -> 允许 (实盘与影子盘并行的前提)"):
     supervised:

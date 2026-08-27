@@ -1,8 +1,8 @@
 package hft.engine
 
-import hft.actor.{Actor, ActorContext}
+import hft.actor.{Actor, ActorContext, Requirement}
 import hft.domain.*
-import hft.event.Commands.AccountSynced
+import hft.event.Commands.{AccountSync, AccountSynced, MarketSubscription, OrderIntent}
 import hft.event.{AnyEvent, Interest, Subscription}
 import hft.strategy.Strategy
 
@@ -42,7 +42,7 @@ final class Executor private (
 
   override def name: String = s"executor(${strategy.getClass.getSimpleName}@$account)"
 
-  /** 本策略的订阅范围 = 策略声明 + 框架补齐。引擎据此校验指令有人接、发对齐与行情订阅指令 */
+  /** 本策略的订阅范围 = 策略声明 + 框架补齐。由此派生硬依赖、对齐目标与行情订阅指令 */
   def subscription: Subscription = runner.subscription
 
   /** 还在等对齐吗。
@@ -58,6 +58,22 @@ final class Executor private (
 
   override def interests: Set[Interest] =
     runner.subscription.interests + Interest.Keyed(AccountSynced, alignmentTargets)
+
+  /** 实盘组件的硬依赖从订阅范围派生；测试/回测的 readyToTrade 形态由调用方直接驱动，不装配依赖。 */
+  override def requirements: Set[Requirement] =
+    if !awaitAlignment then Set.empty
+    else
+      val market = runner.subscription.marketStreams.map(_._1).map { exchange =>
+        Requirement.command(MarketSubscription, exchange, s"行情订阅指令 $exchange 无处理者")
+      }
+      val account = runner.subscription.exchanges.flatMap { exchange =>
+        val target = AccountExchange(this.account, exchange)
+        Set(
+          Requirement.command(OrderIntent, target, s"下单指令 $target 无柜台"),
+          Requirement.command(AccountSync, target, s"账户对齐指令 $target 无柜台"),
+        )
+      }
+      market ++ account
 
   /** 本策略涉及的 (账户, 交易所) —— 对齐应答按它路由。
     *
