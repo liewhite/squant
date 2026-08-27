@@ -1,6 +1,6 @@
 package hft.event
 
-import hft.domain.{AccountInstrument, Exchange, Instrument, SubscriptionKind}
+import hft.domain.{AccountExchange, AccountId, AccountInstrument, Exchange, Instrument, SubscriptionKind}
 
 /** 一个订阅者的完整订阅范围：若干 [[Interest]] 的聚合，以及"这条事件归不归它"的判据。
   *
@@ -54,6 +54,19 @@ final case class Subscription(interests: Set[Interest]):
   /** 涉及的全部交易所：交易标的所属的，加上账户级声明直接指名的 */
   def exchanges: Set[Exchange] =
     instruments.map(_.exchange) ++ keysOf(Topics.account).map(_.exchange)
+
+  /** 启动对齐要覆盖的 (账户, 交易所) —— **闸门等谁、引擎发给谁，必须是同一个集合**。
+    *
+    * 两处各自推导过一次，而且推得不一样：执行器的闸门按 [[exchanges]] 等，引擎却按
+    * `instruments.groupMap(_.exchange)` 发指令 —— 后者不含"账户级声明直接指名的交易所"
+    * (一个用 `custom` 订了某所净值/希腊值、却不在该所交易的策略就落在这个差集里)。
+    * 结果是引擎不为它发对齐指令、latch 也不等它，于是**引擎打印"启动对齐完成"照常放行，
+    * 而那个策略永久停在闸门后**：状态照收、只观察不动作、不抛异常、不打日志。
+    *
+    * 所以这个集合必须有唯一的出处。谁要用就问它要，别再各算一遍。
+    */
+  def alignmentTargets(account: AccountId): Set[AccountExchange] =
+    exchanges.map(AccountExchange(account, _))
 
   private def keysOf[K](topics: Set[Topic[K, ?]]): Set[K] =
     topics.flatMap(t => interests.flatMap(_.keysOf(t)))

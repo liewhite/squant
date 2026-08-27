@@ -64,8 +64,7 @@ final class Executor private (
     * 由自己算而不是让引擎告知：等谁的对齐，从订阅范围直接读得出来。让装配方传进来的话，
     * 就多了一个"必须在 spawn 之前调用"的时序约定 —— 而这种约定迟早有人漏掉。
     */
-  def alignmentTargets: Set[AccountExchange] =
-    runner.subscription.exchanges.map(AccountExchange(account, _))
+  def alignmentTargets: Set[AccountExchange] = runner.subscription.alignmentTargets(account)
 
   /** 策略产出什么就发什么 —— 下单意图、也可以是它自己的指标事件。
     * 账户由 [[hft.strategy.StrategyContext]] 在构造下单意图时补上，这里不再包一层。 */

@@ -92,3 +92,19 @@ class EventSpec extends munit.FunSuite:
     val sub = Subscription(Set(Interest.Keyed(Topics.AccountInfo, Set(AccountExchange(AccountId.Live, Exchange.Binance)))))
     assert(sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Binance, 1.0, 0.0))))
     assert(!sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, 1.0, 0.0))))
+
+  test("对齐目标含账户级声明指名的交易所 —— 闸门等谁, 引擎就得发给谁"):
+    // 从前引擎按 instruments.groupMap(_.exchange) 发对齐指令, 而执行器的闸门按 exchanges 等,
+    // 后者多出"只在账户级声明里出现过的交易所"。差集里的策略: 引擎不为它发指令、latch 也不
+    // 等它, 于是引擎照常打印"对齐完成"放行, 而策略永久停在闸门后 —— 不抛异常、不打日志。
+    val sub = Subscription(Set(
+      Interest.Keyed(Topics.Bbo, Set(Instrument(Exchange.Binance, "BTCUSDT"))),
+      // 只订 OKX 的希腊值, 不在 OKX 上交易任何标的
+      Interest.Keyed(Topics.Greeks, Set(AccountExchange(AccountId.Live, Exchange.Okx))),
+    ))
+    assertEquals(sub.instruments.map(_.exchange), Set(Exchange.Binance), "OKX 上没有交易标的")
+    assertEquals(
+      sub.alignmentTargets(AccountId.Live),
+      Set(AccountExchange(AccountId.Live, Exchange.Binance), AccountExchange(AccountId.Live, Exchange.Okx)),
+      "OKX 也必须在对齐目标里, 否则闸门等的那条应答永远不来",
+    )

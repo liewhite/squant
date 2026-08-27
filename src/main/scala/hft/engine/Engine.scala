@@ -255,7 +255,9 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
       .toVector
       .distinct
       .sortBy(_.toString)
-      .filterNot(bus.hasSubscriber(MarketSubscription, _))
+      // 只数**定向**订阅者, 与下单/对齐两处一致: 一个 Interest.All(MarketSubscription) 的
+      // 监控插件是旁观者, 把它算作接单者的话, 没装行情插件也能通过校验 —— 策略订个空, 零症状。
+      .filterNot(bus.directSubscriberCount(MarketSubscription, _) > 0)
       .map(exchange => s"行情订阅指令 $exchange 无人接单: 没有装载 $exchange 的行情插件, 策略订了个空")
 
   // ==================== 指令发出 ====================
@@ -275,11 +277,14 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
     * 超时仍然设：一个永久挂起的启动是最难诊断的失效，宁可以明确的错误退出。
     */
   private def syncAccounts(subscription: Subscription, account: AccountId): Unit =
+    // 目标集合与执行器的闸门同源 (见 Subscription.alignmentTargets) —— 从前这里按
+    // instruments 自己算一遍, 少了"账户级声明直接指名的交易所", 那个差集里的策略会永久
+    // 停在闸门后而引擎照常打印"对齐完成"。
+    val targets = subscription.alignmentTargets(account)
+    if targets.isEmpty then return
     val symbolsByExchange = subscription.instruments.groupMap(_.exchange)(_.symbol)
-    if symbolsByExchange.isEmpty then return
 
     val requestId = syncSeq.incrementAndGet()
-    val targets = symbolsByExchange.keySet.map(AccountExchange(account, _))
     val done = CountDownLatch(targets.size)
     // 先订阅再发指令：应答可能在指令发出后立刻回来
     val mailbox = bus.subscribe(targets.map(t => Interest.Keyed(AccountSynced, Set(t))).toSet[Interest])
@@ -289,8 +294,10 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
       }
     }
 
-    symbolsByExchange.foreach { (exchange, symbols) =>
-      bus.publish(Event.local(AccountSync, AccountSyncRequest(account, exchange, requestId, symbols)))
+    targets.foreach { target =>
+      // 没有交易标的的交易所照样要发 (空标的集): 柜台什么都不用对, 但那条应答是闸门在等的
+      val symbols = symbolsByExchange.getOrElse(target.exchange, Set.empty)
+      bus.publish(Event.local(AccountSync, AccountSyncRequest(account, target.exchange, requestId, symbols)))
     }
 
     val completed = done.await(Engine.SyncTimeoutMs, TimeUnit.MILLISECONDS)
