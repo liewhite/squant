@@ -27,12 +27,13 @@ class StateManagerSpec extends munit.FunSuite:
     assertEquals(state.usdtBalance(Exchange.Binance), Some(1000.0))
     assertEquals(state.totalUsdtBalance, 1000.0)
 
-  test("AccountInfo 原子更新 equity 与 notional"):
+  test("AccountInfo 按交易所更新净值"):
+    // 名义价值那个字段已经删掉了: 三家里两家的 REST 填 0, 而主代码里没有人读它 ——
+    // 见 AccountInfo 的说明。要杠杆率由读得到持仓的一方自己算。
     val state = StateManager(List("BTCUSDT"), orderTimeoutMs = 5000)
     assertEquals(state.equity(Exchange.Binance), None)
-    state.apply(Event.at(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Binance, 5000.0, 12000.0), t0))
+    state.apply(Event.at(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Binance, 5000.0), t0))
     assertEquals(state.equity(Exchange.Binance), Some(5000.0))
-    assertEquals(state.accountNotional(Exchange.Binance), Some(12000.0))
     assertEquals(state.totalEquity, 5000.0)
 
   test("symbol 事件路由到对应 SymbolState"):

@@ -118,8 +118,8 @@ class EventBusSpec extends munit.FunSuite:
       Event.at(Topics.Bbo, bboOf(eth), t0),
       Event.at(Topics.Trade, tradeOf(btc), t0),
       Topics.clockAt(t0),
-      Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Binance, 1.0, 0.0)),
-      Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, 1.0, 0.0)),
+      Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Binance, 1.0)),
+      Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, 1.0)),
       Event.local(Topics.Balance, Balance(AccountId.Live, Exchange.Binance, "USDT", 1.0, t0)),
     )
     supervised:

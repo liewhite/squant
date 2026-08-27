@@ -292,13 +292,20 @@ final case class Greeks(
 )
 
 /** 账户信息 (净值 + 总持仓名义价值，原子读取) */
+/** 账户读数 —— **只有净值**。
+  *
+  * 从前还有一个"总持仓名义价值": Binance 的 REST 给真值, OKX 与 Bybit 的 REST 都填 0,
+  * 而 OKX 的私有流给真值 —— 于是那个真值会被柜台每 10 秒一次的 REST 刷回 0。三种口径,
+  * 一个字段, 且主代码里**没有任何人读它**。
+  *
+  * 同 [[Position]] 的均价: 填不出就填 0 的字段比没有这个字段危险。要杠杆率就由读得到
+  * 持仓的一方自己算 (账本有 [[Ledger.notional]], 那是本地算得出的)。
+  */
 final case class AccountInfo(
     account: AccountId,
     exchange: Exchange,
     /** 账户净值 (balance + unrealizedPnl) */
     equity: Double,
-    /** 总持仓名义价值 (用于计算杠杆率) */
-    notional: Double,
 )
 
 /** 交易对元数据 (精度、合约乘数) */

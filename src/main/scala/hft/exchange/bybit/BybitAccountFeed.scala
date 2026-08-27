@@ -148,7 +148,7 @@ final class BybitAccountFeed(
   /** 钱包快照 -> 账户净值 + 各币种现金余额 */
   private def publishWallet(d: WalletData): Unit =
     val ts = nowMs
-    report(AccountReport.EquityChanged(d.totalEquity.asDouble, notional = 0.0, ts))
+    report(AccountReport.EquityChanged(d.totalEquity.asDouble, ts))
     d.coin.foreach(c => report(AccountReport.BalanceChanged(c.coin, c.walletBalance.asDoubleOrZero, ts)))
 
   /** 心跳发送线程：定期入队 ping 帧，维持私有连接 (无成交时也不致空闲被断) */

@@ -123,7 +123,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
     override def cancelOrder(symbol: Symbol, ref: OrderRef) = Right(())
     override def fetchPendingOrders(symbol: Symbol) = Right(Vector.empty)
     override def setLeverage(symbol: Symbol, leverage: Int) = Right(())
-    override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 10_000.0, 0.0))
+    override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 10_000.0))
     override def fetchPositions() = Right(Vector.empty)
 
   test("挂单消失的那一刻, 仓位已经更新 —— 否则策略会重复下单"):

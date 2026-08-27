@@ -90,8 +90,8 @@ class EventSpec extends munit.FunSuite:
     // 此前账户级事件没有路由键因而广播，策略能读到自己没订阅的交易所的净值，
     // 而杠杆闸门正是拿净值算的。
     val sub = Subscription(Set(Interest.Keyed(Topics.AccountInfo, Set(AccountExchange(AccountId.Live, Exchange.Binance)))))
-    assert(sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Binance, 1.0, 0.0))))
-    assert(!sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, 1.0, 0.0))))
+    assert(sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Binance, 1.0))))
+    assert(!sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, 1.0))))
 
   test("对齐目标含账户级声明指名的交易所 —— 闸门等谁, 引擎就得发给谁"):
     // 从前引擎按 instruments.groupMap(_.exchange) 发对齐指令, 而执行器的闸门按 exchanges 等,

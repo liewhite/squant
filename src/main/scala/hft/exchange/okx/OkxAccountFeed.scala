@@ -127,7 +127,7 @@ final class OkxAccountFeed(
 
   private def publishAccount(d: AccountData): Unit =
     val ts = d.uTime.toLongOption.getOrElse(nowMs)
-    report(AccountReport.EquityChanged(d.totalEq.asDouble, d.notionalUsd.asDouble, ts))
+    report(AccountReport.EquityChanged(d.totalEq.asDouble, ts))
     // 各币种现金余额：供 StateManager 修正 greeks delta 的现货敞口
     d.details.foreach(detail => report(AccountReport.BalanceChanged(detail.ccy, detail.cashBal.asDouble, ts)))
 

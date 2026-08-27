@@ -70,7 +70,7 @@ enum AccountReport:
   case BalanceChanged(currency: String, amount: Double, timestamp: Timestamp)
 
   /** 账户净值与总名义价值 */
-  case EquityChanged(equity: Double, notional: Double, timestamp: Timestamp)
+  case EquityChanged(equity: Double, timestamp: Timestamp)
 
   /** 账户级期权希腊值 (按币种聚合) */
   case GreeksChanged(ccy: String, delta: Double, gamma: Double, theta: Double, vega: Double, timestamp: Timestamp)

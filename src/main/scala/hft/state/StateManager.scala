@@ -46,9 +46,7 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long) extend
 
   def totalEquity: Double = accountInfos.values.map(_.equity).sum
 
-  def accountNotional(exchange: Exchange): Option[Double] = accountInfos.get(exchange).map(_.notional)
 
-  def totalAccountNotional: Double = accountInfos.values.map(_.notional).sum
 
   /** 账户级期权希腊字母 (含现货修正)。
     *

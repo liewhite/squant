@@ -22,7 +22,7 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Ledger.Holdin
     * 迟早有一处漏跟上口径变化 (比如将来净值要扣未结算资金费)。
     */
   def accountInfo(exchange: Exchange, markOf: Symbol => Price): AccountInfo =
-    AccountInfo(account, exchange, equity = equity(markOf), notional = notional(markOf))
+    AccountInfo(account, exchange, equity = equity(markOf))
 
   /** 应用一笔成交，返回新账本：
     *   - 新开 / 同向加仓：加权平均成本

@@ -100,8 +100,8 @@ final class RestTradingGateway(
     case AccountReport.BalanceChanged(currency, amount, ts) =>
       Vector(Event.stamped(Topics.Balance, Balance(account, exchange, currency, amount, ts), ts, now))
 
-    case AccountReport.EquityChanged(equity, notional, ts) =>
-      Vector(Event.stamped(Topics.AccountInfo, AccountInfo(account, exchange, equity, notional), ts, now))
+    case AccountReport.EquityChanged(equity, ts) =>
+      Vector(Event.stamped(Topics.AccountInfo, AccountInfo(account, exchange, equity), ts, now))
 
     case AccountReport.GreeksChanged(ccy, delta, gamma, theta, vega, ts) =>
       Vector(Event.stamped(Topics.Greeks, Greeks(account, exchange, ccy, delta, gamma, theta, vega, ts), ts, now))

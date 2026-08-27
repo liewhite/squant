@@ -56,8 +56,6 @@ trait StateView:
   def accountInfo(exchange: Exchange): Option[AccountInfo]
   def equity(exchange: Exchange): Option[Double]
   def totalEquity: Double
-  def accountNotional(exchange: Exchange): Option[Double]
-  def totalAccountNotional: Double
 
   /** 账户级期权希腊字母 (含现货修正)。greeks 与该币种余额均到达才返回 */
   def greeks(exchange: Exchange, ccy: String): Option[Greeks]

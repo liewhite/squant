@@ -38,11 +38,11 @@ class StrategyRunnerSpec extends munit.FunSuite:
 
   test("补齐所涉交易所的账户级读数, 但不越界到别的交易所"):
     val sub = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
-    assert(sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, ex, 1.0, 0.0))))
+    assert(sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, ex, 1.0))))
     assert(sub.accepts(Event.local(Topics.Balance, Balance(AccountId.Live, ex, "USDT", 1.0, 0L))))
     assert(sub.accepts(Event.local(Topics.Greeks, Greeks(AccountId.Live, ex, "BTC", 0.0, 0.0, 0.0, 0.0, 0L))))
     assert(
-      !sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, 1.0, 0.0))),
+      !sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, Exchange.Okx, 1.0))),
       "未订阅交易所的净值不该到达策略 —— 杠杆闸门就是拿它算的",
     )
 
@@ -57,7 +57,7 @@ class StrategyRunnerSpec extends munit.FunSuite:
   test("无任何声明的策略只收时钟"):
     val sub = subOf(Set.empty)
     assert(sub.accepts(Topics.clockAt(0L)))
-    assert(!sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, ex, 1.0, 0.0))))
+    assert(!sub.accepts(Event.local(Topics.AccountInfo, AccountInfo(AccountId.Live, ex, 1.0))))
 
   test("行情订阅由同一份声明派生 —— 一处声明, 两处派生"):
     val sub = subOf(Set(

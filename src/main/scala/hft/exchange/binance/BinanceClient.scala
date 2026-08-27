@@ -207,7 +207,6 @@ final class BinanceClient private[binance] (
         account = AccountId.Live,
         exchange,
         equity = account.totalMarginBalance.asDouble,
-        notional = account.positions.map(p => math.abs(p.notional.asDouble)).sum,
       )
     }
 

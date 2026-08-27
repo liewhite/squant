@@ -278,7 +278,7 @@ final class OkxClient private[okx] (
       ensureOk(r.code, r.msg).flatMap { _ =>
         r.data.headOption
           .toRight(ExchangeError.Other("OKX no balance data"))
-          .map(b => AccountInfo(AccountId.Live, exchange, equity = b.totalEq.asDouble, notional = 0.0))
+          .map(b => AccountInfo(AccountId.Live, exchange, equity = b.totalEq.asDouble))
       }
     }
 
