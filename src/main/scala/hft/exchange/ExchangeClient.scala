@@ -58,11 +58,22 @@ trait TradingClient extends ExchangeClient:
   /** 获取账户信息 (净值 + 总持仓名义价值) */
   def fetchAccountInfo(): Either[ExchangeError, AccountInfo]
 
-  /** 启动期查询所有 symbol 的持仓。
+  /** 启动对齐用的持仓快照 —— **必须 REST 直查, 不允许返回空让私有流去补**。
     *
-    * 用于在 executor 注册之后、市场订阅之前同步初始状态，避免策略基于陈旧/缺失的
-    * position 做出决策。没有默认实现——每个交易所都必须显式表态：
-    * REST 直查的实际请求持仓接口；走私有 WS snapshot 的返回 Right(Vector.empty)
-    * 并注释说明数据来源，避免"沉默漏推"
+    * 柜台拿它给账本定初值 (见 [[hft.exchange.PositionBook.align]]), 而账本是总线上仓位的
+    * 唯一来源。返回空就等于告诉柜台"这个账户是平的"。
+    *
+    * 曾经允许"走私有 WS snapshot 的返回 `Right(Vector.empty)` 并注释说明数据来源",
+    * 那条约定在**仓位归柜台算**之后失效了, 两道独立的原因:
+    *
+    *   1. 私有流推来的仓位走 [[AccountReport.PositionReported]], 柜台只把它当**交易所第三方
+    *      读数**记进对账, 不进账本。
+    *   2. 柜台的 `connect()` 在 onStart 里跑, 早于对齐指令 —— snapshot 到达时柜台还不知道
+    *      自己管哪些标的, 报告在入口就被分流掉了。
+    *
+    * 照旧约定实现的表现是: 账户带仓重启 -> 策略收到一串零仓 -> 按空仓决策, 且只有一句
+    * 措辞含糊的对账告警。**没有默认实现**是有意的: 每家都得显式回答这个问题。
+    *
+    * 拉不到就返回 `Left` 让启动失败 —— 账户状态没对上就开始交易, 比不启动危险得多。
     */
   def fetchPositions(): Either[ExchangeError, Vector[Position]]

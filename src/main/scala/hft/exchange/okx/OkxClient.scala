@@ -283,12 +283,43 @@ final class OkxClient private[okx] (
       }
     }
 
-  /** OKX 初始持仓由私有 WS 登录后下发 snapshot，REST 不查询：显式返回空表态 (非沉默漏推) */
-
-
-  /** OKX 初始持仓由私有 WS 登录后下发 snapshot，REST 不查询：显式返回空表态 (非沉默漏推) */
+  /** GET /api/v5/account/positions?instType=SWAP —— **REST 直查**。
+    *
+    * 从前这里返回空, 理由是"初始持仓由私有 WS 登录后下发 snapshot"。**那条理由在仓位归柜台
+    * 算之后已经不成立**, 有两道各自独立的原因:
+    *
+    *   1. WS 推来的仓位走 [[AccountReport.PositionReported]], 而柜台只把它当作**交易所第三方
+    *      读数**记进对账 (见 [[hft.exchange.RestTradingGateway]]) —— 不进账本、不发总线。
+    *   2. 就算它进账本也赶不上: 柜台的 `connect()` 在 onStart 里跑, 必然早于对齐指令,
+    *      那条 snapshot 到达时柜台还不知道自己管哪些标的, 在入口就被分流掉了。
+    *
+    * 于是账户带着仓位重启 -> 账本从零开始 -> 对齐给策略推一串零仓 -> 策略按空仓决策,
+    * 而三方对账只会报一句"账本与交易所对不上", 措辞还会把人引向"对齐竞态"。
+    *
+    * **对齐要用 REST**: 它查的是快照, 不参与推送的流竞争。这与对账用推送 (便宜、及时) 是
+    * 两件事 —— 检测用推送, 修复用 REST。
+    *
+    * 没有合约规格的品种跳过 (非配置 quote 的、币本位的 SWAP): 张->币换不了, 而柜台只会问
+    * 它对齐的那几个标的。
+    */
   override def fetchPositions(): Either[ExchangeError, Vector[Position]] =
-    Right(Vector.empty)
+    signedRequest[PositionsResp](Method.GET, "/api/v5/account/positions?instType=SWAP").flatMap { resp =>
+      ensureOk(resp.code, resp.msg).map { _ =>
+        resp.data.iterator.flatMap { d =>
+          for
+            sym <- fromOkx(d.instId)
+            meta <- symbolMetas.get(sym)
+          yield Position(
+            account = AccountId.Live,
+            exchange = Exchange.Okx,
+            symbol = sym,
+            size = meta.toCoin(Contracts(d.pos.asDouble)), // 张 -> 币; OKX 的 pos 正多负空
+            entryPrice = Price(d.avgPx.asDoubleOrZero),    // 空仓时是空串
+            unrealizedPnl = d.upl.asDoubleOrZero,
+          )
+        }.toVector
+      }
+    }
 
   // ==================== 账户级希腊字母 (供 Greeks 轮询使用) ====================
 

@@ -153,6 +153,10 @@ private[okx] object OkxCodec:
   )
   final case class PendingResp(code: String = "", msg: String = "", data: List[PendingData] = Nil)
 
+  /** GET /api/v5/account/positions 的响应。行的形状与私有 WS positions 频道一致,
+    * 故复用 [[PositionData]] —— 同一个事实两处解析, 迟早会有一处漏掉某个字段。 */
+  final case class PositionsResp(code: String = "", msg: String = "", data: List[PositionData] = Nil)
+
   /** 仅含 code/msg 的简单响应 (set-leverage 等) */
   final case class SimpleResp(code: String = "", msg: String = "")
 
@@ -173,6 +177,7 @@ private[okx] object OkxCodec:
   given JsonValueCodec[PlaceOrderResp] = JsonCodecMaker.make
   given JsonValueCodec[CancelResp] = JsonCodecMaker.make
   given JsonValueCodec[PendingResp] = JsonCodecMaker.make
+  given JsonValueCodec[PositionsResp] = JsonCodecMaker.make
   given JsonValueCodec[SimpleResp] = JsonCodecMaker.make
 
   /** API 返回的数字字符串。非法即抛错终止——静默归零会造成无法察觉的状态错误 */
