@@ -1,163 +1,15 @@
 package hft.actor
 
 import hft.domain.nowMs
-import hft.event.{AnyEvent, CommandHandler, CommandTopic, EventBus, Interest}
-import hft.kernel.{Capability, CapabilityProvider, Cardinality}
+import hft.event.{AnyEvent, CommandTopic, EventBus}
 import org.slf4j.LoggerFactory
 import ox.uninterruptible
 
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
-import java.util.concurrent.{ConcurrentLinkedQueue, CopyOnWriteArrayList, CountDownLatch, Executors, ScheduledExecutorService, ScheduledFuture, TimeUnit}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
+import java.util.concurrent.{CopyOnWriteArrayList, CountDownLatch, Executors, ScheduledExecutorService, ScheduledFuture, TimeUnit}
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
-
-/** 组件生命周期状态。状态可从 [[ActorHandle.state]] 读取，故失败不再只存在于日志里。 */
-enum ActorState:
-  case Wired, Preparing, Prepared, Starting, Running, Stopping, Stopped, Failed, Quarantined
-
-  def isTerminal: Boolean = this == Stopped || this == Failed || this == Quarantined
-
-/** 组件作用域内的一条受管任务。取消与等待由 [[ActorSystem.stop]] 统一执行。 */
-final class ManagedTask private[actor] (private val thread: Thread):
-  def isAlive: Boolean = thread.isAlive
-  private[actor] def cancel(): Unit = thread.interrupt()
-  private[actor] def await(timeoutMs: Long): Boolean =
-    thread.join(timeoutMs)
-    !thread.isAlive
-  private[actor] def diagnostic(owner: String, timeoutMs: Long): String =
-    s"组件 $owner 的子任务 ${thread.getName} 未在 ${timeoutMs}ms 内停止\n" +
-      thread.getStackTrace.mkString("    at ", "\n    at ", "")
-
-private[actor] final class TreeStopAttempt:
-  val failure = AtomicReference[Throwable](null)
-  val finished = CountDownLatch(1)
-
-private[actor] final class ComponentQuarantinedException(message: String) extends IllegalStateException(message)
-private[actor] final class ComponentInterruptedException(message: String, cause: InterruptedException)
-    extends IllegalStateException(message, cause)
-
-/** 一个已启动 actor 的句柄：停它 (连同它的整棵子树) 的唯一入口。
-  *
-  * 不另设 id 与登记表 —— 句柄本身就是身份，父子关系挂在句柄上，于是"谁 spawn 的谁持有、
-  * 谁持有谁负责等"是结构事实，不需要一张全局表来维护。
-  */
-final class ActorHandle private[actor] (
-    private[actor] val owner: ActorSystem,
-    private[actor] val actor: Actor,
-    val name: String,
-    /** 本 actor 声明的订阅 —— 停它之前, 监督者据此知道它接的是哪些信道。
-      * 挂在句柄上而不是另建一张登记表: 句柄本身就是身份, 表要维护、会不同步。 */
-    val interests: Set[Interest],
-    /** 本组件实际处理的命令键；与观察性订阅分开。 */
-    val commandHandlers: Set[CommandHandler],
-    /** 命令处理能力与普通组件能力归一后的提供声明。 */
-    val capabilities: Set[CapabilityProvider],
-    /** 本组件的硬依赖；动态移除提供者时据此阻止静默失联。 */
-    val requirements: Set[Requirement],
-    private[actor] val mailbox: EventBus.Mailbox,
-    /** 叫醒自驱动循环的定时等待 (事件循环由 mailbox 的关闭叫醒，见 [[ActorSystem.stop]]) */
-    private[actor] val stopRequested: CountDownLatch,
-    /** actor 的 onStop 已跑完 */
-    private[actor] val finished: CountDownLatch,
-    /** 子组件、资源与任务都已回收，句柄已经到达最终状态 */
-    private[actor] val stopped: CountDownLatch,
-):
-  private[actor] val children = CopyOnWriteArrayList[ActorHandle]()
-  private[actor] val tasks = CopyOnWriteArrayList[ManagedTask]()
-  private[actor] val schedules = CopyOnWriteArrayList[ScheduledFuture[?]]()
-  private[actor] val cleanups = CopyOnWriteArrayList[() => Unit]()
-  private[actor] val taskCleanupFailures = CopyOnWriteArrayList[Throwable]()
-  private[actor] val pendingPublications = ConcurrentLinkedQueue[AnyEvent]()
-  private[actor] val stateRef = AtomicReference(ActorState.Wired)
-  private[actor] val terminalFailure = AtomicReference[Throwable](null)
-  private[actor] val prepareEntered = AtomicBoolean(false)
-  private[actor] val startCompleted = AtomicBoolean(false)
-  private[actor] val loopStarted = AtomicBoolean(false)
-  private[actor] val stopHookRun = AtomicBoolean(false)
-  private[actor] val stopStarted = AtomicBoolean(false)
-  private[actor] val treeStopAttempt = AtomicReference[TreeStopAttempt](null)
-  private[actor] val mailboxClosed = AtomicBoolean(false)
-  private[actor] val startThread = AtomicReference[Thread](null)
-  private[actor] val prepareThread = AtomicReference[Thread](null)
-  private[actor] val loopThread = AtomicReference[Thread](null)
-  private[actor] val lastMailboxWarningNanos = AtomicLong(0L)
-  private[actor] val runGate = CountDownLatch(1)
-  private[actor] val loopCommitted = AtomicBoolean(false)
-  private[actor] val lifecycleLock = new Object
-
-  def state: ActorState = stateRef.get
-  def managedTasks: Int = tasks.size
-  def managedResources: Int = cleanups.size
-  def mailboxHealth: EventBus.MailboxHealth = mailbox.health
-  override def toString: String = s"actor($name)"
-
-/** actor 在运行期能对系统做的事。
-  *
-  * 能力面刻意收窄到组件运行真正需要的几件事：消息、子组件、受管任务/资源和可中断等待。
-  * actor 拿不到 [[ActorSystem.stop]] —— 停谁、何时停是**监督者**的决定，不是被监督者的。
-  */
-final class ActorContext private[actor] (
-    private[actor] val handle: ActorHandle,
-    private val system: ActorSystem,
-):
-  def name: String = handle.name
-
-  /** 发布一条事件到总线。prepare 提交前不允许发布命令。 */
-  def publish(event: AnyEvent): Unit = system.publishFrom(handle, event)
-
-  /** 起一个子 actor。父停机时会先把它 (及它的子孙) 停完并等到收尾结束 */
-  def spawn(child: Actor): ActorHandle = system.spawnUnder(Some(handle), child)
-
-  /** 创建一个使用独立总线、但生命周期和失败都归本组件所有的子系统。 */
-  def childSystem(childBus: EventBus): ActorSystem = system.childSystem(handle, childBus)
-
-  /** 在本 actor 的作用域内 fork 一条线程 (常驻循环, 或一次性的并发调用)。
-    *
-    * 抛出的异常**不再直接炸掉作用域**，而是上报给系统触发[[ActorSystem.awaitShutdown 有序停机]]：
-    * 私有流断线、REST 续期失败这类"子任务失败"要能让全体组件各自跑完 onStop 再退，
-    * 而直接取消作用域会把 onStop 一并跳过 —— 那批撤单指令就漏发了。
-    *
-    * `stop` 会发送停止信号、interrupt 任务并限时等待。协作循环应使用
-    * [[sleepUnlessStopped]]；阻塞 IO 还应通过 [[manage]] 登记连接关闭动作来保证能被唤醒。
-    */
-  def fork(body: => Unit): ManagedTask = system.forkManaged(handle)(body)
-
-  /** 把一个外部资源登记到本组件作用域，停止或启动回滚时按登记的逆序释放。
-    *
-    * `release` 必须幂等；它在 [[Actor.onStop]] 之后、等待受管任务退出之前执行，因此停止钩子
-    * 仍可使用连接发最后一批请求，而资源释放又能叫醒阻塞在 IO 上的受管任务。
-    */
-  def manage[A](resource: A)(release: A => Unit): A = system.manage(handle, resource)(release)
-
-  /** 延迟 `ms` 毫秒后把一条事件发到总线。
-    *
-    * 用于建模"过一段时间才发生"的事 —— 虚拟柜台的下单在途、回报回传都靠它。
-    * 定时器**只负责把发布推迟到点，不触碰任何状态**：事件到点后经总线进入 actor 的邮箱，
-    * 仍由 actor 线程串行处理。因此柜台的状态依旧只有一个写者。
-    *
-    * actor 停止后已排期的事件不再发布 —— 停掉的柜台不该再吐回报。
-    */
-  def scheduleEvent(ms: Long, event: AnyEvent): Unit =
-    system.schedule(handle, ms) { system.publishFrom(handle, event) }
-
-  /** 给自己发一条消息 —— 直接进本 actor 的邮箱，**不经总线**。
-    *
-    * 用途只有一个：把**外部线程**的输入串行化到 actor 线程。柜台的私有推送在 WS 连接
-    * 线程上解析出来，而账本的写者必须只有一个；`tell` 让它排进邮箱，与总线来的事件
-    * 一起被同一个线程按序消费。
-    *
-    * 与 [[publish]] 的区别是**可见性**：publish 的东西是给别人看的，tell 的东西是自己的
-    * 内部事务。一件纯内部的事没有理由在总线上流动。
-    */
-  def tell(event: AnyEvent): Unit = handle.mailbox.offer(event)
-
-  /** 睡 `ms` 毫秒，除非期间收到了停止信号。返回 true 表示该收工了。
-    *
-    * 自驱动循环用它代替裸 `Thread.sleep`，就能被协作式地叫停：
-    * {{{ while !ctx.sleepUnlessStopped(1000) do ctx.publish(...) }}}
-    */
-  def sleepUnlessStopped(ms: Long): Boolean = handle.stopRequested.await(ms, TimeUnit.MILLISECONDS)
 
 /** actor 的装配与生命周期树。
   *
@@ -198,16 +50,6 @@ final class ActorSystem(
     private val componentStopTimeoutMs: Long = ActorSystem.ComponentStopTimeoutMs,
 ) extends AutoCloseable:
   require(componentStopTimeoutMs > 0, "componentStopTimeoutMs 必须大于 0")
-  /** 一次装配只读取一次插件声明；验证、接线、运行和停机共享这份事实。 */
-  private final case class ActorSpec(
-      actor: Actor,
-      name: String,
-      interests: Set[Interest],
-      commandHandlers: Set[CommandHandler],
-      capabilities: Set[CapabilityProvider],
-      requirements: Set[Requirement],
-  )
-
   private val logger = LoggerFactory.getLogger(classOf[ActorSystem])
   private val roots = CopyOnWriteArrayList[ActorHandle]()
   private val accepting = AtomicBoolean(true)
@@ -237,30 +79,7 @@ final class ActorSystem(
       catch case NonFatal(e) => logger.error(s"有序停机失败: ${e.getMessage}", e)
     }
 
-  /** 无界邮箱不丢消息，但积压必须可见；核心统一巡检，插件无需各写一套。 */
-  Thread
-    .ofVirtual()
-    .name("actor-system-health")
-    .start { () =>
-      while !allStopped.await(ActorSystem.HealthCheckIntervalMs, TimeUnit.MILLISECONDS) do
-        val now = System.nanoTime()
-        allHandles.foreach { handle =>
-          val health = handle.mailboxHealth
-          val unhealthy =
-            health.queued >= ActorSystem.MailboxWarnDepth ||
-              (health.queued > 0 && health.oldestEventAgeMs >= ActorSystem.MailboxWarnOldestMs) ||
-              health.inFlightAgeMs >= ActorSystem.MailboxWarnOldestMs
-          val last = handle.lastMailboxWarningNanos.get
-          if unhealthy && now - last >= ActorSystem.HealthWarningIntervalNanos &&
-              handle.lastMailboxWarningNanos.compareAndSet(last, now) then
-            logger.warn(
-              s"组件 ${handle.name} 邮箱滞后: queued=${health.queued} highWater=${health.highWaterMark} " +
-                s"oldestMs=${health.oldestEventAgeMs} inFlightMs=${health.inFlightAgeMs} " +
-                s"lastProcessNs=${health.lastProcessingNanos} " +
-                s"maxProcessNs=${health.maxProcessingNanos} state=${handle.state}"
-            )
-        }
-    }
+  MailboxMonitor.start(() => allHandles, allStopped, logger)
 
   /** 延迟发布用的定时器。
     *
@@ -413,7 +232,7 @@ final class ActorSystem(
 
   private def spawnBatch(parent: Option[ActorHandle], actors: Vector[Actor]): Vector[ActorHandle] =
     if actors.isEmpty then return Vector.empty
-    val specs = actors.map(snapshot)
+    val specs = actors.map(ComponentGraph.snapshot)
     val wired = scala.collection.mutable.ArrayBuffer.empty[ActorHandle]
     var wiringFailure: Throwable = null
     var joinsActiveTransaction = false
@@ -426,10 +245,10 @@ final class ActorSystem(
           if (p.state != ActorState.Preparing && p.state != ActorState.Running) || stoppingHandles.contains(p) then
             throw IllegalStateException(s"父组件 ${p.name} 已处于 ${p.state}, 不能再创建子组件")
         }
-        validatePlan(specs)
+        ComponentGraph.validateAddition(specs, allHandles, stoppingHandles.toSet)
         specs.foreach(spec => wired += wire(parent, spec))
         // 所有权顺序与显式依赖顺序必须可同时满足，否则 onStop 不可能既守父子契约又守依赖契约。
-        plannedStopOrder(allHandles.toSet)
+        ComponentGraph.stopOrder(allHandles.toSet, allHandles)
       catch
         case NonFatal(e) => wiringFailure = e
       assemblingHandles ++= wired
@@ -471,49 +290,11 @@ final class ActorSystem(
       assemblingHandles.exists(root => descendants(root).contains(handle))
     while assemblingHandles.nonEmpty && !parent.exists(belongsToActiveTree) do assemblyLock.wait()
 
-  /** 在任何订阅或启动副作用之前校验整批装配。 */
-  private def validatePlan(specs: Vector[ActorSpec]): Unit =
-    val plannedCounts = scala.collection.mutable.HashMap.empty[(Capability[?], Any), Int]
-    specs.foreach { spec =>
-      spec.capabilities.foreach { provider =>
-        val key = (provider.capability, provider.key)
-        plannedCounts.update(key, plannedCounts.getOrElse(key, 0) + 1)
-      }
-    }
-
-    plannedCounts.foreach { case ((capability, key), added) =>
-      val total = effectiveProviderCount(capability, key) + added
-      if capability.cardinality == Cardinality.ExactlyOne && total != 1 then
-        throw IllegalStateException(
-          s"能力 $capability@$key 要求恰好一个提供者, 已有提供者或本批重复提供, 装配后将有 $total 个"
-        )
-    }
-
-    val missing = specs.flatMap { spec =>
-      spec.requirements.flatMap { req =>
-        val count = effectiveProviderCount(req.capability, req.key) + plannedCounts.getOrElse((req.capability, req.key), 0)
-        Option.when(!req.capability.cardinality.accepts(count)) {
-          val detail = if req.description.isEmpty then "" else s" (${req.description})"
-          s"组件 ${spec.name}: ${req.capability}@${req.key} 要求${req.capability.cardinality.explain}提供者, 实际 $count 个$detail"
-        }
-      }
-    }
-    if missing.nonEmpty then
-      throw IllegalStateException("硬依赖未满足:\n  " + missing.sorted.mkString("\n  "))
-
   /** 校验一组不隶属于常驻组件的即时依赖（例如一次 watch 请求）。不产生任何副作用。 */
   def validate(requirements: Set[Requirement], owner: String): Unit = assemblyLock.synchronized {
     awaitAssemblyTurn(None)
     if !accepting.get then throw IllegalStateException(s"ActorSystem 已进入停机阶段，拒绝 $owner")
-    val missing = requirements.flatMap { req =>
-      val count = effectiveProviderCount(req.capability, req.key)
-      Option.when(!req.capability.cardinality.accepts(count)) {
-        val detail = if req.description.isEmpty then "" else s" (${req.description})"
-        s"${req.capability}@${req.key} 要求${req.capability.cardinality.explain}提供者, 实际 $count 个$detail"
-      }
-    }
-    if missing.nonEmpty then
-      throw IllegalStateException(s"$owner 的硬依赖未满足:\n  " + missing.toVector.sorted.mkString("\n  "))
+    ComponentGraph.validateRequirements(requirements, owner, allHandles, stoppingHandles.toSet)
   }
 
   private def wire(parent: Option[ActorHandle], spec: ActorSpec): ActorHandle =
@@ -535,16 +316,6 @@ final class ActorSystem(
       case Some(p) => p.children.add(handle): Unit
       case None    => roots.add(handle): Unit
     handle
-
-  private def snapshot(actor: Actor): ActorSpec =
-    val name = actor.name
-    val interests = actor.interests
-    val commandHandlers = actor.commandHandlers
-    val capabilities = actor.capabilities ++ commandHandlers.map { handler =>
-      CapabilityProvider.erased(handler.topic.capability, handler.key)
-    }
-    val requirements = actor.requirements
-    ActorSpec(actor, name, interests, commandHandlers, capabilities, requirements)
 
   private def prepareHook(handle: ActorHandle): Unit =
     handle.stateRef.set(ActorState.Preparing)
@@ -681,7 +452,7 @@ final class ActorSystem(
       val (removing, newlyReserved) = assemblyLock.synchronized {
         while assemblingHandles.nonEmpty do assemblyLock.wait()
         val removing = descendants(handle).toSet
-        validateRemoval(removing)
+        ComponentGraph.validateRemoval(removing, allHandles, stoppingHandles.toSet)
         val fresh = removing -- stoppingHandles
         stoppingHandles ++= fresh
         reserved = true
@@ -704,80 +475,17 @@ final class ActorSystem(
         throw e
     finally attempt.finished.countDown()
 
-  /** 若移除这批提供者会让仍存活组件丢失硬依赖，拒绝本次动态停止。全系统停机不走此校验。 */
-  private def validateRemoval(removing: Set[ActorHandle]): Unit =
-    val unavailable = stoppingHandles.toSet ++ removing
-    val availableProviders = allHandles.filterNot(unavailable)
-    // 已进入停止、但 onStop 尚未完成的组件仍保有依赖；否则并发停 provider 会截断它的收尾命令。
-    val liveDependents = allHandles.filter { handle =>
-      !removing.contains(handle) && (handle.finished.getCount > 0 || handle.state == ActorState.Quarantined)
-    }
-    val missing = liveDependents.flatMap { dependent =>
-      dependent.requirements.flatMap { req =>
-        val after = availableProviders.count(candidate => provides(candidate, req.capability, req.key))
-        Option.when(!req.capability.cardinality.accepts(after))(
-          s"${dependent.name} 依赖 ${req.capability}@${req.key} (${req.capability.cardinality.explain}), 移除后剩 $after 个提供者"
-        )
-      }
-    }
-    if missing.nonEmpty then
-      throw IllegalStateException("拒绝停止组件，仍存活的组件会丢失硬依赖:\n  " + missing.mkString("\n  "))
-
-  private def provides(handle: ActorHandle, capability: Capability[?], key: Any): Boolean =
-    handle.capabilities.exists(provider => (provider.capability eq capability) && provider.key == key)
-
-  /** 只在 assemblyLock 内调用：正在卸载且尚未退订的处理者不再能满足新依赖。 */
-  private def effectiveProviderCount(capability: Capability[?], key: Any): Int =
-    allHandles.count(handle => !stoppingHandles.contains(handle) && provides(handle, capability, key))
-
   private def allHandles: Vector[ActorHandle] = roots.asScala.toVector.flatMap(descendants)
 
   private def descendants(handle: ActorHandle): Vector[ActorHandle] =
-    handle +: handle.children.asScala.toVector.flatMap(descendants)
-
-  /** 依赖方先于提供方、子组件先于父组件；其余节点保持逆装配序。 */
-  private def plannedStopOrder(handles: Set[ActorHandle]): Vector[ActorHandle] =
-    if handles.isEmpty then return Vector.empty
-    val assemblyOrder = allHandles
-    val rank = assemblyOrder.zipWithIndex.toMap.withDefaultValue(-1)
-    val outgoing = handles.map(_ -> scala.collection.mutable.HashSet.empty[ActorHandle]).toMap
-    val indegree = scala.collection.mutable.HashMap.from(handles.map(_ -> 0))
-
-    def before(first: ActorHandle, second: ActorHandle): Unit =
-      if first != second && handles.contains(first) && handles.contains(second) && outgoing(first).add(second) then
-        indegree.update(second, indegree(second) + 1)
-
-    handles.foreach { parent => parent.children.asScala.foreach(child => before(child, parent)) }
-    handles.foreach { dependent =>
-      dependent.requirements.foreach { req =>
-        handles.iterator
-          .filter(provider => provides(provider, req.capability, req.key))
-          .foreach(provider => before(dependent, provider))
-      }
-    }
-
-    val ready = scala.collection.mutable.ArrayBuffer.from(handles.filter(indegree(_) == 0))
-    val result = scala.collection.mutable.ArrayBuffer.empty[ActorHandle]
-    while ready.nonEmpty do
-      val nextIndex = ready.indices.maxBy(i => rank(ready(i)))
-      val next = ready.remove(nextIndex)
-      result += next
-      outgoing(next).foreach { successor =>
-        val degree = indegree(successor) - 1
-        indegree.update(successor, degree)
-        if degree == 0 then ready += successor
-      }
-    if result.size != handles.size then
-      val cycle = handles.diff(result.toSet).toVector.sortBy(_.name).map(_.name).mkString(", ")
-      throw IllegalStateException(s"组件依赖与生命周期所有权形成停机环: $cycle")
-    result.toVector
+    ComponentGraph.descendants(handle)
 
   /** 按停机计划尽力停止每个组件。普通清理失败不截断；隔离意味着进程必须立即退出，
     * 继续拆提供者只会让仍在运行的线程访问已释放依赖，因此到此为止。 */
   private def stopHandles(handles: Set[ActorHandle]): Vector[Throwable] =
     val assemblyRank = allHandles.zipWithIndex.toMap.withDefaultValue(-1)
     val (order, planningFailures) =
-      try plannedStopOrder(handles) -> Vector.empty[Throwable]
+      try ComponentGraph.stopOrder(handles, allHandles) -> Vector.empty[Throwable]
       catch
         case NonFatal(e) =>
           // 环本身意味着不存在满足全部契约的顺序，但仍必须摘掉邮箱、任务和资源。
@@ -984,7 +692,7 @@ final class ActorSystem(
       val order = assemblyLock.synchronized {
         accepting.set(false)
         while assemblingHandles.nonEmpty do assemblyLock.wait()
-        plannedStopOrder(allHandles.toSet)
+        ComponentGraph.stopOrder(allHandles.toSet, allHandles)
       }
       logger.warn(s"有序停机: ${order.size} 个组件, 拓扑顺序 ${order.map(_.name).mkString(" -> ")}")
       val failures = stopHandles(order.toSet).filterNot(_ eq failure.get)
@@ -1051,4 +759,4 @@ object ActorSystem:
   val HealthCheckIntervalMs: Long = 1_000
   val MailboxWarnDepth: Long = 10_000
   val MailboxWarnOldestMs: Long = 5_000
-  private val HealthWarningIntervalNanos: Long = 30_000_000_000L
+  private[actor] val HealthWarningIntervalNanos: Long = 30_000_000_000L
