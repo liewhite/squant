@@ -73,4 +73,5 @@ import sttp.client4.DefaultSyncBackend
         )
     }
 
-    Thread.sleep(Long.MaxValue)
+    // 阻塞到停机: 中断信号或组件失败都会唤醒它, 停完全部组件 (onStop 逐个跑到) 核心最后退出
+    engine.awaitShutdown()

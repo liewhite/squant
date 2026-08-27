@@ -121,6 +121,19 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
           " —— 仍在发这些指令的组件会静默失效 (指令发出去没有下文), 按需一并停掉或补装插件"
       )
 
+  /** 请求停机 —— 幂等。风控插件、运维接口都可以调它 */
+  def requestShutdown(reason: String): Unit = system.requestShutdown(reason)
+
+  /** **启动器的最后一行**：阻塞到有人请求停机，按逆装配序停完全部组件，核心最后退出。
+    *
+    * 期间接管中断信号；组件失败 (私有流断线一类) 同样走这条路 —— 先停完、每个 `onStop`
+    * 都跑到 (策略因此撤得掉它挂在交易所的单)，再把原异常抛出使进程非零退出。
+    *
+    * 从前这里是 `Thread.sleep(Long.MaxValue)`：Ctrl+C 直接杀掉 JVM，`onStop` 一律不跑，
+    * 挂单原样留在交易所无人跟踪 —— 那条撤单机制在实盘路径上从未执行过。
+    */
+  def awaitShutdown(): Unit = system.awaitShutdown()
+
   def addStrategy(strategy: Strategy, account: AccountId): ActorHandle = addStrategies(Vector(strategy), account).head
 
   /** 撤下一个策略实例：先撤掉它挂在交易所的单 (见 [[Executor.onStop]])，再退订、摘除，

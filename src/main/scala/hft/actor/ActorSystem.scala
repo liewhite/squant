@@ -5,8 +5,10 @@ import hft.event.{AnyEvent, EventBus, Interest}
 import org.slf4j.LoggerFactory
 import ox.{Ox, forkDiscard, uninterruptible}
 
+import java.util.concurrent.atomic.AtomicReference
 import java.util.concurrent.{CopyOnWriteArrayList, CountDownLatch, Executors, ScheduledExecutorService, TimeUnit}
 import scala.jdk.CollectionConverters.*
+import scala.util.control.NonFatal
 
 /** 一个已启动 actor 的句柄：停它 (连同它的整棵子树) 的唯一入口。
   *
@@ -46,11 +48,20 @@ final class ActorContext private[actor] (
 
   /** 在本 actor 的作用域内 fork 一条线程 (常驻循环, 或一次性的并发调用)。
     *
-    * 是 supervised fork：抛出的异常级联终止整个引擎 (fail-fast)。常驻循环**不随
-    * [[ActorSystem.stop]] 结束**，除非它自己用 [[sleepUnlessStopped]] 轮询停止信号
-    * —— 见 [[Actor]] 的停机说明。
+    * 抛出的异常**不再直接炸掉作用域**，而是上报给系统触发[[ActorSystem.awaitShutdown 有序停机]]：
+    * 私有流断线、REST 续期失败这类"子任务失败"要能让全体组件各自跑完 onStop 再退，
+    * 而直接取消作用域会把 onStop 一并跳过 —— 那批撤单指令就漏发了。
+    *
+    * `InterruptedException` 不在捕获之列 (`NonFatal` 排除了它)：那是停机自身的中断信号，
+    * 要原样向上传播让 ox 收尾。
+    *
+    * 常驻循环仍**不随 [[ActorSystem.stop]] 自动结束**，除非它自己用 [[sleepUnlessStopped]]
+    * 轮询停止信号 —— 见 [[Actor]] 的停机说明。
     */
-  def fork(body: => Unit): Unit = forkDiscard(body)
+  def fork(body: => Unit): Unit = forkDiscard {
+    try body
+    catch case NonFatal(e) => system.reportFailure(handle.name, e)
+  }
 
   /** 延迟 `ms` 毫秒后把一条事件发到总线。
     *
@@ -108,11 +119,19 @@ final class ActorContext private[actor] (
   * 早先的写法是 `select(停止信号, 事件流)`，那是**竞态**的：两路同时就绪时选谁不确定，
   * 挑中停止信号就把邮箱里没处理的事件连同状态更新一起丢了。
   *
-  * ## fail-fast
+  * ## fail-fast, 但**有序**
   *
-  * 每个 actor 的事件循环是所在 ox `supervised` 作用域内的 fork，任何异常都级联取消整个
-  * 作用域、进程非零退出，由外层重新拉起并靠启动对齐恢复一致。**不做局部重启** ——
-  * 一个崩掉的策略留下的挂单与仓位归谁管是个没有好答案的问题，而重启后的对齐有答案。
+  * 任何组件失败 (事件循环抛异常、或它自管的线程抛异常, 例如私有流断线) 都终止整个进程，
+  * 由外层重新拉起并靠启动对齐恢复一致。**不做局部重启** —— 一个崩掉的策略留下的挂单与
+  * 仓位归谁管是个没有好答案的问题，而重启后的对齐有答案。
+  *
+  * 但"终止"不等于"就地把作用域取消掉"。失败的组件把异常**上报**给系统
+  * ([[reportFailure]])，系统据此走一遍与正常停机完全相同的路径 ([[stopAll]])：
+  * 按逆装配序停完每个组件、每个 `onStop` 都跑到、最后核心自己退出，然后把原异常重新抛出。
+  *
+  * 从前是直接让异常炸穿 ox 作用域，于是所有 fork 被中断、`onStop` 一律跳过 ——
+  * 策略的撤单指令漏发，挂单原样留在交易所无人跟踪。**收尾要跑到，和进程要死掉，
+  * 是两件不冲突的事**。
   */
 final class ActorSystem(private[actor] val bus: EventBus)(using Ox):
   private val logger = LoggerFactory.getLogger(classOf[ActorSystem])
@@ -153,13 +172,30 @@ final class ActorSystem(private[actor] val bus: EventBus)(using Ox):
         mailbox.events.foreach(ev => publishAll(actor.onEvent(ev, nowMs)))
         // 收尾不可中断：它要发的是撤单一类的指令，被打断等于漏发。
         // (ox 自己的 Actor 也是这样保护 close 回调的)
-        uninterruptible(publishAll(actor.onStop(nowMs)))
+        finish(actor)
+      catch
+        case NonFatal(e) =>
+          // 事件循环自己炸了：先让它把该收的尾收掉 (仍可能有挂单要撤), 再上报 ——
+          // 由系统按逆装配序停完其余组件, 而不是就地把作用域取消掉。
+          finish(actor)
+          reportFailure(actor.name, e)
       finally handle.finished.countDown()
     }
     logger.info(s"actor started: ${actor.name} interests=${actor.interests.size}")
     handle
 
   private def publishAll(events: Vector[AnyEvent]): Unit = events.foreach(bus.publish)
+
+  /** 跑一次 onStop 并发出它产出的事件。**只跑一次** —— 正常退出与异常退出共用这一处。 */
+  private def finish(actor: Actor): Unit =
+    if finished.add(actor) then
+      try uninterruptible(publishAll(actor.onStop(nowMs)))
+      catch case NonFatal(e) => logger.error(s"${actor.name} 的 onStop 出错: ${e.getMessage}", e)
+
+  /** 已经跑过 onStop 的 actor —— 身份比较, 不看名字 (同名实例可以有多个) */
+  private val finished = java.util.Collections.newSetFromMap(
+    java.util.IdentityHashMap[Actor, java.lang.Boolean]()
+  ).asScala
 
   /** 停一个 actor：先停完它的整棵子树，再停它自己。返回时它的 [[Actor.onStop]] 已跑完。
     *
@@ -185,9 +221,96 @@ final class ActorSystem(private[actor] val bus: EventBus)(using Ox):
       handle.children.removeAll(batch.asJava).discardValue
       batch = handle.children.asScala.toVector
 
+  // ==================== 有序停机 ====================
+
+  /** 把系统推向停机的第一个失败。空表示这是一次正常停机 (收到中断信号 / 显式请求) */
+  private val failure = AtomicReference[Throwable](null)
+  private val shutdownRequested = CountDownLatch(1)
+  private val allStopped = CountDownLatch(1)
+
+  /** 组件失败 —— 记下原因并请求停机。**第一个失败者定调**，之后的只记日志。
+    *
+    * 停机过程中别的组件跟着失败是常态 (私有流断了, 依赖它的柜台紧接着报错)，
+    * 把后续失败也当成"新的停机原因"只会让日志里的根因被淹掉。
+    */
+  private[actor] def reportFailure(name: String, e: Throwable): Unit =
+    if failure.compareAndSet(null, e) then
+      logger.error(s"组件 $name 失败, 开始有序停机: ${e.getMessage}", e)
+      shutdownRequested.countDown()
+      // **失败自己把停机跑起来**, 不能指望有人正在 awaitShutdown 上等着 (测试、嵌套系统、
+      // 被当库用的场景都没有)。否则失败就成了"被吞掉", 系统带着一个死掉的组件继续跑 ——
+      // 那比原来的级联取消更糟。
+      //
+      // 必须另起一条线程: 在失败者自己的线程里 stopAll 会等到自己的 finished, 死锁。
+      forkDiscard {
+        stopAll()
+        // 收尾都跑完了, 现在才让作用域失败 —— fail-fast 与"onStop 要跑到"不冲突,
+        // 只是先后问题。异常原样抛出, 调用方 (启动器的 supervised 块) 据此非零退出。
+        throw e
+      }
+    else
+      logger.warn(s"组件 $name 也失败了 (已在停机中, 根因见上): ${e.getMessage}")
+
+  /** 请求一次正常停机。幂等 —— 中断信号与显式调用可能同时到 */
+  def requestShutdown(reason: String): Unit =
+    if shutdownRequested.getCount > 0 then logger.warn(s"请求停机: $reason")
+    shutdownRequested.countDown()
+
+  /** 按**逆装配序**停完所有顶层组件 —— 后装的先停。幂等。
+    *
+    * 与"消费者先起、生产者后起"的装配序对称: 生产者先停, 它们收尾时补发的最后一批事件
+    * 仍有人消费。策略比柜台后装, 于是策略先停 —— 它 `onStop` 里的撤单指令发出去时,
+    * 柜台还活着、还接得住。反过来的话那批撤单会发到一条没人接的信道上。
+    *
+    * 单个组件停不下来不阻断其余: 停机路径上"尽力停完每一个"比"卡在第一个"有用。
+    */
+  def stopAll(): Unit = synchronized {
+    if allStopped.getCount > 0 then
+      val order = roots.asScala.toVector.reverse
+      logger.warn(s"有序停机: ${order.size} 个顶层组件, 逆装配序 ${order.map(_.name).mkString(" -> ")}")
+      order.foreach { h =>
+        try stop(h)
+        catch case NonFatal(e) => logger.error(s"停 ${h.name} 时出错, 继续停其余: ${e.getMessage}", e)
+      }
+      allStopped.countDown()
+      logger.warn("有序停机完成")
+  }
+
+  /** 阻塞到有人请求停机, 停完全部组件, 然后**核心自己退出**。
+    *
+    * 期间接管中断信号 (SIGINT/SIGTERM): 收到即请求停机, 并让 JVM 的关闭流程等停机跑完
+    * —— 否则 hook 一返回 JVM 就退, 撤单指令还在半路上。
+    *
+    * 若这次停机是由组件失败触发的, 停完之后把那个异常重新抛出: **fail-fast 仍然成立,
+    * 只是收尾先跑到了**。调用方 (启动器的 `supervised` 块) 因此以非零状态退出。
+    */
+  def awaitShutdown(): Unit =
+    val hook = Thread(
+      () =>
+        requestShutdown("收到中断信号")
+        if !allStopped.await(ActorSystem.ShutdownGraceMs, TimeUnit.MILLISECONDS) then
+          logger.error(s"停机未在 ${ActorSystem.ShutdownGraceMs}ms 内完成, JVM 不再等待")
+      ,
+      "engine-shutdown",
+    )
+    Runtime.getRuntime.addShutdownHook(hook)
+    try
+      shutdownRequested.await()
+      stopAll()
+      Option(failure.get).foreach(throw _)
+    finally
+      // JVM 已在关闭流程里时 remove 会抛 —— 那正是 hook 自己触发的这一次, 忽略即可
+      try Runtime.getRuntime.removeShutdownHook(hook).discardValue
+      catch case _: IllegalStateException => ()
+
   /** 当前存活的顶层 actor 及其子孙数，供观测与测试 */
   def alive: Int =
     def count(h: ActorHandle): Int = 1 + h.children.asScala.map(count).sum
     roots.asScala.map(count).sum
 
   extension (b: Boolean) private def discardValue: Unit = ()
+
+object ActorSystem:
+  /** 收到中断信号后, 留给有序停机的时间。超过它 JVM 不再等 ——
+    * 撤单是几次 REST 往返, 正常在百毫秒级; 留这么宽是为了让积压的邮箱也能排空。 */
+  val ShutdownGraceMs: Long = 30_000

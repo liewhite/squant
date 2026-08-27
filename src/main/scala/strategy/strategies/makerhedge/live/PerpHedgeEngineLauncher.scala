@@ -78,4 +78,5 @@ import sttp.client4.DefaultSyncBackend
     engine.addStrategy(strategy, AccountId.Live) // 真实盘
 
     logger.warn("对冲腿运行中 (BBO 复用引擎行情流, 期权 greeks 每 %dms 注入). Ctrl+C 退出".format(t.greeksPollMs))
-    Thread.sleep(Long.MaxValue)
+    // 阻塞到停机: 中断信号或组件失败都会唤醒它, 停完全部组件 (onStop 逐个跑到) 核心最后退出
+    engine.awaitShutdown()

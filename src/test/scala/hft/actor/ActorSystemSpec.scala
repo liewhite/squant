@@ -167,6 +167,49 @@ class ActorSystemSpec extends munit.FunSuite:
         CountDownLatch(1).await()
     }
 
+  test("子任务失败 -> 全体有序停机, 每个 onStop 都跑到, 收尾完了才抛"):
+    // 交易所插件自管的 WS 断了这类"子任务失败", 从前直接炸穿 ox 作用域: 所有 fork 被中断、
+    // onStop 一律跳过, 于是策略的撤单指令漏发、挂单留在交易所无人跟踪。
+    // 现在它先把全体组件按逆装配序停完 (onStop 逐个跑到), 再把原异常抛出。
+    val stopped = ConcurrentLinkedQueue[String]()
+    class Quiet(override val name: String) extends Actor:
+      override def onStop(now: Timestamp): Vector[AnyEvent] =
+        stopped.add(name); Vector.empty
+    class SelfManagedFailure extends Actor:
+      override def name = "feed"
+      override def onStart(ctx: ActorContext): Unit = ctx.fork(sys.error("私有流断了"))
+      override def onStop(now: Timestamp): Vector[AnyEvent] =
+        stopped.add(name); Vector.empty
+
+    intercept[RuntimeException] {
+      supervised:
+        val system = ActorSystem(EventBus())
+        system.spawn(Quiet("gateway")) // 先装
+        system.spawn(SelfManagedFailure())
+        system.spawn(Quiet("strategy")) // 后装
+        CountDownLatch(1).await()       // 等失败把停机跑起来并最终抛出
+    }
+
+    assertEquals(
+      stopped.asScala.toVector,
+      Vector("strategy", "feed", "gateway"),
+      "逆装配序: 后装的先停 —— 策略的撤单指令发出去时, 柜台还活着接得住",
+    )
+
+  test("请求停机 -> 同样是逆装配序, 且不抛异常"):
+    val stopped = ConcurrentLinkedQueue[String]()
+    class Quiet(override val name: String) extends Actor:
+      override def onStop(now: Timestamp): Vector[AnyEvent] =
+        stopped.add(name); Vector.empty
+    supervised:
+      val system = ActorSystem(EventBus())
+      system.spawn(Quiet("gateway"))
+      system.spawn(Quiet("strategy"))
+      system.requestShutdown("测试")
+      system.awaitShutdown() // 正常停机: 没有 failure, 不该抛
+      assertEquals(system.alive, 0, "全体已停")
+    assertEquals(stopped.asScala.toVector, Vector("strategy", "gateway"))
+
   test("actor 产出的事件被发布到总线"):
     supervised:
       val bus = EventBus()
