@@ -45,6 +45,17 @@ final class Executor private (
   /** 本策略的订阅范围 = 策略声明 + 框架补齐。引擎据此校验指令有人接、发对齐与行情订阅指令 */
   def subscription: Subscription = runner.subscription
 
+  /** 还在等对齐吗。
+    *
+    * 存在的理由不只是诊断：**"引擎收到对齐应答"不等于"策略已经看到它"**。
+    * 两者是不同的订阅者，同一次 publish 投给谁先谁后没有承诺 —— 引擎被唤醒时，
+    * 那条应答可能还没进策略的邮箱。实盘里这个缝隙被网络往返盖住了 (行情要绕一圈才回来)，
+    * 但任何"发完应答立刻喂事件"的场景 (测试、进程内回放) 都能撞上它。
+    *
+    * 所以引擎的阻塞等待只保证**对齐已完成**，"策略已看到"由本闸门保证 —— 两道各司其职。
+    */
+  def isGated: Boolean = awaiting.nonEmpty
+
   override def interests: Set[Interest] =
     runner.subscription.interests + Interest.Keyed(AccountSynced, alignmentTargets)
 

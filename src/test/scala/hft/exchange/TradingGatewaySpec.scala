@@ -178,14 +178,14 @@ class TradingGatewaySpec extends munit.FunSuite:
   test("清理判据: 活着的订单永不清, 终态过了保留期才清"):
     // 清掉一张还活着的订单的记账进度, 下一条累计量会以"已记 0"重新记一遍 ——
     // 此前入账的全部数量再记一次, 仓位近乎翻倍且没有自愈路径。
-    val active = RestTradingGateway.Settlement(Coin(0.5), firstSeenAt = 0L, terminalAt = None)
-    val justDone = RestTradingGateway.Settlement(Coin(0.5), firstSeenAt = 0L, terminalAt = Some(1_000L))
-    val longDone = RestTradingGateway.Settlement(Coin(0.5), firstSeenAt = 0L, terminalAt = Some(1_000L))
+    val active = PositionBook.Settlement(Coin(0.5), firstSeenAt = 0L, terminalAt = None)
+    val justDone = PositionBook.Settlement(Coin(0.5), firstSeenAt = 0L, terminalAt = Some(1_000L))
+    val longDone = PositionBook.Settlement(Coin(0.5), firstSeenAt = 0L, terminalAt = Some(1_000L))
 
-    val muchLater = 1_000L + RestTradingGateway.StaleSettlementMs * 2
-    assert(RestTradingGateway.retains(active, muchLater), "非终态的永远留着, 哪怕很久没动静")
-    assert(RestTradingGateway.retains(justDone, 1_000L + RestTradingGateway.SettledRetentionMs), "保留期内还要留着接晚到的成交")
-    assert(!RestTradingGateway.retains(longDone, 1_000L + RestTradingGateway.SettledRetentionMs + 1), "过了保留期就该清")
+    val muchLater = 1_000L + PositionBook.StaleSettlementMs * 2
+    assert(PositionBook.retains(active, muchLater), "非终态的永远留着, 哪怕很久没动静")
+    assert(PositionBook.retains(justDone, 1_000L + PositionBook.SettledRetentionMs), "保留期内还要留着接晚到的成交")
+    assert(!PositionBook.retains(longDone, 1_000L + PositionBook.SettledRetentionMs + 1), "过了保留期就该清")
 
   test("对齐时接管带部分成交的挂单, 后续回报不把那部分重记一遍"):
     // 少了这一步: 拉到的仓位里本已含着那 0.3, 而记账进度是空的, 于是 cumExecQty=0.5
@@ -245,32 +245,32 @@ class TradingGatewaySpec extends munit.FunSuite:
       )
 
   test("三方对账: 谁跟谁对不上, 决定了这是什么性质的问题"):
-    import RestTradingGateway.Verdict
+    import PositionBook.{Kind, Verdict}
     val tol = 1e-9
 
     // 三本账一致
     assertEquals(
-      RestTradingGateway.compare(Coin(0.5), Coin(0.5), Some(Coin(0.5)), tol).collect { case v: Verdict.Agreed => v.kind },
-      Vector("内部", "外部"),
+      PositionBook.compare(Coin(0.5), Coin(0.5), Some(Coin(0.5)), tol).collect { case v: Verdict.Agreed => v.kind },
+      Vector(Kind.Internal, Kind.External),
     )
 
     // 两条**内部**渠道对不上 -> 我们这边的 bug (漏解析、字段读错、去重去多了)
-    RestTradingGateway.compare(Coin(0.5), Coin(0.3), Some(Coin(0.5)), tol) match
-      case Vector(Verdict.Internal(o, f), Verdict.Agreed("外部")) =>
+    PositionBook.compare(Coin(0.5), Coin(0.3), Some(Coin(0.5)), tol) match
+      case Vector(Verdict.Internal(o, f), Verdict.Agreed(Kind.External)) =>
         assertEqualsDouble(o.value, 0.5, tol); assertEqualsDouble(f.value, 0.3, tol)
       case other => fail(s"应报内部不一致: $other")
 
     // 账本与**交易所**对不上 -> 外部改了账户 (强平/手动/资金费)
-    RestTradingGateway.compare(Coin(0.5), Coin(0.5), Some(Coin(0.9)), tol) match
-      case Vector(Verdict.Agreed("内部"), Verdict.External(o, r)) =>
+    PositionBook.compare(Coin(0.5), Coin(0.5), Some(Coin(0.9)), tol) match
+      case Vector(Verdict.Agreed(Kind.Internal), Verdict.External(o, r)) =>
         assertEqualsDouble(o.value, 0.5, tol); assertEqualsDouble(r.value, 0.9, tol)
       case other => fail(s"应报外部不一致: $other")
 
     // 交易所还没推过 -> 只做内部比对, 不假装"外部一致"
-    assertEquals(RestTradingGateway.compare(Coin(0.5), Coin(0.5), None, tol).size, 1)
+    assertEquals(PositionBook.compare(Coin(0.5), Coin(0.5), None, tol).size, 1)
 
     // 容差之内不算不一致
-    assert(RestTradingGateway.compare(Coin(0.5), Coin(0.5 + 1e-12), Some(Coin(0.5)), tol).forall(_.isInstanceOf[Verdict.Agreed]))
+    assert(PositionBook.compare(Coin(0.5), Coin(0.5 + 1e-12), Some(Coin(0.5)), tol).forall(_.isInstanceOf[Verdict.Agreed]))
 
   test("交易所报的仓位不进总线 —— 总线上的仓位只有账本一个来源"):
     withFeed { (feed, seen) =>

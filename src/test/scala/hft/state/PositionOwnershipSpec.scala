@@ -208,7 +208,8 @@ class PositionOwnershipSpec extends munit.FunSuite:
       // 行情先流起来 —— 模拟"这个标的早就有别的组件在看"
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 1L), 1L))
 
-      system.spawn(Executor(Peeker(), AccountId.Live)) // 闸门自带, 无需装配方设置
+      val gated = Executor(Peeker(), AccountId.Live) // 闸门自带, 无需装配方设置
+      system.spawn(gated)
 
       // 此刻策略已在总线上, 行情继续流 —— 但对齐还没发
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 101.0, Coin(1.0), 101.1, Coin(1.0), 2L), 2L))
@@ -221,6 +222,9 @@ class PositionOwnershipSpec extends munit.FunSuite:
       synced.events.receive(): Unit
       synced.close()
 
+      // "引擎收到应答"不等于"策略已看到" —— 两个订阅者, 同一次 publish 谁先谁后没有承诺。
+      // 所以这里等的是闸门本身, 而不是应答到了测试手里。
+      eventually("闸门应已放行")(!gated.isGated)
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 102.0, Coin(1.0), 102.1, Coin(1.0), 3L), 3L))
       eventually("对齐之后应开始动作")(!decisions.isEmpty)
       assertEquals(decisions.asScala.toVector, Vector(0.7), "第一次决策就该看到真实仓位")
