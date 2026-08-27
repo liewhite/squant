@@ -80,7 +80,7 @@ final class Supervisor(
     Interest.All(Topics.OrderUpdate),
   )
 
-  override def onStart(context: ActorContext): Unit = ctx = context
+  override def onPrepare(context: ActorContext): Unit = ctx = context
 
   override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
     event.as(Performances).foreach { perf =>

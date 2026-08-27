@@ -46,7 +46,7 @@ final class PerformanceTracker(feeRate: Double, publishIntervalMs: Long = 1000) 
   /** 全量收成交：跟踪谁由发布者决定，不必预先登记账户 */
   override def interests: Set[Interest] = Set(Interest.All(Topics.Fill), Interest.All(Topics.Clock))
 
-  override def onStart(context: ActorContext): Unit = ctx = context
+  override def onPrepare(context: ActorContext): Unit = ctx = context
 
   override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
     event.as(Topics.Fill).foreach(fill => applyFill(fill, now))

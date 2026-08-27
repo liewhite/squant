@@ -53,7 +53,18 @@ trait Actor:
     */
   def requirements: Set[Requirement] = Set.empty
 
-  /** 启动钩子：fork 自己的常驻线程、spawn 子 actor。在开始消费事件之前调用一次 */
+  /** 可回滚装配钩子：建立本地状态、登记资源、同步 spawn 子组件。
+    *
+    * 此阶段命令处理能力尚不可见，且禁止发布命令。失败时框架会回收整批组件，因此这里不能
+    * 执行无法由 [[onStop]] 或 [[ActorContext.manage]] 补偿的外部副作用。
+    */
+  def onPrepare(ctx: ActorContext): Unit = ()
+
+  /** 启动钩子：组件处理能力已经对系统可见，但事件循环尚未消费邮箱。
+    *
+    * 建立外部连接、启动受管任务、发起握手与发布命令应放在这里。若同批其他组件启动失败，
+    * 框架会调用 [[onStop]] 补偿，但无法承诺撤销已经到达外部系统的副作用。
+    */
   def onStart(ctx: ActorContext): Unit = ()
 
   /** 处理一条事件，产出零到多条新事件 (由框架发布到总线) */

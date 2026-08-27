@@ -14,7 +14,7 @@ import scala.util.control.NonFatal
 
 /** 组件生命周期状态。状态可从 [[ActorHandle.state]] 读取，故失败不再只存在于日志里。 */
 enum ActorState:
-  case Wired, Starting, Committing, Running, Stopping, Stopped, Failed, Quarantined
+  case Wired, Preparing, Prepared, Starting, Running, Stopping, Stopped, Failed, Quarantined
 
   def isTerminal: Boolean = this == Stopped || this == Failed || this == Quarantined
 
@@ -71,6 +71,7 @@ final class ActorHandle private[actor] (
   private[actor] val pendingPublications = ConcurrentLinkedQueue[AnyEvent]()
   private[actor] val stateRef = AtomicReference(ActorState.Wired)
   private[actor] val terminalFailure = AtomicReference[Throwable](null)
+  private[actor] val prepareEntered = AtomicBoolean(false)
   private[actor] val startCompleted = AtomicBoolean(false)
   private[actor] val loopStarted = AtomicBoolean(false)
   private[actor] val stopHookRun = AtomicBoolean(false)
@@ -78,6 +79,7 @@ final class ActorHandle private[actor] (
   private[actor] val treeStopAttempt = AtomicReference[TreeStopAttempt](null)
   private[actor] val mailboxClosed = AtomicBoolean(false)
   private[actor] val startThread = AtomicReference[Thread](null)
+  private[actor] val prepareThread = AtomicReference[Thread](null)
   private[actor] val loopThread = AtomicReference[Thread](null)
   private[actor] val lastMailboxWarningNanos = AtomicLong(0L)
   private[actor] val runGate = CountDownLatch(1)
@@ -101,7 +103,7 @@ final class ActorContext private[actor] (
 ):
   def name: String = handle.name
 
-  /** 发布一条事件到总线。启动事务提交前不允许发布命令。 */
+  /** 发布一条事件到总线。prepare 提交前不允许发布命令。 */
   def publish(event: AnyEvent): Unit = system.publishFrom(handle, event)
 
   /** 起一个子 actor。父停机时会先把它 (及它的子孙) 停完并等到收尾结束 */
@@ -278,12 +280,12 @@ final class ActorSystem(
   private[actor] def publishFrom(owner: ActorHandle, event: AnyEvent): Unit =
     val publishNow = owner.lifecycleLock.synchronized {
       owner.state match
-        case ActorState.Wired | ActorState.Starting | ActorState.Committing =>
+        case ActorState.Wired | ActorState.Preparing | ActorState.Prepared =>
           if event.topic.isInstanceOf[CommandTopic[?, ?]] then
-            throw IllegalStateException(s"组件 ${owner.name} 在启动事务提交前不能发布命令 ${event.topic}")
+            throw IllegalStateException(s"组件 ${owner.name} 在 prepare 提交前不能发布命令 ${event.topic}")
           owner.pendingPublications.add(event)
           false
-        case ActorState.Running => true
+        case ActorState.Starting | ActorState.Running => true
         case state => throw IllegalStateException(s"组件 ${owner.name} 已处于 $state, 不能再发布事件 ${event.topic}")
     }
     if publishNow then publishWhileActive(owner, event)
@@ -401,11 +403,11 @@ final class ActorSystem(
 
   private[actor] def spawnUnder(parent: Option[ActorHandle], actor: Actor): ActorHandle =
     parent.foreach { owner =>
-      val belongsToAssembly = assemblyLock.synchronized {
-        assemblingHandles.exists(root => descendants(root).contains(owner))
-      }
-      if belongsToAssembly && (owner.startThread.get ne Thread.currentThread()) then
-        throw IllegalStateException(s"组件 ${owner.name} 的 onStart 只能在钩子线程内同步创建子组件")
+      owner.state match
+        case ActorState.Preparing if owner.prepareThread.get eq Thread.currentThread() => ()
+        case ActorState.Running => ()
+        case state =>
+          throw IllegalStateException(s"组件 ${owner.name} 处于 $state；只能在 onPrepare 同步创建，或在 Running 时动态创建子组件")
     }
     spawnBatch(parent, Vector(actor)).head
 
@@ -421,7 +423,7 @@ final class ActorSystem(
         if !accepting.get then throw IllegalStateException("ActorSystem 已进入停机阶段，拒绝装配新组件")
         joinsActiveTransaction = parent.exists(p => assemblingHandles.exists(root => descendants(root).contains(p)))
         parent.foreach { p =>
-          if (p.state != ActorState.Starting && p.state != ActorState.Running) || stoppingHandles.contains(p) then
+          if (p.state != ActorState.Preparing && p.state != ActorState.Running) || stoppingHandles.contains(p) then
             throw IllegalStateException(s"父组件 ${p.name} 已处于 ${p.state}, 不能再创建子组件")
         }
         validatePlan(specs)
@@ -435,14 +437,15 @@ final class ActorSystem(
 
     try
       if wiringFailure != null then throw wiringFailure
-      wired.foreach(startHook)
+      wired.foreach(prepareHook)
       if !joinsActiveTransaction then
         val transactionHandles = wired.toVector.flatMap(descendants).distinct
         transactionHandles.flatMap(handle => Option(handle.terminalFailure.get)).headOption.foreach(throw _)
-        // 事件循环线程先全部就绪并在各自栅栏等待，之后才允许命令找到处理者。
+        // prepare 全部成功后才让处理能力可见；事件循环仍在栅栏后，直到整批 start 完成。
         transactionHandles.foreach(startLoop)
         bus.activateHandlers(transactionHandles.map(handle => handle.mailbox -> handle.commandHandlers))
-        transactionHandles.foreach(_.stateRef.set(ActorState.Committing))
+        transactionHandles.foreach(_.stateRef.set(ActorState.Starting))
+        transactionHandles.foreach(startHook)
         transactionHandles.foreach(commitPublications)
         transactionHandles.foreach(_.loopCommitted.set(true))
         transactionHandles.foreach(_.runGate.countDown())
@@ -543,9 +546,37 @@ final class ActorSystem(
     val requirements = actor.requirements
     ActorSpec(actor, name, interests, commandHandlers, capabilities, requirements)
 
+  private def prepareHook(handle: ActorHandle): Unit =
+    handle.stateRef.set(ActorState.Preparing)
+    handle.prepareEntered.set(true)
+    val problem = AtomicReference[Throwable](null)
+    val finished = CountDownLatch(1)
+    val thread = Thread.ofVirtual().name(s"actor-${handle.name}-prepare").unstarted { () =>
+      try handle.actor.onPrepare(ActorContext(handle, this))
+      catch
+        case e: InterruptedException =>
+          Thread.currentThread().interrupt()
+          problem.set(interruptedFailure(handle, "onPrepare", e))
+        case e: Throwable => problem.set(e)
+      finally
+        handle.prepareThread.set(null)
+        finished.countDown()
+    }
+    handle.prepareThread.set(thread)
+    thread.start()
+    if !uninterruptible(finished.await(componentStopTimeoutMs, TimeUnit.MILLISECONDS)) then
+      handle.stopHookRun.set(true)
+      thread.interrupt()
+      val timeout = ComponentQuarantinedException(
+        s"组件 ${handle.name} 的 onPrepare 未在 ${componentStopTimeoutMs}ms 内完成: thread=${thread.getName}\n" +
+          thread.getStackTrace.mkString("    at ", "\n    at ", "")
+      )
+      quarantine(handle, timeout)
+    Option(problem.get).foreach(throw _)
+    handle.stateRef.set(ActorState.Prepared)
+
   private def startHook(handle: ActorHandle): Unit =
-    handle.stateRef.set(ActorState.Starting)
-    // 进入钩子即视为需要回滚；即使钩子在中途抛错，也可能已经获取了部分外部资源。
+    // 能力已激活，插件现在可以连接外部系统和发布命令；事件循环仍由 runGate 挡住。
     handle.startCompleted.set(true)
     val problem = AtomicReference[Throwable](null)
     val finished = CountDownLatch(1)
@@ -608,7 +639,7 @@ final class ActorSystem(
         s"requirements=${handle.requirements.size}"
     )
 
-  /** 冲刷单个组件的启动期输出，并在同一把锁内切到 Running，保持该组件内发布顺序。 */
+  /** 冲刷 prepare 期的普通输出，并在同一把锁内切到 Running，保持该组件内发布顺序。 */
   private def commitPublications(handle: ActorHandle): Unit = handle.lifecycleLock.synchronized {
     val read = publicationGate.readLock()
     read.lock()
@@ -825,7 +856,7 @@ final class ActorSystem(
   private def startRollbackFinish(handle: ActorHandle): Unit =
     val thread = Thread.ofVirtual().name(s"actor-${handle.name}-rollback-stop").unstarted { () =>
       var problem: Throwable = null
-      if handle.startCompleted.get then
+      if handle.prepareEntered.get then
         try finish(handle)
         catch
           case e: InterruptedException => problem = interruptedFailure(handle, "onStop", e)

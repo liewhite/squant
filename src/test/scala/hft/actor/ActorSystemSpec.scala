@@ -78,7 +78,7 @@ class ActorSystemSpec extends munit.FunSuite:
       val order = ConcurrentLinkedQueue[String]()
 
       class Node(override val name: String, depth: Int) extends Actor:
-        override def onStart(ctx: ActorContext): Unit =
+        override def onPrepare(ctx: ActorContext): Unit =
           if depth > 0 then ctx.spawn(Node(s"$name.child", depth - 1))
           ()
         override def onStop(now: Timestamp): Vector[AnyEvent] =
@@ -112,7 +112,7 @@ class ActorSystemSpec extends munit.FunSuite:
 
     class Parent extends Actor:
       override def name = "parent"
-      override def onStart(ctx: ActorContext): Unit = ctx.spawn(Child()): Unit
+      override def onPrepare(ctx: ActorContext): Unit = ctx.spawn(Child()): Unit
       override def onStop(now: Timestamp): Vector[AnyEvent] =
         order.add(name)
         Vector.empty
@@ -285,7 +285,7 @@ class ActorSystemSpec extends munit.FunSuite:
     assertEquals(system.alive, 1, "隔离启动线程仍可能运行，句柄不能伪装成已回收")
     releaseStart.countDown()
 
-  test("onStart 只允许同步装配子组件, 异步任务不能逃出启动事务"):
+  test("onPrepare 只允许同步装配子组件, 异步任务不能逃出启动事务"):
     supervised:
       val system = ActorSystem(EventBus())
       val attempted = CountDownLatch(1)
@@ -296,7 +296,7 @@ class ActorSystemSpec extends munit.FunSuite:
 
       class Parent extends Actor:
         override def name = "waiting-parent"
-        override def onStart(ctx: ActorContext): Unit =
+        override def onPrepare(ctx: ActorContext): Unit =
           ctx.fork {
             try ctx.spawn(Child())
             catch case e: IllegalStateException => rejected.add(e)
@@ -306,7 +306,7 @@ class ActorSystemSpec extends munit.FunSuite:
 
       val handle = system.spawn(Parent())
       assertEquals(rejected.size, 1)
-      assert(rejected.peek().getMessage.contains("只能在钩子线程内同步创建"))
+      assert(rejected.peek().getMessage.contains("只能在 onPrepare 同步创建"))
       assertEquals(system.alive, 1)
       system.stop(handle)
 
@@ -561,7 +561,7 @@ class ActorSystemSpec extends munit.FunSuite:
     assertEquals(handle.state, ActorState.Failed)
     assertEquals(system.alive, 0)
 
-  test("启动事务提交前命令处理能力不可见"):
+  test("prepare 提交前命令处理能力不可见"):
     val bus = EventBus()
     val system = ActorSystem(bus)
     val entered = CountDownLatch(1)
@@ -572,7 +572,7 @@ class ActorSystemSpec extends munit.FunSuite:
     class SlowProvider extends Actor:
       override def name = "slow-provider"
       override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
-      override def onStart(ctx: ActorContext): Unit =
+      override def onPrepare(ctx: ActorContext): Unit =
         entered.countDown()
         proceed.await()
 
@@ -589,6 +589,32 @@ class ActorSystemSpec extends munit.FunSuite:
     assert(failures.isEmpty, failures.asScala.mkString("; "))
     assertEquals(bus.handlerCount(TestCommand, "k"), 1)
     system.stop(handles.remove())
+
+  test("prepare 禁止命令副作用, start 在能力激活后可以发起命令"):
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+
+      class IllegalPrepare extends Actor:
+        override def name = "illegal-prepare-command"
+        override def onPrepare(ctx: ActorContext): Unit = ctx.publish(Event.local(TestCommand, "k"))
+
+      val rejected = intercept[IllegalStateException](system.spawn(IllegalPrepare()))
+      assert(rejected.getMessage.contains("prepare 提交前不能发布命令"), rejected.getMessage)
+      assertEquals(system.alive, 0)
+
+      val handled = CountDownLatch(1)
+      class StartsWithCommand extends Actor:
+        override def name = "starts-with-command"
+        override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
+        override def onStart(ctx: ActorContext): Unit = ctx.publish(Event.local(TestCommand, "k"))
+        override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+          event.as(TestCommand).foreach(_ => handled.countDown())
+          Vector.empty
+
+      val handle = system.spawn(StartsWithCommand())
+      assert(handled.await(2, TimeUnit.SECONDS), "start 发出的命令应在整批进入 Running 后由事件循环消费")
+      system.stop(handle)
 
   test("组件声明在装配入口只求值一次, 验证与接线共享同一快照"):
     supervised:
@@ -622,7 +648,7 @@ class ActorSystemSpec extends munit.FunSuite:
       assertEquals(bus.handlerCount(TestCommand, "k"), 1)
       system.stop(handle)
 
-  test("启动期普通事件对已运行组件隔离, 失败丢弃、成功提交后冲刷"):
+  test("prepare 期普通事件对已运行组件隔离, 失败丢弃、成功提交后冲刷"):
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus)
@@ -648,7 +674,7 @@ class ActorSystemSpec extends munit.FunSuite:
 
       class StartupPublisher extends Actor:
         override def name = "startup-publisher"
-        override def onStart(ctx: ActorContext): Unit = ctx.publish(Event.at(Topics.Bbo, bbo(), t0))
+        override def onPrepare(ctx: ActorContext): Unit = ctx.publish(Event.at(Topics.Bbo, bbo(), t0))
 
       class FailingSibling extends Actor:
         override def name = "failing-sibling"
@@ -664,7 +690,7 @@ class ActorSystemSpec extends munit.FunSuite:
       system.stop(publisher)
       existing.reverse.foreach(system.stop)
 
-  test("onStart 嵌套 spawn 与最外层共享提交点, 兄弟失败时一起回滚"):
+  test("onPrepare 嵌套 spawn 与最外层共享提交点, 兄弟失败时一起回滚"):
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus)
@@ -675,7 +701,7 @@ class ActorSystemSpec extends munit.FunSuite:
 
       class Parent extends Actor:
         override def name = "parent"
-        override def onStart(ctx: ActorContext): Unit = ctx.spawn(ChildProvider()): Unit
+        override def onPrepare(ctx: ActorContext): Unit = ctx.spawn(ChildProvider()): Unit
 
       class FailingSibling extends Actor:
         override def name = "failing-sibling"

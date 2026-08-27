@@ -99,7 +99,7 @@ final class Executor private (
     * 这一步**阻塞**，而且就该阻塞：邮箱此刻已订上总线，排队的事件一条不丢，
     * 阻塞只是推迟消费。启动期没有订单在流动，不存在阻塞代价。
     */
-  override def onStart(ctx: ActorContext): Unit = runner.prepare()
+  override def onPrepare(ctx: ActorContext): Unit = runner.prepare()
 
   /** 停机收尾：撤掉本策略还挂在交易所的单。
     *
