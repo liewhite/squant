@@ -106,31 +106,33 @@ class AccountIsolationSpec extends munit.FunSuite:
       )
 
   test("同账户同标的不能有两个策略实例"):
-    val claims = InstrumentClaims[String]()
+    val claims = InstrumentClaims()
     val key = AccountInstrument(AccountId.Live, inst)
-    claims.claimAll(Seq(("h1", "strategyA", Set(key))))
-    val e = intercept[IllegalStateException](claims.checkAll(Seq(("strategyB", Set(key)))))
+    claims.acquire("strategyA", Set(key))
+    val e = intercept[IllegalStateException](claims.acquire("strategyB", Set(key)))
     assert(e.getMessage.contains("strategyA"), e.getMessage)
 
   test("不同账户可以跑同一标的 —— 实盘与影子盘并行的前提"):
-    val claims = InstrumentClaims[String]()
-    claims.claimAll(Seq(("h1", "live", Set(AccountInstrument(AccountId.Live, inst)))))
-    claims.claimAll(Seq(("h2", "shadow", Set(AccountInstrument(paper, inst)))))
+    val claims = InstrumentClaims()
+    claims.acquire("live", Set(AccountInstrument(AccountId.Live, inst)))
+    claims.acquire("shadow", Set(AccountInstrument(paper, inst)))
     assertEquals(claims.size, 2)
 
-  test("同一批里两个策略互撞也算冲突, 且整批拒绝"):
-    val claims = InstrumentClaims[String]()
-    val key = AccountInstrument(AccountId.Live, inst)
-    intercept[IllegalStateException] {
-      claims.claimAll(Seq(("h1", "a", Set(key)), ("h2", "b", Set(key))))
-    }
-    assertEquals(claims.size, 0, "任一冲突即整批拒绝，不留半登记状态")
+  test("一组租约中任一键冲突就整组拒绝, 不留部分登记"):
+    val claims = InstrumentClaims()
+    val occupied = AccountInstrument(AccountId.Live, inst)
+    val free = AccountInstrument(AccountId.Live, Instrument(ex, "ETHUSDT"))
+    claims.acquire("existing", Set(occupied))
+    intercept[IllegalStateException](claims.acquire("incoming", Set(occupied, free)))
+    val freeLease = claims.acquire("next", Set(free))
+    assertEquals(claims.ownerOf(free), Some("next"), "失败获取不能留下部分登记")
+    freeLease.close()
 
   test("撤下后释放占用, 同一标的可以被接管"):
-    val claims = InstrumentClaims[String]()
+    val claims = InstrumentClaims()
     val key = AccountInstrument(AccountId.Live, inst)
-    claims.claimAll(Seq(("h1", "old", Set(key))))
-    claims.release("h1")
-    claims.release("h1") // 幂等
-    claims.claimAll(Seq(("h2", "new", Set(key))))
+    val old = claims.acquire("old", Set(key))
+    old.close()
+    old.close()
+    claims.acquire("new", Set(key))
     assertEquals(claims.ownerOf(key), Some("new"))

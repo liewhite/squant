@@ -1,16 +1,12 @@
 package hft.engine
 
-import hft.actor.{Actor, ActorHandle, ActorState, ActorSystem}
+import hft.actor.{Actor, ActorHandle, ActorSystem}
 import hft.domain.*
 import hft.event.Commands.*
 import hft.event.{Event, EventBus, Interest, MarketTopic, Subscription, Topics}
 import hft.strategy.Strategy
 import org.slf4j.LoggerFactory
-import ox.{Ox, forkDiscard}
-
-import java.util.concurrent.atomic.AtomicLong
-import java.util.concurrent.{ConcurrentHashMap, CountDownLatch, TimeUnit}
-import scala.jdk.CollectionConverters.*
+import ox.Ox
 
 /** 引擎：装配插件、校验契约、管理生命周期。**不持有任何交易所侧的实现。**
   *
@@ -42,11 +38,7 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
   private val logger = LoggerFactory.getLogger(classOf[Engine])
 
   /** (账户, 标的) 的独占登记，见 [[InstrumentClaims]] */
-  private val claims = InstrumentClaims[ActorHandle]()
-
-  /** 对齐请求编号：逐次自增，使等待方只认领自己那一条应答，
-    * 不会把上一轮的残留应答当成本轮完成 */
-  private val syncSeq = AtomicLong(0)
+  private val claims = InstrumentClaims()
 
   /** 在策略**之外**订阅事件 (成交记录、监控、指标导出)，策略因此无需承担写文件等副作用。
     *
@@ -65,16 +57,8 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
     system.spawn(plugin)
   }
 
-  /** 停一个组件（连同它的整棵子树），并释放它可能占用的 (账户, 标的)。返回时收尾已跑完。
-    * 若仍存活组件依赖它提供的命令能力，ActorSystem 会在产生副作用前拒绝停止。 */
-  def stop(handle: ActorHandle): Unit = synchronized {
-    try system.stop(handle)
-    finally releaseClaimIfStopped(handle)
-  }
-
-  /** 只有已从 ActorSystem 摘除的句柄才能释放独占权；拒绝停止与隔离都必须继续占用。 */
-  private def releaseClaimIfStopped(handle: ActorHandle): Unit =
-    if handle.state == ActorState.Stopped || handle.state == ActorState.Failed then claims.release(handle)
+  /** 停一个组件（连同它的整棵子树）。组件拥有的租约与资源由 ActorSystem 统一释放。 */
+  def stop(handle: ActorHandle): Unit = synchronized(system.stop(handle))
 
   /** 请求停机 —— 幂等。风控插件、运维接口都可以调它 */
   def requestShutdown(reason: String): Unit = system.requestShutdown(reason)
@@ -102,9 +86,9 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
     *
     * 启动顺序是一条**因果链**，不再是一串调用顺序：
     * {{{
-    *   1. 标的独占检查        —— 冲突在策略启动之前拒绝
-    *   2. 指令契约校验        —— 它要发的每条指令都有人接吗
-    *   3. 装配, 订阅总线      —— 此后发布的事件不会丢
+    *   1. 快照并校验指令契约  —— 它要发的每条指令都有人接吗
+    *   2. prepare 策略会话    —— 获取独占租约并创建 Executor 子组件
+    *   3. 激活处理能力        —— 新组件开始可被寻址，事件循环仍在启动栅栏后
     *   4. 发对齐指令, 等应答  —— 柜台推持仓/净值/挂单
     *   5. 发行情订阅指令      —— 数据从此刻开始流动
     * }}}
@@ -113,7 +97,8 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
     * 否则它基于"仓位为空"这个错误前提做第一次决策 —— 可能重复开仓，可能对着不存在的
     * 敞口对冲。
     *
-    * 前两步都排在 spawn 之前：起来了再拒绝，就得再把它停回去。
+    * 独占冲突与依赖缺失都发生在 `start` 外部副作用之前；prepare 任一步失败，整批租约和接线
+    * 由 ActorSystem 回滚，不会留下半启动策略。
     *
     * ## 一个实例只装一次 —— 这是**调用方的职责**
     *
@@ -133,35 +118,18 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
   def addStrategies(strategies: Seq[Strategy], account: AccountId): Seq[ActorHandle] = synchronized {
     if strategies.isEmpty then return Vector.empty
 
-    val executors = strategies.map(Executor(_, account))
-    def keysOf(ex: Executor) = ex.subscription.instruments.map(AccountInstrument(ex.account, _))
-    // 策略订阅范围的并集 —— 契约校验、对齐、行情订阅都从这一处派生
-    val combined = Subscription(executors.flatMap(_.subscription.interests).toSet)
-
-    // 1. 标的独占检查。命令依赖与处理者基数由 ActorSystem 在整批接线之前统一校验。
-    claims.checkAll(executors.map(ex => (ex.name, keysOf(ex))))
-
-    // 2. 原子装配。执行器自带对齐闸门 (见 Executor.awaiting): spawn 之后它的事件循环立即
-    // 开跑, 而已经在流动的行情会马上到 —— 闸门必须在构造时就位, 不能靠装配方记得调一下。
-    val ids = system.spawnAll(executors)
+    val sessions = strategies.map(StrategySession(_, account, claims)).toVector
+    val ids = system.spawnAll(sessions)
     try
-      claims.claimAll(executors.zip(ids).map((ex, handle) => (handle, ex.name, keysOf(ex))))
-
-      // 3. 启动对齐 —— **两种账户都做**。
-      syncAccounts(combined, account)
-
-      // 4. 行情从此刻开始流动
-      requestMarketData(combined)
-
+      sessions.foreach(_.awaitReady())
       logger.info(s"${strategies.size} strategies added on $account")
       ids
     catch
       case e: Throwable =>
-        // 对齐/行情请求失败同样属于装配事务；不能留下已运行执行器与未释放的独占声明。
+        // 调用线程中断等非组件失败也要撤下整批；会话自己的失败则可能已触发全系统停机。
         ids.reverse.foreach { handle =>
           try system.stop(handle)
           catch case cleanup: Throwable => e.addSuppressed(cleanup)
-          finally releaseClaimIfStopped(handle)
         }
         throw e
   }
@@ -199,48 +167,6 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
       bus.publish(Event.local(MarketSubscription, MarketSubscriptionRequest(exchange, kinds.toSet)))
     }
 
-  /** 发对齐指令并**等到柜台推完**。
-    *
-    * 请求—应答在发布订阅上通常很别扭，因为失败无从表达。这里不别扭：柜台对齐失败一律
-    * 抛异常终止进程 (账户状态没对上就交易，比不启动危险得多)，"没人接"已被
-    * ActorSystem 的硬依赖校验挡在前面 —— 不存在"既没成功也没失败"的第三种结局。
-    *
-    * 超时仍然设：一个永久挂起的启动是最难诊断的失效，宁可以明确的错误退出。
-    */
-  private def syncAccounts(subscription: Subscription, account: AccountId): Unit =
-    // 目标集合与执行器的闸门同源 (见 Subscription.alignmentTargets) —— 从前这里按
-    // instruments 自己算一遍, 少了"账户级声明直接指名的交易所", 那个差集里的策略会永久
-    // 停在闸门后而引擎照常打印"对齐完成"。
-    val targets = subscription.alignmentTargets(account)
-    if targets.isEmpty then return
-    val symbolsByExchange = subscription.instruments.groupMap(_.exchange)(_.symbol)
-
-    val requestId = syncSeq.incrementAndGet()
-    val tracker = SyncTracker(targets, requestId)
-    // 先订阅再发指令：应答可能在指令发出后立刻回来
-    val mailbox = bus.subscribe(targets.map(t => Interest.Keyed(AccountSynced, Set(t))).toSet[Interest])
-    val completed = try
-      forkDiscard {
-        mailbox.events.foreach { event =>
-          event.as(AccountSynced).foreach(tracker.acknowledge)
-        }
-      }
-      targets.foreach { target =>
-        // 没有交易标的的交易所照样要发 (空标的集): 柜台什么都不用对, 但那条应答是闸门在等的
-        val symbols = symbolsByExchange.getOrElse(target.exchange, Set.empty)
-        bus.publish(Event.local(AccountSync, AccountSyncRequest(account, target.exchange, requestId, symbols)))
-      }
-      tracker.await(Engine.SyncTimeoutMs)
-    finally
-      mailbox.close()
-      mailbox.done()
-    if !completed then
-      throw IllegalStateException(
-        s"启动对齐超时 (${Engine.SyncTimeoutMs}ms, req=$requestId): ${tracker.pending.mkString(",")} 中有柜台没有回应。" +
-          "对齐未完成就放行会让策略基于空仓位决策"
-      )
-    logger.info(s"启动对齐完成: ${targets.mkString(",")} (req=$requestId)")
-
 object Engine:
   private val logger = LoggerFactory.getLogger(classOf[Engine])
 
@@ -249,9 +175,10 @@ object Engine:
 
   /** 启动引擎：装配总线与生命周期树，装上时钟与调用方给的插件。
     *
-    * 时钟与插件作为一批启动事务：先快照声明、校验并接线，全部 `onStart` 成功后才提交处理
-    * 能力、事件循环和启动期输出。因此插件给定顺序不承担消息安全或停机正确性；硬依赖必须
-    * 用 `Requirement` 声明，停机由依赖图与所有权树共同排序。
+    * 时钟与插件作为一批启动事务：先快照声明、校验、接线并完成 `onPrepare`，再统一激活处理
+    * 能力并运行 `onStart`。启动钩子可以做外部握手，事件循环要等整批启动成功后才消费邮箱。
+    * 插件给定顺序不承担消息安全或停机正确性；硬依赖必须用 `Requirement` 声明，停机由依赖图
+    * 与所有权树共同排序。
     *
     * @param plugins          行情源、柜台、观察者
     * @param clockIntervalMs  时钟节拍间隔 (驱动订单超时检测等)
@@ -260,7 +187,7 @@ object Engine:
     val bus = EventBus()
     val system = ActorSystem(bus)
     val engine = Engine(bus, system)
-    // 时钟与插件作为一批原子装配：任一 onStart 失败则按依赖拓扑整批回滚。
+    // 时钟与插件作为一批装配：prepare 原子回滚；start 失败则按依赖拓扑补偿停止。
     try system.spawnAll(Clock(clockIntervalMs) +: plugins.toVector)
     catch
       case startupFailure: Throwable =>
@@ -269,15 +196,3 @@ object Engine:
         throw startupFailure
     logger.info(s"Engine started with ${plugins.size} plugins")
     engine
-
-/** 一次账户对齐等待的并发状态：同一 target 只可完成一次，旧请求与未知 target 都无效。 */
-private[engine] final class SyncTracker(targets: Set[AccountExchange], requestId: Long):
-  private val remaining = ConcurrentHashMap.newKeySet[AccountExchange]()
-  remaining.addAll(targets.asJava)
-  private val done = CountDownLatch(targets.size)
-
-  def acknowledge(report: AccountSyncReport): Unit =
-    if report.requestId == requestId && remaining.remove(report.target) then done.countDown()
-
-  def await(timeoutMs: Long): Boolean = done.await(timeoutMs, TimeUnit.MILLISECONDS)
-  def pending: Set[AccountExchange] = remaining.asScala.toSet

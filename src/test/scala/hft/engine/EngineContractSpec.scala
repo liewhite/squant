@@ -25,16 +25,14 @@ class EngineContractSpec extends munit.FunSuite:
   test("账户对齐按 target 去重, 重复应答不能冒充另一个柜台"):
     val liveBinance = AccountExchange(AccountId.Live, Exchange.Binance)
     val liveOkx = AccountExchange(AccountId.Live, Exchange.Okx)
-    val tracker = SyncTracker(Set(liveBinance, liveOkx), requestId = 7L)
+    val tracker = AlignmentTracker(Set(liveBinance, liveOkx), requestId = 7L)
 
-    tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Binance, 7L))
-    tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Binance, 7L))
-    tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Okx, 6L))
-    assert(!tracker.await(1), "重复或旧请求应答不能让等待提前完成")
+    assert(!tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Binance, 7L)))
+    assert(!tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Binance, 7L)))
+    assert(!tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Okx, 6L)))
     assertEquals(tracker.pending, Set(liveOkx))
 
-    tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Okx, 7L))
-    assert(tracker.await(1))
+    assert(tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Okx, 7L)))
 
   /** 指令投递是异步的 (经总线进插件邮箱)，断言要等它到达 */
   private def eventually(what: => String)(cond: => Boolean): Unit =
@@ -175,6 +173,18 @@ class EngineContractSpec extends munit.FunSuite:
 
       eventually(log.asScala.toVector.toString)(log.size == 2)
       assertEquals(log.asScala.toVector, Vector(s"sync:$ex:$sym", s"market:$ex:$sym"), "对齐仍排在行情之前")
+
+  test("策略会话拥有标的租约: 重复接管被拒绝, 停止父会话后自动释放"):
+    supervised:
+      val log = ConcurrentLinkedQueue[String]()
+      val engine = Engine.start(plugins = Vector(RecordingGateway(ex, AccountId.Live, log), RecordingFeed(ex, log)))
+      val first = engine.addStrategy(Watcher(), AccountId.Live)
+
+      val conflict = intercept[IllegalStateException](engine.addStrategy(Watcher(), AccountId.Live))
+      assert(conflict.getMessage.contains("已被 strategy-session"), conflict.getMessage)
+
+      engine.removeStrategy(first)
+      engine.addStrategy(Watcher(), AccountId.Live)
 
   test("停掉柜台后, 那条指令信道确实空了 —— 再加策略会被同一道闸拦下"):
     // 校验查的是**当下**的订阅事实, 不是启动时的一张快照。插件被撤下之后,
