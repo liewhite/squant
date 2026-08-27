@@ -42,6 +42,9 @@ final class MakerHedgeStrategy(
     minHedgeQty: Coin = Coin(0.001),
     /** 单笔对冲数量硬上限 (币本位) (sanity): 超出则不下单 + 告警 (防 delta/gamma 计算 bug 误下巨单)。默认不限 (回测) */
     maxHedgeQty: Coin = Coin(Double.MaxValue),
+    /** 取历史 K 线的通道 —— `(粒度毫秒, 根数) => 最旧->最新的 (high, low, close)`。
+      * [[prepare]] 在开跑前用它把 ATR/均线喂热。默认不预热 (回测与单测自己喂, 见 [[prewarm]]) */
+    history: (Long, Int) => Either[String, Seq[(Double, Double, Double)]] = (_, _) => Right(Seq.empty),
 ) extends Strategy:
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[MakerHedgeStrategy])
   private var warnCnt = 0L
@@ -64,7 +67,25 @@ final class MakerHedgeStrategy(
   private val leg = QuoteLeg()
   private var greeksRefMid: Double = Double.NaN // 上次 greeks 更新时的中间价 (gamma 修正基准)
 
-  /** 启动预热: 用历史 (high, low, close) 喂 K 线 (h/l/c 当三笔 tick), 使 ATR/均线在开机即就绪,
+  /** 就绪：用历史 K 线把 ATR/均线喂热，开机即就绪。
+    *
+    * 粒度与根数直接问序列自己要 —— 从前启动器写死拉 64 根, 而序列容量按
+    * `max(atrPeriodBars*4, rvLongWindowBars+8, 64)` 算 (默认 176), 于是长窗口的 RV
+    * 其实没被喂满。同一个事实写在两处, 对不上也没人会发现。
+    *
+    * 取不到只降级不终止: 慢热期只是 ATR/均线还没准, 对冲会保守一些。
+    */
+  override def prepare(): Unit =
+    history(klines.periodMs, klines.maxBars) match
+      case Right(bars) if bars.nonEmpty =>
+        prewarm(bars)
+        logger.warn(s"[$symbol] 预热 ${bars.size} 根 ${klines.periodMs}ms K 线 -> ATR/均线就绪")
+      case Right(_) =>
+        logger.warn(s"[$symbol] 未预热 (没有接预热数据源): ATR/均线要靠实时 BBO 慢热")
+      case Left(e) =>
+        logger.error(s"[$symbol] 预热失败, ATR/均线将靠实时 BBO 慢热: $e")
+
+  /** 喂历史 (high, low, close) 进 K 线 (h/l/c 当三笔 tick), 使 ATR/均线在开机即就绪,
     * 避免实盘冷启动需等数十根 BBO 累积才敢对冲。最旧->最新。 */
   def prewarm(bars: Seq[(Double, Double, Double)]): Unit =
     bars.zipWithIndex.foreach { case ((h, l, c), i) =>

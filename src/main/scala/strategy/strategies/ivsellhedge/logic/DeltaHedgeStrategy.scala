@@ -63,6 +63,9 @@ import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
   * @param sigmaSource        σ 取实现波动还是期权 IV (见 [[SigmaSource]])
   * @param macdBarMs          MACD 的 K 线粒度 (默认 1 小时)
   * @param maxExposureStaleMs 敞口读数陈旧阈值 (ms): 超过它暂停对冲。>0 才生效
+  * @param history            取历史 K 线的通道 —— `(粒度毫秒, 根数) => 最旧->最新的 (high, low, close)`。
+  *                           [[prepare]] 在开跑前用它把两条序列喂热。默认不预热 (回测与单测
+  *                           自己喂数据, 见 [[prewarmFast]])
   */
 final class DeltaHedgeStrategy(
     exchange: Exchange,
@@ -82,6 +85,7 @@ final class DeltaHedgeStrategy(
     minHedgeQty: Coin = Coin(0.001),
     maxHedgeQty: Coin = Coin(Double.MaxValue),
     maxExposureStaleMs: Long = 0L,
+    history: (Long, Int) => Either[String, Seq[(Double, Double, Double)]] = (_, _) => Right(Seq.empty),
 ) extends Strategy:
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[DeltaHedgeStrategy])
   /** **按类别**分别节流：共用一个计数器的话，一条高频告警会把另一条低频但更重要的
@@ -124,6 +128,31 @@ final class DeltaHedgeStrategy(
     *
     * 这是把两个读数都建在**标的价**上换来的：价格历史交易所有，敞口历史没有。开机即就绪。 */
   def prewarmFast(bars: Seq[(Double, Double, Double)]): Unit = feed(fastKlines, bars, fastBarMs)
+
+  /** 就绪：把两条序列用历史 K 线喂热，**开机即就绪**。
+    *
+    * 从前这段在启动器里 (拉 K 线 -> 调 prewarmXxx -> 处理失败)，忘了调没有任何症状。
+    * 收进来之后它是策略自己的事，见 [[Strategy.prepare]]。
+    *
+    * 粒度与根数直接问序列自己要 (`periodMs` / `maxBars`)，不再在这里重算一遍 ——
+    * 那是同一个事实，写两处迟早对不上：要多少根取决于指标窗口，而窗口就是建序列时给的。
+    *
+    * 取不到只降级不终止：慢热期的行为是**保守侧**的 (死区对称、σ 取下限 -> 对冲偏频而非偏松)，
+    * 为它拒绝启动不划算。但每一条都说清降级后果，否则日志里只剩一句无从判断的失败。
+    */
+  override def prepare(): Unit =
+    warm(macdKlines, "MACD", "启动期方向恒为 0, 死区退化为对称")
+    warm(fastKlines, "σ 与 ER", "启动期 σ 取下限 (对冲偏频但安全), ER 按单边处理 (报价更贵)")
+
+  private def warm(series: KlineSeries, what: String, degraded: String): Unit =
+    history(series.periodMs, series.maxBars) match
+      case Right(bars) if bars.nonEmpty =>
+        feed(series, bars, series.periodMs)
+        logger.warn(s"[$symbol] 预热 ${bars.size} 根 ${series.periodMs}ms K 线 -> $what 就绪")
+      case Right(_) =>
+        logger.warn(s"[$symbol] $what 未预热 (没有接预热数据源): $degraded")
+      case Left(e) =>
+        logger.error(s"[$symbol] $what 预热失败, 将靠实时 BBO 慢热: $degraded —— $e")
 
   private def feed(series: KlineSeries, bars: Seq[(Double, Double, Double)], barMs: Long): Unit =
     bars.zipWithIndex.foreach { case ((h, l, c), i) =>

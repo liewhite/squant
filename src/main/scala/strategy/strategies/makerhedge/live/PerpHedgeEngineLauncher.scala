@@ -16,7 +16,7 @@ import sttp.client4.DefaultSyncBackend
   * SymbolMeta 对齐精度)。
   * gammaAdjust=true: 两次 greeks 轮询间用引擎 BBO + gamma 一阶刷新 delta -> tick 级新鲜。
   *
-  * 启动时用历史 K 线 prewarm ATR/均线, 避免冷启动等数十小时。**无 dry-run, 启动即真实对冲下单** —— 用小资金测试。
+  * ATR/均线的历史预热由策略自己在 [[hft.strategy.Strategy.prepare]] 里做 (本启动器只注入取数通道), 避免冷启动等数十小时。**无 dry-run, 启动即真实对冲下单** —— 用小资金测试。
   * 护栏 (替代 dry-run): 必须有 key; `maxHedgeQty` 单笔对冲张数硬上限 (超出不下单+告警); greeks 缺失/陈旧暂停。
   *
   * **配置**: 全部参数 (含 API 密钥) 走 JSON 文件 [[BybitHedgeConfig]], 路径由第一个命令行参数指定
@@ -53,11 +53,12 @@ import sttp.client4.DefaultSyncBackend
 
     // greeks 陈旧阈值 = 4× 轮询间隔 (连续几次拉取失败即暂停对冲, 不按过期 delta 乱挂)
     val strategy = MakerHedgeStrategy(Exchange.Bybit, t.symbol, t.ccy, AsymHedgeBand.byMa(t.tightAtr, t.looseAtr),
-      offsetPct = t.offset, requoteMs = t.requoteMs, gammaAdjust = true, maxGreeksStaleMs = t.greeksPollMs * 4, maxHedgeQty = Coin(t.maxHedgeQty))
-    // 历史 K 线预热 ATR/均线 (开机即就绪)
-    opt.linearKlines(t.symbol, t.klineBar, 64) match
-      case Right(bars) => strategy.prewarm(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.klineBar} K线 -> ATR/均线就绪")
-      case Left(e)     => logger.error(s"prewarm 取 K 线失败 (ATR 将靠实时 BBO 慢热): $e")
+      offsetPct = t.offset, requoteMs = t.requoteMs, gammaAdjust = true, maxGreeksStaleMs = t.greeksPollMs * 4, maxHedgeQty = Coin(t.maxHedgeQty),
+      // 预热取数。粒度由配置的 klineBar 定 (只有一条序列), **根数听策略的** ——
+      // 要多少根取决于 ATR/RV 的窗口, 那是策略的知识。从前这里写死 64 根, 而序列容量
+      // 按 max(atrPeriodBars*4, rvLongWindowBars+8, 64) 算, 长窗口的 RV 其实一直没喂满。
+      // 什么时候预热、失败怎么办, 都在 MakerHedgeStrategy.prepare 里。
+      history = (_, bars) => opt.linearKlines(t.symbol, t.klineBar, bars))
     engine.addStrategy(strategy, AccountId.Live) // 真实盘
 
     logger.warn("对冲腿运行中 (BBO 复用引擎行情流, 期权 greeks 每 %dms 注入). Ctrl+C 退出".format(t.greeksPollMs))

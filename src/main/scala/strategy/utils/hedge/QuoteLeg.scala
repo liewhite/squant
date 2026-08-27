@@ -6,7 +6,7 @@ import hft.domain.*
   *
   * 抽出来是因为这段机制在两个对冲策略里一模一样（价格轴触发的
   * [[strategy.strategies.makerhedge.logic.MakerHedgeStrategy]] 与敞口轴触发的
-  * [[strategy.strategies.ivsellhedge.logic.DeltaKamaHedgeStrategy]]）：两者只在**何时该对冲**
+  * [[strategy.strategies.ivsellhedge.logic.DeltaHedgeStrategy]]）：两者只在**何时该对冲**
   * 上不同，**怎么挂、怎么撤、怎么防重**完全相同。各写一份的话，改了其中一份不会有任何编译
   * 错误 —— 只是从此两个策略的挂单行为悄悄分叉。
   *

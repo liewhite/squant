@@ -12,7 +12,7 @@ import scala.util.control.NonFatal
 
 /** IV 定量卖出 + KAMA 死区对冲的**全部调参** (SSOT)。缺省字段由 jsoniter 回填默认值。
   *
-  * 分两段：`卖出腿` 归 [[OptionSellerActor]]，`对冲腿` 归 `DeltaKamaHedgeStrategy`。
+  * 分两段：`卖出腿` 归 [[OptionSellerActor]]，`对冲腿` 归 `DeltaHedgeStrategy`。
   *
   * @param symbol            标的 symbol (OKX: 基础币 ETH; 内部拼 ETH-<quote>-SWAP)
   * @param baseCoin          期权基础币 (期权链 instFamily = `<baseCoin>-USD`)

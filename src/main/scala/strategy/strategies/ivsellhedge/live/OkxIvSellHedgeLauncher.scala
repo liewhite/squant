@@ -18,7 +18,7 @@ import sttp.client4.DefaultSyncBackend
   *   期权链/IV/持仓/现金 ──> OptionSellerActor ──┬─> REST 卖出 (IOC, 旁路框架下单通道)
   *                                              └─> OptionExposure (1s) ─┐
   *                                                                       ↓
-  *   永续 BBO ─> 引擎行情流 ──────────────────────> DeltaKamaHedgeStrategy ─> 框架下单通道 ─> 永续
+  *   永续 BBO ─> 引擎行情流 ──────────────────────> DeltaHedgeStrategy ─> 框架下单通道 ─> 永续
   *   永续持仓/回报 ─> OkxAccountFeed ────────────↗
   * ```
   *
@@ -74,6 +74,16 @@ import sttp.client4.DefaultSyncBackend
     val gateway = RestTradingGateway.load(perp, OkxAccountFeed(perp, backend), AccountId.Live)
     val engine = Engine.start(plugins = Vector(gateway, OkxMarketFeed(perp, backend)))
 
+    // 预热的取数通道。策略按**自己序列**的粒度与长度来要 (它才知道指标窗口多长),
+    // 这里只负责把毫秒换回 OKX 的粒度串 —— 粒度串是配置里的事实, 毫秒由它派生。
+    // 什么时候预热、失败了怎么办, 都在 DeltaHedgeStrategy.prepare 里, 不再是本启动器的记性。
+    val barLabel = Map(t.macdBarMs -> t.macdBar, t.fastBarMs -> t.fastBar)
+    def klineHistory(barMs: Long, bars: Int): Either[String, Seq[(Double, Double, Double)]] =
+      barLabel
+        .get(barMs)
+        .toRight(s"配置里没有 ${barMs}ms 对应的 OKX K 线粒度串 (只有 ${t.macdBar} 与 ${t.fastBar})")
+        .flatMap(bar => opt.linearKlines(t.symbol, bar, bars))
+
     val hedge = DeltaHedgeStrategy(
       Exchange.Okx, t.symbol, t.ccy,
       band = t.deltaBand,
@@ -90,17 +100,9 @@ import sttp.client4.DefaultSyncBackend
       minHedgeQty = Coin(t.minHedgeQty),
       maxHedgeQty = Coin(t.maxHedgeQty),
       maxExposureStaleMs = t.exposureStaleMs,
+      history = klineHistory,
     )
-    // 两条序列都用历史 K 线预热, 开机即就绪:
-    //   MACD 不预热 -> 数十根 bar 内方向恒为 0, 死区退化为对称 (那条规则在启动期缺席);
-    //   σ 不预热 -> 阈值取下限 (对冲偏频但安全); ER 不预热 -> 报价按单边处理 (更贵)。
-    opt.linearKlines(t.symbol, t.macdBar, math.max(t.macdSlow + t.macdSignal + 8, 64)) match
-      case Right(bars) => hedge.prewarmMacd(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.macdBar} K线 -> MACD 就绪")
-      case Left(e)     => logger.error(s"prewarm 取 K 线失败 (MACD 将靠实时 BBO 慢热, 期间死区对称): $e")
-    opt.linearKlines(t.symbol, t.fastBar, math.max(math.max(t.erPeriod, t.rvBars) * 4, 64)) match
-      case Right(bars) => hedge.prewarmFast(bars); logger.warn(s"prewarm ${bars.size} 根 ${t.fastBar} K线 -> σ 与 ER 就绪")
-      case Left(e)     => logger.error(s"prewarm 取 K 线失败 (σ 未就绪期间阈值取下限 ${t.minTheta}, 对冲偏频): $e")
-
+    // addStrategy 会在策略开跑之前调用 hedge.prepare() 把两条序列喂热 (阻塞, 见 Strategy.prepare)
     engine.addStrategy(hedge, AccountId.Live) // 先订阅总线
     engine.install(OptionSellerActor(opt, Exchange.Okx, sellerCfg)) // 再开始发敞口读数
 

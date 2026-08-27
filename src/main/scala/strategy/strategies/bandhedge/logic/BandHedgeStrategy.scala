@@ -16,7 +16,7 @@ import hft.strategy.{Strategy, StrategyContext, StrategyHandlers}
   * 策略 (何时对冲、上下是否对称) 完全由注入的 [[band]] 决定——这是寻找买方 edge 的唯一旋钮：
   * 期权腿盈亏由 IV/路径/到期固定，只能靠对冲腿的触发时机与不对称来改变总盈亏。新 edge 思路 =
   * 新 [[HedgeBand]] 实现，核心不动 (开放封闭)。退化：band 给对称恒定带宽即为
-  * [[strategy.strategies.atrtakehedge.logic.AtrTakeHedgeStrategy]] 基线。
+  * "对称恒定带宽"这条基线 (那个类已随不对称带的引入删除)。
   *
   * **需要盘口**：market 单到撮合需 BBO，故订阅 [[SubscriptionKind.BBO]]；回测以
   * [[hft.backtest.SyntheticBboSource]] 把 trades 合成零价差盘口。onEvent 由框架单线程串行调用，

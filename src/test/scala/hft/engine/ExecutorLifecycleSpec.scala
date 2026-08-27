@@ -27,6 +27,30 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
         )
     }
 
+  test("prepare 在第一条事件之前跑完 —— 就绪是组件自己的事, 不是装配方的记性"):
+    // 从前预热由启动器负责 (拉 K 线 -> 调 prewarmXxx), 忘了调没有任何症状: 策略照跑,
+    // 只是头几十根 bar 按退化的参数交易。收进 Strategy.prepare 之后由框架保证时机。
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+      val trace = java.util.concurrent.ConcurrentLinkedQueue[String]()
+
+      class Warming extends Strategy:
+        def orderTimeoutMs: Long = 0L
+        override def prepare(): Unit =
+          Thread.sleep(50) // 就绪需要时间 —— 阻塞是允许的
+          trace.add("prepare")
+        def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument(ex, sym)) { (_, _, _) =>
+          trace.add("event"); Vector.empty
+        }
+
+      system.spawn(Executor.readyToTrade(Warming(), AccountId.Live))
+      bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 0L), 0L))
+
+      val deadline = System.currentTimeMillis() + 2000
+      while !trace.contains("event") && System.currentTimeMillis() < deadline do Thread.sleep(5)
+      assertEquals(trace.toArray.toVector, Vector("prepare", "event"), "预热必须先于第一条事件跑完")
+
   test("撤下策略时先撤掉它挂在交易所的单, 且不平仓"):
     supervised:
       val bus = EventBus()

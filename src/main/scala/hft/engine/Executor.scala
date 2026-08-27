@@ -1,6 +1,6 @@
 package hft.engine
 
-import hft.actor.Actor
+import hft.actor.{Actor, ActorContext}
 import hft.domain.*
 import hft.event.Commands.AccountSynced
 import hft.event.{AnyEvent, Interest, Subscription}
@@ -78,6 +78,13 @@ final class Executor private (
       runner.observe(event)
       Vector.empty
     else runner.onEvent(event, now)
+
+  /** 事件循环开跑之前，先让策略把自己准备好 —— 见 [[Strategy.prepare]]。
+    *
+    * 这一步**阻塞**，而且就该阻塞：邮箱此刻已订上总线，排队的事件一条不丢，
+    * 阻塞只是推迟消费。启动期没有订单在流动，不存在阻塞代价。
+    */
+  override def onStart(ctx: ActorContext): Unit = strategy.prepare()
 
   /** 停机收尾：撤掉本策略还挂在交易所的单。
     *
