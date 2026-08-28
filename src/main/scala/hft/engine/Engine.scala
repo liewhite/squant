@@ -129,7 +129,7 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
         // 调用线程中断等非组件失败也要撤下整批；会话自己的失败则可能已触发全系统停机。
         ids.reverse.foreach { handle =>
           try system.stop(handle)
-          catch case cleanup: Throwable => e.addSuppressed(cleanup)
+          catch case cleanup: Throwable => if cleanup ne e then e.addSuppressed(cleanup)
         }
         throw e
   }
@@ -175,8 +175,9 @@ object Engine:
 
   /** 启动引擎：装配总线与生命周期树，装上时钟与调用方给的插件。
     *
-    * 时钟与插件作为一批启动事务：先快照声明、校验、接线并完成 `onPrepare`，再统一激活处理
-    * 能力并运行 `onStart`。启动钩子可以做外部握手，事件循环要等整批启动成功后才消费邮箱。
+    * 时钟与插件作为一批启动事务：先快照声明、校验、接线并完成 `onPrepare`，再按依赖拓扑
+    * 运行 `onStart`。启动钩子的总线输出先缓冲；整批成功后才原子激活处理能力、冲刷输出并
+    * 打开事件循环。
     * 插件给定顺序不承担消息安全或停机正确性；硬依赖必须用 `Requirement` 声明，停机由依赖图
     * 与所有权树共同排序。
     *

@@ -141,6 +141,10 @@ private[actor] object ComponentGraph:
       throw IllegalStateException(s"组件依赖与生命周期所有权形成停机环: $cycle")
     result.toVector
 
+  /** 提供方先于依赖方、父组件先于子组件；与停止顺序严格互逆。 */
+  def startOrder(handles: Set[ActorHandle], assemblyOrder: Vector[ActorHandle]): Vector[ActorHandle] =
+    stopOrder(handles, assemblyOrder).reverse
+
   private def missingRequirement(owner: String, requirement: Requirement, count: Int): Option[String] =
     Option.when(!requirement.capability.cardinality.accepts(count)) {
       val detail = if requirement.description.isEmpty then "" else s" (${requirement.description})"

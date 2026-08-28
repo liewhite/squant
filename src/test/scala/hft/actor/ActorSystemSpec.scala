@@ -521,6 +521,58 @@ class ActorSystemSpec extends munit.FunSuite:
       assertEquals(system.alive, 0)
       assertEquals(bus.subscriberCount(Topics.Bbo, btc), 0, "回滚必须撤销全部接线")
 
+  test("前序 onStart 失败时, 仅 prepare 的后续组件不执行 onStop 但仍释放资源"):
+    val system = ActorSystem(EventBus())
+    val trace = ConcurrentLinkedQueue[String]()
+
+    class FailsFirst extends Actor:
+      override def name = "fails-first"
+      override def onStart(ctx: ActorContext): Unit = sys.error("first start failed")
+      override def onStop(now: Timestamp): Vector[AnyEvent] =
+        trace.add("stop:first")
+        Vector.empty
+
+    class PreparedOnly extends Actor:
+      override def name = "prepared-only"
+      override def onPrepare(ctx: ActorContext): Unit =
+        ctx.manage("prepared-resource")(_ => trace.add("release:prepared"))
+      override def onStart(ctx: ActorContext): Unit = trace.add("start:prepared")
+      override def onStop(now: Timestamp): Vector[AnyEvent] =
+        trace.add("stop:prepared")
+        Vector.empty
+
+    intercept[RuntimeException](system.spawnAll(Vector(FailsFirst(), PreparedOnly())))
+    assertEquals(
+      trace.asScala.toVector,
+      Vector("release:prepared", "stop:first"),
+      "未进入 onStart 的组件不能执行依赖启动态的补偿钩子",
+    )
+    assertEquals(system.alive, 0)
+    system.close()
+
+  test("onStart 启动的受管任务若立即失败, 启动事务不得提交 Running"):
+    val root = RuntimeException("start task failed")
+    val failureReported = CountDownLatch(1)
+    val laterStartEntered = new java.util.concurrent.atomic.AtomicBoolean(false)
+    val system = ActorSystem(EventBus(), failureSink = _ => failureReported.countDown())
+
+    class FailsBeforeCommit extends Actor:
+      override def name = "fails-before-commit"
+      override def onStart(ctx: ActorContext): Unit =
+        ctx.fork(throw root)
+        assert(failureReported.await(2, TimeUnit.SECONDS), "测试前提: 后台失败必须发生在 onStart 返回前")
+
+    class MustNotStart extends Actor:
+      override def name = "must-not-start"
+      override def onStart(ctx: ActorContext): Unit = laterStartEntered.set(true)
+
+    val startup = intercept[RuntimeException](system.spawnAll(Vector(FailsBeforeCommit(), MustNotStart())))
+    assert(startup eq root, s"启动调用必须保留原始失败对象: $startup")
+    assert(!laterStartEntered.get, "事务已知失败后不能继续扩大后续 onStart 外部副作用")
+    val shutdown = intercept[RuntimeException](system.awaitShutdown())
+    assert(shutdown eq root, s"系统停机必须保留同一个根因: $shutdown")
+    assertEquals(system.alive, 0)
+
   test("onStart 抛 InterruptedException 仍完整回滚订阅与资源"):
     val bus = EventBus()
     val system = ActorSystem(bus)
@@ -561,7 +613,7 @@ class ActorSystemSpec extends munit.FunSuite:
     assertEquals(handle.state, ActorState.Failed)
     assertEquals(system.alive, 0)
 
-  test("prepare 提交前命令处理能力不可见"):
+  test("启动事务提交前命令处理能力不可见"):
     val bus = EventBus()
     val system = ActorSystem(bus)
     val entered = CountDownLatch(1)
@@ -590,7 +642,7 @@ class ActorSystemSpec extends munit.FunSuite:
     assertEquals(bus.handlerCount(TestCommand, "k"), 1)
     system.stop(handles.remove())
 
-  test("prepare 禁止命令副作用, start 在能力激活后可以发起命令"):
+  test("prepare 禁止命令副作用, start 输出在整批提交后投递"):
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus)
@@ -615,6 +667,60 @@ class ActorSystemSpec extends munit.FunSuite:
       val handle = system.spawn(StartsWithCommand())
       assert(handled.await(2, TimeUnit.SECONDS), "start 发出的命令应在整批进入 Running 后由事件循环消费")
       system.stop(handle)
+
+  test("慢 onStart 期间外部命令明确失败, 后续启动回滚不会静默丢命令"):
+    val bus = EventBus()
+    val system = ActorSystem(bus)
+    val entered = CountDownLatch(1)
+    val proceed = CountDownLatch(1)
+    val startupFailures = ConcurrentLinkedQueue[Throwable]()
+
+    class SlowProvider extends Actor:
+      override def name = "slow-start-provider"
+      override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
+      override def onStart(ctx: ActorContext): Unit =
+        entered.countDown()
+        proceed.await()
+
+    class FailingSibling extends Actor:
+      override def name = "later-start-failure"
+      override def onStart(ctx: ActorContext): Unit = sys.error("later start failed")
+
+    val starter = Thread.ofVirtual().start { () =>
+      try system.spawnAll(Vector(SlowProvider(), FailingSibling()))
+      catch case e: Throwable => startupFailures.add(e)
+    }
+    assert(entered.await(2, TimeUnit.SECONDS), "测试前提: 第一组件仍停在 onStart")
+    val command = intercept[IllegalStateException](bus.publish(Event.local(TestCommand, "k")))
+    assert(command.getMessage.contains("实际 0 个"), command.getMessage)
+    proceed.countDown()
+    starter.join()
+
+    assert(startupFailures.asScala.exists(_.getMessage.contains("later start failed")))
+    assertEquals(bus.handlerCount(TestCommand, "k"), 0)
+    assertEquals(system.alive, 0)
+
+  test("启动缓冲含无处理者命令时提交零副作用: 不激活能力也不泄露较早事件"):
+    val bus = EventBus()
+    val system = ActorSystem(bus)
+    val observations = bus.subscribe(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
+
+    class InvalidStartupOutput extends Actor:
+      override def name = "invalid-startup-output"
+      override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
+      override def onStart(ctx: ActorContext): Unit =
+        ctx.publish(Event.at(Topics.Bbo, bbo(), t0))
+        ctx.publish(Event.local(TestCommand, "missing"))
+
+    val failure = intercept[IllegalStateException](system.spawn(InvalidStartupOutput()))
+    assert(failure.getMessage.contains("提交后将有 0 个"), failure.getMessage)
+    assertEquals(bus.handlerCount(TestCommand, "k"), 0, "失败提交不能短暂或永久暴露处理能力")
+    assertEquals(observations.health.queued, 0L, "命令预检失败前不能泄露更早的普通事件")
+    val external = intercept[IllegalStateException](bus.publish(Event.local(TestCommand, "k")))
+    assert(external.getMessage.contains("实际 0 个"), external.getMessage)
+    assertEquals(system.alive, 0)
+    observations.close()
+    system.close()
 
   test("组件声明在装配入口只求值一次, 验证与接线共享同一快照"):
     supervised:
@@ -758,28 +864,33 @@ class ActorSystemSpec extends munit.FunSuite:
       class Provider extends Actor:
         override def name = "provider"
         override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
+        override def onStart(ctx: ActorContext): Unit = starts.add(name)
 
       val handles = system.spawnAll(Vector(Consumer(), Provider()))
-      assertEquals(starts.asScala.toVector, Vector("consumer"), "整批先接线, 顺序不影响依赖满足")
+      assertEquals(starts.asScala.toVector, Vector("provider", "consumer"), "提供方必须先于依赖方启动")
       handles.foreach(system.stop)
 
   test("非消息组件也能用通用 capability 声明上下游硬依赖"):
     supervised:
       val system = ActorSystem(EventBus())
+      val ready = new java.util.concurrent.atomic.AtomicBoolean(false)
       class Storage extends Actor:
         override def name = "storage"
         override def capabilities: Set[CapabilityProvider] =
           Set(CapabilityProvider.provide(StorageCapability, "positions"))
+        override def onStart(ctx: ActorContext): Unit = ready.set(true)
       class Consumer extends Actor:
         override def name = "storage-consumer"
         override def requirements: Set[Requirement] =
           Set(Requirement.capability(StorageCapability, "positions"))
+        override def onStart(ctx: ActorContext): Unit =
+          assert(ready.get, "通用 capability 提供方必须在依赖方之前完成 onStart")
 
       val missing = intercept[IllegalStateException](system.spawn(Consumer()))
       assert(missing.getMessage.contains("storage@positions"), missing.getMessage)
-      val handles = system.spawnAll(Vector(Storage(), Consumer()))
-      system.stop(handles.last)
+      val handles = system.spawnAll(Vector(Consumer(), Storage()))
       system.stop(handles.head)
+      system.stop(handles.last)
 
   test("动态停止提供者若会让存活组件丢失硬依赖 -> 在停止副作用前拒绝"):
     supervised:

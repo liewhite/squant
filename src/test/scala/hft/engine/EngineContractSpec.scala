@@ -8,6 +8,8 @@ import hft.strategy.{Strategy, StrategyHandlers}
 import ox.supervised
 
 import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicInteger}
+import java.util.concurrent.{CountDownLatch, CyclicBarrier, TimeUnit}
 import scala.jdk.CollectionConverters.*
 import hft.TestUnits.given
 
@@ -25,14 +27,69 @@ class EngineContractSpec extends munit.FunSuite:
   test("账户对齐按 target 去重, 重复应答不能冒充另一个柜台"):
     val liveBinance = AccountExchange(AccountId.Live, Exchange.Binance)
     val liveOkx = AccountExchange(AccountId.Live, Exchange.Okx)
-    val tracker = AlignmentTracker(Set(liveBinance, liveOkx), requestId = 7L)
+    val readiness = AlignmentReadiness(Set(liveBinance, liveOkx), requestId = 7L)
 
-    assert(!tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Binance, 7L)))
-    assert(!tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Binance, 7L)))
-    assert(!tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Okx, 6L)))
-    assertEquals(tracker.pending, Set(liveOkx))
+    assert(!readiness.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Binance, 7L))(()))
+    assert(!readiness.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Binance, 7L))(()))
+    assert(!readiness.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Okx, 6L))(()))
+    assertEquals(readiness.pending, Set(liveOkx))
 
-    assert(tracker.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Okx, 7L)))
+    assert(readiness.acknowledge(AccountSyncReport(AccountId.Live, Exchange.Okx, 7L))(()))
+
+  test("最后一个对齐 ACK 与超时竞争时只有一个赢家"):
+    val target = AccountExchange(AccountId.Live, Exchange.Binance)
+    val report = AccountSyncReport(AccountId.Live, Exchange.Binance, 11L)
+
+    (1 to 200).foreach { _ =>
+      val readiness = AlignmentReadiness(Set(target), requestId = 11L)
+      val start = CyclicBarrier(3)
+      val done = CountDownLatch(2)
+      val activated = AtomicInteger(0)
+      val ackWon = AtomicBoolean(false)
+      val timeoutWon = AtomicBoolean(false)
+
+      Thread.ofVirtual().start { () =>
+        start.await()
+        ackWon.set(readiness.acknowledge(report)(activated.incrementAndGet(): Unit))
+        done.countDown()
+      }
+      Thread.ofVirtual().start { () =>
+        start.await()
+        timeoutWon.set(readiness.timeout(50L)(_ => ()))
+        done.countDown()
+      }
+      start.await()
+      assert(done.await(2, TimeUnit.SECONDS), "竞争线程必须结束")
+
+      if ackWon.get then
+        assert(!timeoutWon.get)
+        assertEquals(activated.get, 1)
+      else
+        assert(timeoutWon.get, "ACK 没赢时必须由超时赢")
+        assertEquals(activated.get, 0, "超时先完成后不能再激活行情")
+    }
+
+  test("对齐超时先同步上报组件失败, 再唤醒 Engine 等待者"):
+    val target = AccountExchange(AccountId.Live, Exchange.Binance)
+    val readiness = AlignmentReadiness(Set(target), requestId = 12L)
+    val reporting = CountDownLatch(1)
+    val allowReport = CountDownLatch(1)
+    val finished = CountDownLatch(1)
+
+    Thread.ofVirtual().start { () =>
+      readiness.timeout(50L) { _ =>
+        reporting.countDown()
+        allowReport.await()
+      }
+      finished.countDown()
+    }
+
+    assert(reporting.await(2, TimeUnit.SECONDS), "测试前提: timeout 已锁定失败并进入同步上报")
+    assert(!readiness.await(50L), "失败上报完成前不能唤醒 Engine 执行补偿 stop")
+    allowReport.countDown()
+    assert(finished.await(2, TimeUnit.SECONDS))
+    val failure = intercept[IllegalStateException](readiness.awaitReady("test-session"))
+    assert(failure.getMessage.contains("启动对齐超时"), failure.getMessage)
 
   /** 指令投递是异步的 (经总线进插件邮箱)，断言要等它到达 */
   private def eventually(what: => String)(cond: => Boolean): Unit =

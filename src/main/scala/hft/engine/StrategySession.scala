@@ -15,17 +15,16 @@ private[engine] final class StrategySession(
     strategy: Strategy,
     account: AccountId,
     claims: InstrumentClaims,
+    syncTimeoutMs: Long = Engine.SyncTimeoutMs,
 ) extends Actor:
+  require(syncTimeoutMs > 0, "syncTimeoutMs 必须大于 0")
   private val logger = LoggerFactory.getLogger(classOf[StrategySession])
   private val executor = Executor(strategy, account)
   private val subscription: Subscription = executor.subscription
   private val targets = subscription.alignmentTargets(account)
   private val symbolsByExchange = subscription.instruments.groupMap(_.exchange)(_.symbol)
   private val requestId = StrategySession.nextRequestId()
-  private val alignment = AlignmentTracker(targets, requestId)
-  private val completionLock = new Object
-  @volatile private var completion: Either[Throwable, Unit] = null
-  private val ready = CountDownLatch(1)
+  private val readiness = AlignmentReadiness(targets, requestId)
   private var ctx: ActorContext = scala.compiletime.uninitialized
 
   override def name: String = s"strategy-session(${strategy.getClass.getSimpleName}@$account)"
@@ -39,13 +38,11 @@ private[engine] final class StrategySession(
     context.spawn(executor)
 
   override def onStart(context: ActorContext): Unit =
-    if targets.isEmpty then becomeReady()
+    if targets.isEmpty then readiness.completeIfEmpty(activateMarketStreams())
     else
       context.fork {
-        if !ready.await(Engine.SyncTimeoutMs, TimeUnit.MILLISECONDS) then
-          val failure = alignmentTimeout()
-          failReadiness(failure)
-          throw failure
+        if !readiness.await(syncTimeoutMs) then
+          readiness.timeout(syncTimeoutMs)(context.reportFailure)
       }
       targets.foreach { target =>
         val symbols = symbolsByExchange.getOrElse(target.exchange, Set.empty)
@@ -54,59 +51,89 @@ private[engine] final class StrategySession(
 
   override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
     event.as(AccountSynced).foreach { report =>
-      if alignment.acknowledge(report) then becomeReady()
+      if readiness.acknowledge(report)(activateMarketStreams()) then
+        logger.info(s"策略会话就绪: $name targets=${targets.mkString(",")} req=$requestId")
     }
     Vector.empty
 
   override def onStop(now: Timestamp): Vector[AnyEvent] =
-    failReadiness(IllegalStateException(s"$name 在启动对齐完成前停止"))
+    readiness.fail(IllegalStateException(s"$name 在启动对齐完成前停止"))
     Vector.empty
 
   /** Engine 只等待领域层的“策略可交易”条件，不再参与其实现步骤。 */
-  def awaitReady(): Unit =
-    ready.await()
-    completion match
-      case Right(()) => ()
-      case Left(e)   => throw e
-      case null      => throw IllegalStateException(s"$name 就绪信号缺少结果")
+  def awaitReady(): Unit = readiness.awaitReady(name)
 
-  private def becomeReady(): Unit = completionLock.synchronized {
-    if completion == null then
-      try
-        subscription.marketStreams.groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
-          ctx.publish(Event.local(MarketSubscription, MarketSubscriptionRequest(exchange, kinds.toSet)))
-        }
-        completion = Right(())
-        ready.countDown()
-        logger.info(s"策略会话就绪: $name targets=${targets.mkString(",")} req=$requestId")
-      catch
-        case e: Throwable =>
-          completion = Left(e)
-          ready.countDown()
-          throw e
-  }
-
-  private def failReadiness(failure: Throwable): Unit = completionLock.synchronized {
-    if completion == null then
-      completion = Left(failure)
-      ready.countDown()
-  }
-
-  private def alignmentTimeout(): IllegalStateException =
-    IllegalStateException(
-      s"启动对齐超时 (${Engine.SyncTimeoutMs}ms, req=$requestId): ${alignment.pending.mkString(",")} 中有柜台没有回应。" +
-        "对齐未完成就放行会让策略基于空仓位决策"
-    )
+  private def activateMarketStreams(): Unit =
+    subscription.marketStreams.groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
+      ctx.publish(Event.local(MarketSubscription, MarketSubscriptionRequest(exchange, kinds.toSet)))
+    }
 
 private[engine] object StrategySession:
   private val sequence = AtomicLong(0L)
   private def nextRequestId(): Long = sequence.incrementAndGet()
 
-/** 对齐应答的纯状态机：重复、过期和未知 target 都不能推动完成。 */
-private[engine] final class AlignmentTracker(targets: Set[AccountExchange], requestId: Long):
+/** 对齐与超时共用一个线性化点：最后一个 ACK 和超时只能有一个完成会话。 */
+private[engine] final class AlignmentReadiness(targets: Set[AccountExchange], requestId: Long):
   private val remaining = scala.collection.mutable.Set.from(targets)
+  private val ready = CountDownLatch(1)
+  @volatile private var completion: Either[Throwable, Unit] = null
 
-  def acknowledge(report: hft.event.Commands.AccountSyncReport): Boolean =
-    report.requestId == requestId && remaining.remove(report.target) && remaining.isEmpty
+  def acknowledge(report: hft.event.Commands.AccountSyncReport)(activate: => Unit): Boolean = synchronized {
+    if completion != null || report.requestId != requestId || !remaining.remove(report.target) then false
+    else if remaining.nonEmpty then false
+    else complete(activate)
+  }
 
-  def pending: Set[AccountExchange] = remaining.toSet
+  def completeIfEmpty(activate: => Unit): Boolean = synchronized {
+    if completion != null || remaining.nonEmpty then false else complete(activate)
+  }
+
+  def timeout(timeoutMs: Long)(reportFailure: Throwable => Unit): Boolean =
+    val failure = synchronized {
+      if completion != null then None
+      else
+        val cause = IllegalStateException(
+          s"启动对齐超时 (${timeoutMs}ms, req=$requestId): ${remaining.mkString(",")} 中有柜台没有回应。" +
+            "对齐未完成就放行会让策略基于空仓位决策"
+        )
+        completion = Left(cause)
+        Some(cause)
+    }
+    failure match
+      case Some(cause) =>
+        // 等待者只能在核心已经记录并传播组件失败后醒来，避免 Engine.stop 抢先把 watchdog 当成停机噪声。
+        try reportFailure(cause)
+        finally ready.countDown()
+        true
+      case None => false
+
+  def fail(failure: Throwable): Boolean = synchronized {
+    if completion != null then false
+    else
+      completion = Left(failure)
+      ready.countDown()
+      true
+  }
+
+  def await(timeoutMs: Long): Boolean = ready.await(timeoutMs, TimeUnit.MILLISECONDS)
+
+  def awaitReady(owner: String): Unit =
+    ready.await()
+    completion match
+      case Right(()) => ()
+      case Left(e)   => throw e
+      case null      => throw IllegalStateException(s"$owner 就绪信号缺少结果")
+
+  def pending: Set[AccountExchange] = synchronized(remaining.toSet)
+
+  private def complete(activate: => Unit): Boolean =
+    try
+      activate
+      completion = Right(())
+      ready.countDown()
+      true
+    catch
+      case e: Throwable =>
+        completion = Left(e)
+        ready.countDown()
+        throw e

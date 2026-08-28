@@ -53,8 +53,7 @@ final class ActorHandle private[actor] (
   private[actor] val pendingPublications = ConcurrentLinkedQueue[AnyEvent]()
   private[actor] val stateRef = AtomicReference(ActorState.Wired)
   private[actor] val terminalFailure = AtomicReference[Throwable](null)
-  private[actor] val prepareEntered = AtomicBoolean(false)
-  private[actor] val startCompleted = AtomicBoolean(false)
+  private[actor] val startEntered = AtomicBoolean(false)
   private[actor] val loopStarted = AtomicBoolean(false)
   private[actor] val stopHookRun = AtomicBoolean(false)
   private[actor] val stopStarted = AtomicBoolean(false)
@@ -84,6 +83,8 @@ final class ActorContext private[actor] (
   def spawn(child: Actor): ActorHandle = system.spawnUnder(Some(handle), child)
   def childSystem(childBus: EventBus): ActorSystem = system.childSystem(handle, childBus)
   def fork(body: => Unit): ManagedTask = system.forkManaged(handle)(body)
+  /** 同步记录组件终态并触发全系统有序停机。幂等；调用后当前控制流必须立即结束。 */
+  def reportFailure(cause: Throwable): Unit = system.reportManagedFailure(handle, cause)
   def manage[A](resource: A)(release: A => Unit): A = system.manage(handle, resource)(release)
   def scheduleEvent(ms: Long, event: AnyEvent): Unit =
     system.schedule(handle, ms) { system.publishFrom(handle, event) }

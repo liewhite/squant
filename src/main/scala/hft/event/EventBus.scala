@@ -108,14 +108,33 @@ final class EventBus:
     * 命令成功交给随后回滚的组件。整批先校验再登记，也不会暴露半激活状态。
     */
   private[hft] def activateHandlers(bindings: Seq[(EventBus.Mailbox, Set[CommandHandler])]): Unit =
+    commitHandlersAndPublications(bindings, Vector.empty)
+
+  /** 原子提交一批处理者和启动输出。
+    *
+    * 先用激活后的处理者投影验证所有缓冲命令；只有验证全部通过，才登记处理者并按原序发布。
+    * 因而提交失败不会暴露处理者，也不会让较早的普通事件先泄露出去。
+    */
+  private[hft] def commitHandlersAndPublications(
+      bindings: Seq[(EventBus.Mailbox, Set[CommandHandler])],
+      publications: Seq[AnyEvent],
+  ): Unit =
     registrationLock.synchronized {
       val requested = bindings.flatMap { (mailbox, handlers) =>
         if mailbox.handledByTopic.nonEmpty then
           throw IllegalStateException("同一个邮箱不能重复激活命令处理能力")
         handlers.map(handler => ((handler.topic, handler.key), mailbox))
       }
-      requested.groupMap(_._1)(_._2).foreach { case ((topic, key), mailboxes) =>
-        val added = mailboxes.distinct.size
+      val additions = requested.groupMap(_._1)(_._2).view.mapValues(_.distinct).toMap
+
+      def projectedHandlerCount(topic: CommandTopic[?, ?], key: Any): Int =
+        val existing = Option(topics.get(topic))
+          .flatMap(idx => Option(idx.handlersByKey.get(key)))
+          .fold(0)(_.size)
+        existing + additions.getOrElse((topic, key), Seq.empty).size
+
+      additions.foreach { case ((topic, key), mailboxes) =>
+        val added = mailboxes.size
         val total = Option(topics.get(topic))
           .flatMap(idx => Option(idx.handlersByKey.get(key)))
           .fold(added)(_.size + added)
@@ -123,6 +142,16 @@ final class EventBus:
           throw IllegalStateException(
             s"命令 $topic@$key 要求${topic.cardinality.explain}处理者, 激活后将有 $total 个"
           )
+      }
+      publications.foreach { event =>
+        event.topic match
+          case command: CommandTopic[?, ?] =>
+            val total = projectedHandlerCount(command, event.key)
+            if !command.cardinality.accepts(total) then
+              throw IllegalStateException(
+                s"命令 $command@${event.key} 要求${command.cardinality.explain}处理者, 提交后将有 $total 个"
+              )
+          case _ => ()
       }
       bindings.foreach { (mailbox, handlers) =>
         val handledByTopic = handlers.groupMap(_.topic)(_.key)
@@ -132,6 +161,7 @@ final class EventBus:
         }
         mailbox.handledByTopic = handledByTopic
       }
+      publications.foreach(publish)
     }
 
   /** 无差别订阅本总线上的**一切** —— 给**中继**用，不给业务组件用。

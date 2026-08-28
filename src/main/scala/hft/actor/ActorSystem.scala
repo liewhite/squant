@@ -95,7 +95,7 @@ final class ActorSystem(
       t
     }
 
-  /** 启动期普通事件先留在组件本地，整棵事务树提交后才对已运行组件可见。 */
+  /** 启动期输出先留在组件本地，整棵事务树提交后才对外可见。 */
   private[actor] def publishFrom(owner: ActorHandle, event: AnyEvent): Unit =
     val publishNow = owner.lifecycleLock.synchronized {
       owner.state match
@@ -104,7 +104,10 @@ final class ActorSystem(
             throw IllegalStateException(s"组件 ${owner.name} 在 prepare 提交前不能发布命令 ${event.topic}")
           owner.pendingPublications.add(event)
           false
-        case ActorState.Starting | ActorState.Running => true
+        case ActorState.Starting =>
+          owner.pendingPublications.add(event)
+          false
+        case ActorState.Running => true
         case state => throw IllegalStateException(s"组件 ${owner.name} 已处于 $state, 不能再发布事件 ${event.topic}")
     }
     if publishNow then publishWhileActive(owner, event)
@@ -200,8 +203,11 @@ final class ActorSystem(
     }
 
   private def taskFailed(owner: ActorHandle, e: Throwable): Unit =
-    if owner.terminalFailure.compareAndSet(null, e) then reportFailure(owner.name, e)
+    val first = assemblyLock.synchronized(owner.terminalFailure.compareAndSet(null, e))
+    if first then reportFailure(owner.name, e)
     else logger.warn(s"组件 ${owner.name} 的另一个子任务也失败了: ${e.getMessage}")
+
+  private[actor] def reportManagedFailure(owner: ActorHandle, e: Throwable): Unit = taskFailed(owner, e)
 
   private def interruptedFailure(
       owner: ActorHandle,
@@ -259,15 +265,29 @@ final class ActorSystem(
       wired.foreach(prepareHook)
       if !joinsActiveTransaction then
         val transactionHandles = wired.toVector.flatMap(descendants).distinct
-        transactionHandles.flatMap(handle => Option(handle.terminalFailure.get)).headOption.foreach(throw _)
-        // prepare 全部成功后才让处理能力可见；事件循环仍在栅栏后，直到整批 start 完成。
-        transactionHandles.foreach(startLoop)
-        bus.activateHandlers(transactionHandles.map(handle => handle.mailbox -> handle.commandHandlers))
-        transactionHandles.foreach(_.stateRef.set(ActorState.Starting))
-        transactionHandles.foreach(startHook)
-        transactionHandles.foreach(commitPublications)
-        transactionHandles.foreach(_.loopCommitted.set(true))
-        transactionHandles.foreach(_.runGate.countDown())
+        val orderedHandles = ComponentGraph.startOrder(transactionHandles.toSet, allHandles)
+        orderedHandles.flatMap(handle => Option(handle.terminalFailure.get)).headOption.foreach(throw _)
+        // 事件循环先在栅栏后就位；处理能力与启动输出都留到唯一提交点再对外可见。
+        orderedHandles.foreach(startLoop)
+        orderedHandles.foreach(_.stateRef.set(ActorState.Starting))
+        orderedHandles.foreach { handle =>
+          startHook(handle)
+          ensureTransactionHealthy(orderedHandles)
+        }
+        // 后台任务失败和启动提交共用 assemblyLock：要么失败先赢、整批回滚；要么提交先赢，
+        // 之后的失败属于已运行组件。绝不返回一个已失败却被覆盖成 Running 的句柄。
+        assemblyLock.synchronized {
+          ensureTransactionHealthyLocked(orderedHandles)
+          commitTransaction(orderedHandles)
+          orderedHandles.foreach(_.loopCommitted.set(true))
+          orderedHandles.foreach { handle =>
+            logger.info(
+              s"actor started: ${handle.name} interests=${handle.interests.size} " +
+                s"handlers=${handle.commandHandlers.size} requirements=${handle.requirements.size}"
+            )
+          }
+          orderedHandles.foreach(_.runGate.countDown())
+        }
       wired.toVector
     catch
       case startFailure: Throwable =>
@@ -283,6 +303,16 @@ final class ActorSystem(
       assemblingHandles --= wired
       assemblyLock.notifyAll()
     }
+
+  private def ensureTransactionHealthy(handles: Vector[ActorHandle]): Unit = assemblyLock.synchronized {
+    ensureTransactionHealthyLocked(handles)
+  }
+
+  private def ensureTransactionHealthyLocked(handles: Vector[ActorHandle]): Unit =
+    handles.flatMap(handle => Option(handle.terminalFailure.get)).headOption.foreach(throw _)
+    Option(failure.get).foreach(throw _)
+    if !accepting.get then throw IllegalStateException("ActorSystem 已进入停机阶段，拒绝提交启动事务")
+    if quarantined.get then throw IllegalStateException("ActorSystem 已隔离卡死组件，拒绝提交启动事务")
 
   /** 同一启动事务树内允许继续 spawn；无关装配必须等当前事务提交或回滚。 */
   private def awaitAssemblyTurn(parent: Option[ActorHandle]): Unit =
@@ -319,7 +349,6 @@ final class ActorSystem(
 
   private def prepareHook(handle: ActorHandle): Unit =
     handle.stateRef.set(ActorState.Preparing)
-    handle.prepareEntered.set(true)
     val problem = AtomicReference[Throwable](null)
     val finished = CountDownLatch(1)
     val thread = Thread.ofVirtual().name(s"actor-${handle.name}-prepare").unstarted { () =>
@@ -347,12 +376,13 @@ final class ActorSystem(
     handle.stateRef.set(ActorState.Prepared)
 
   private def startHook(handle: ActorHandle): Unit =
-    // 能力已激活，插件现在可以连接外部系统和发布命令；事件循环仍由 runGate 挡住。
-    handle.startCompleted.set(true)
+    // 插件可以连接外部系统；总线输出会留在事务缓冲区，直到整批 onStart 成功。
     val problem = AtomicReference[Throwable](null)
     val finished = CountDownLatch(1)
     val thread = Thread.ofVirtual().name(s"actor-${handle.name}-start").unstarted { () =>
-      try handle.actor.onStart(ActorContext(handle, this))
+      try
+        handle.startEntered.set(true)
+        handle.actor.onStart(ActorContext(handle, this))
       catch
         case e: InterruptedException =>
           Thread.currentThread().interrupt()
@@ -389,13 +419,14 @@ final class ActorSystem(
             Thread.currentThread().interrupt()
             problem = interruptedFailure(handle, "事件循环", e)
           case e: Throwable => problem = e
-        try finish(handle)
-        catch
-          case cleanup: InterruptedException =>
-            val wrapped = interruptedFailure(handle, "onStop", cleanup)
-            if problem == null then problem = wrapped else problem.addSuppressed(wrapped)
-          case cleanup: Throwable =>
-            if problem == null then problem = cleanup else problem.addSuppressed(cleanup)
+        if handle.startEntered.get then
+          try finish(handle)
+          catch
+            case cleanup: InterruptedException =>
+              val wrapped = interruptedFailure(handle, "onStop", cleanup)
+              if problem == null then problem = wrapped else problem.addSuppressed(wrapped)
+            case cleanup: Throwable =>
+              if problem == null then problem = cleanup else problem.addSuppressed(cleanup)
         if problem != null then handle.terminalFailure.compareAndSet(null, problem)
         if handle.terminalFailure.get != null && handle.state != ActorState.Quarantined then
           handle.stateRef.set(ActorState.Failed)
@@ -405,24 +436,33 @@ final class ActorSystem(
     handle.loopThread.set(thread)
     thread.start()
     handle.loopStarted.set(true)
-    logger.info(
-      s"actor started: ${handle.name} interests=${handle.interests.size} handlers=${handle.commandHandlers.size} " +
-        s"requirements=${handle.requirements.size}"
-    )
 
-  /** 冲刷 prepare 期的普通输出，并在同一把锁内切到 Running，保持该组件内发布顺序。 */
-  private def commitPublications(handle: ActorHandle): Unit = handle.lifecycleLock.synchronized {
-    val read = publicationGate.readLock()
-    read.lock()
-    try
-      if quarantined.get then throw IllegalStateException("ActorSystem 已隔离卡死组件，拒绝提交启动事务")
-      var event = handle.pendingPublications.poll()
-      while event != null do
-        bus.publish(event)
-        event = handle.pendingPublications.poll()
-    finally read.unlock()
-    handle.stateRef.set(ActorState.Running)
-  }
+  /** 锁住整批组件的发布边界，原子激活处理者并冲刷启动输出，然后统一切到 Running。 */
+  private def commitTransaction(handles: Vector[ActorHandle]): Unit =
+    withLifecycleLocks(handles, 0) {
+      val publications = handles.flatMap { handle =>
+        val buffered = Vector.newBuilder[AnyEvent]
+        var event = handle.pendingPublications.poll()
+        while event != null do
+          buffered += event
+          event = handle.pendingPublications.poll()
+        buffered.result()
+      }
+      val read = publicationGate.readLock()
+      read.lock()
+      try
+        if quarantined.get then throw IllegalStateException("ActorSystem 已隔离卡死组件，拒绝提交启动事务")
+        bus.commitHandlersAndPublications(
+          handles.map(handle => handle.mailbox -> handle.commandHandlers),
+          publications,
+        )
+        handles.foreach(_.stateRef.set(ActorState.Running))
+      finally read.unlock()
+    }
+
+  private def withLifecycleLocks[A](handles: Vector[ActorHandle], index: Int)(body: => A): A =
+    if index == handles.size then body
+    else handles(index).lifecycleLock.synchronized(withLifecycleLocks(handles, index + 1)(body))
 
   private def publishAllFrom(handle: ActorHandle, events: Vector[AnyEvent]): Unit =
     events.foreach(event => publishOutputFrom(handle, event))
@@ -564,7 +604,7 @@ final class ActorSystem(
   private def startRollbackFinish(handle: ActorHandle): Unit =
     val thread = Thread.ofVirtual().name(s"actor-${handle.name}-rollback-stop").unstarted { () =>
       var problem: Throwable = null
-      if handle.prepareEntered.get then
+      if handle.startEntered.get then
         try finish(handle)
         catch
           case e: InterruptedException => problem = interruptedFailure(handle, "onStop", e)
@@ -661,11 +701,15 @@ final class ActorSystem(
     * 把后续失败也当成"新的停机原因"只会让日志里的根因被淹掉。
     */
   private[actor] def reportFailure(name: String, e: Throwable): Unit =
-    if failure.compareAndSet(null, e) then
-      accepting.set(false)
+    val first = assemblyLock.synchronized {
+      val won = failure.compareAndSet(null, e)
+      if won then accepting.set(false)
+      won
+    }
+    if first then
       logger.error(s"组件 $name 失败, 开始有序停机: ${e.getMessage}", e)
       try failureSink(e)
-      catch case callbackFailure: Throwable => e.addSuppressed(callbackFailure)
+      catch case callbackFailure: Throwable => if callbackFailure ne e then e.addSuppressed(callbackFailure)
       finally shutdownRequested.countDown()
     else
       logger.warn(s"组件 $name 也失败了 (已在停机中, 根因见上): ${e.getMessage}")
@@ -673,7 +717,7 @@ final class ActorSystem(
   /** 请求一次正常停机。幂等 —— 中断信号与显式调用可能同时到 */
   def requestShutdown(reason: String): Unit =
     if shutdownRequested.getCount > 0 then logger.warn(s"请求停机: $reason")
-    accepting.set(false)
+    assemblyLock.synchronized(accepting.set(false))
     shutdownRequested.countDown()
 
   /** 按依赖拓扑停完所有组件：依赖方先于提供方、子组件先于父组件。幂等。
