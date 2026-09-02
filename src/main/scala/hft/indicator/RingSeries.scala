@@ -13,6 +13,9 @@ final class RingSeries(val maxLen: Int):
     buf += x
     while buf.size > maxLen do buf.removeHead()
 
+  /** 清空 —— 用于"这段历史不再代表当下"的场合 (如数据断档后重新预热) */
+  def clear(): Unit = buf.clear()
+
   def size: Int = buf.size
   def isEmpty: Boolean = buf.isEmpty
   def nonEmpty: Boolean = buf.nonEmpty

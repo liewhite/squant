@@ -82,6 +82,8 @@ private[binance] object BinanceCodec:
       symbol: String = "",
       status: String = "",
       contractType: String = "",
+      /** 标的资产代码 —— 传统资产永续里它就是股票/商品代码 (AAPLUSDT -> "AAPL") */
+      baseAsset: String = "",
       filters: List[FilterInfo] = Nil,
   )
   final case class FilterInfo(

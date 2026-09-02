@@ -18,7 +18,10 @@ final case class BinanceCredentials(apiKey: String, apiSecret: String)
 
 object BinanceClient:
   /** 只读客户端（无凭证）：只有公共端点，私有面在**类型上**够不着。 */
-  def public(backend: SyncBackend, restBase: String = RestBaseUrl): ExchangeClient =
+  /** 返回具体类型而非 `ExchangeClient`：合约清单里有些事实是币安独有的
+    * (如传统资产永续的分类，见 [[BinancePublicClient.fetchTradFiPerps]])，
+    * 统一接口不该为了一家的分类法长出一个字段，调用方也不该为此再发一次请求。 */
+  def public(backend: SyncBackend, restBase: String = RestBaseUrl): BinancePublicClient =
     new BinancePublicClient(backend, restBase)
 
   /** 交易客户端（带凭证）：凭证是构造参数而不是 `Option`，
@@ -61,6 +64,27 @@ class BinancePublicClient protected[binance] (
         }
         .filter(_.isValid)
         .toVector
+    }
+
+  /** 本所上市的**传统资产永续** (contractType = `TRADIFI_PERPETUAL`)：标的资产代码 -> 合约 symbol。
+    *
+    * 覆盖股票、ETF、商品、外汇与盘前 —— 币安用 `underlyingType` 再细分 (EQUITY / COMMODITY /
+    * KR_EQUITY / PREMARKET)，本方法不做这层区分：使用方 (跨所价差) 关心的是"这个代码在别的所
+    * 有没有同一个标的"，而不是它属于哪一类。
+    *
+    * 键取 `baseAsset` 而不是从 symbol 上剥掉计价币：剥字符串要先假定后缀，而 `baseAsset`
+    * 是币安自己给出的答案。
+    *
+    * **不并入 [[fetchAllSymbolMetas]]**：那里的口径是加密永续 (`PERPETUAL`)，合并会静默改变
+    * 既有调用方 (全市场扫描器) 的标的集合；而且传统资产永续有交易时段与休市停更，
+    * 与 7×24 的加密永续混进同一张表，后来者就分不出哪些标的会整段没有行情。
+    */
+  def fetchTradFiPerps(): Either[ExchangeError, Map[String, Symbol]] =
+    publicGet[ExchangeInfo]("/fapi/v1/exchangeInfo", Map.empty).map { info =>
+      info.symbols.iterator
+        .filter(s => s.status == "TRADING" && s.contractType == "TRADIFI_PERPETUAL" && s.baseAsset.nonEmpty)
+        .map(s => s.baseAsset -> s.symbol)
+        .toMap
     }
 
   protected def publicGet[T: JsonValueCodec](path: String, params: Map[String, String]): Either[ExchangeError, T] =
