@@ -23,7 +23,8 @@ import OkxCodec.given
   * Fail-fast：连接断开、解析失败、错误事件 (event=error) 一律抛异常终止引擎作用域。
   */
 final class OkxMarketFeed(
-    client: OkxClient,
+    // 只要公共客户端: 公共行情不该要求凭证 (交易客户端是它的子类, 传进来一样成立)
+    client: OkxPublicClient,
     backend: WebSocketSyncBackend,
     wsUrl: String = OkxClient.WsPublicUrl,
 ) extends MarketFeed:

@@ -28,8 +28,12 @@ final case class OkxCredentials(apiKey: String, secret: String, passphrase: Stri
     OkxClient.hmacSha256Base64(secret, s"${timestamp}GET/users/self/verify")
 
 object OkxClient:
-  /** 只读客户端（无凭证）：只能取公共数据，私有端点在**类型上**够不着。 */
-  def public(backend: SyncBackend, quote: String = "USDT"): ExchangeClient =
+  /** 只读客户端（无凭证）：只能取公共数据，私有端点在**类型上**够不着。
+    *
+    * 返回具体类型而非 `ExchangeClient`：行情插件要读 `quote` 才能拼出 instId
+    * (见 [[hft.exchange.okx.OkxMarketFeed]])，那是公共客户端的事实，不该为了拿到它
+    * 而要求一份根本用不上的凭证。 */
+  def public(backend: SyncBackend, quote: String = "USDT"): OkxPublicClient =
     new OkxPublicClient(backend, quote, OkxClient.RestBaseUrl)
 
   /** 交易客户端（带凭证）：拿到它即意味着凭证已具备，无需再问 `hasCredentials`。 */
