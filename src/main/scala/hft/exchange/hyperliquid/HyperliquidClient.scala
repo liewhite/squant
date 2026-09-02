@@ -37,7 +37,7 @@ final class HyperliquidClient(
     val body = if dex.isEmpty then """{"type":"meta"}""" else s"""{"type":"meta","dex":"$dex"}"""
     post[MetaResp](body).map { resp =>
       resp.universe.iterator
-        .filterNot(_.isDelisted)
+        .filterNot(_.delisted)
         .flatMap(a => fromHyperliquid(a.name, dex))
         .toVector
     }

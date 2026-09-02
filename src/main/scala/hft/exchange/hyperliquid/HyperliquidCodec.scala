@@ -7,8 +7,19 @@ import com.github.plokhotnyuk.jsoniter_scala.macros.*
 
 /** Hyperliquid API 报文结构与 coin 命名转换。
   *
-  * 所有字段都有默认值：jsoniter 对缺失字段取默认值、对未知字段直接跳过，
-  * 因此可以先用信封探测 `channel` 再按具体类型解析。
+  * ## 字段一律必填，缺失即抛
+  *
+  * 这些 case class **不给默认值**。jsoniter 对无默认值的字段要求必须出现，缺了就抛
+  * `JsonReaderException` —— 这正是想要的：交易所少发一个 `px`，那是坏报文，不是价格 0。
+  * 给默认值等于把"报文有问题"翻译成一个合法的零值，让它一路流进价差计算，
+  * 而**没有任何外在症状**：均线慢慢被零值拖偏，报出来的偏离全是假的。
+  *
+  * 真正**合法可缺**的字段才用 `Option`，且只有一个：[[AssetInfo.isDelisted]] ——
+  * Hyperliquid 只在已下架的资产上下发它。用 `Option` 说的是"接口可以不表态"，
+  * 用 `= false` 说的是"没说就是没下架"，后者把一个观测不到的事实伪装成观测到的。
+  *
+  * 未知字段仍然直接跳过 (jsoniter 默认行为)，因此报文里多出来的东西不影响解析，
+  * 也因此各 push 类型只声明自己要用的那部分。
   *
   * ## coin 与框架 Symbol
   *
@@ -24,27 +35,41 @@ private[hyperliquid] object HyperliquidCodec:
 
   // ===== WebSocket: 公共流 =====
 
-  /** 消息类型探测: 只看 "channel" 字段 */
-  final case class WsEnvelope(channel: String = "")
+  /** 消息类型探测: 只看 "channel" 字段。
+    *
+    * 服务端每一帧都带它 (数据推送、订阅应答、pong、错误)，所以它是必填的 ——
+    * 没有 channel 的帧是我们不认得的东西，不该被当成"某个默认频道"继续处理。
+    */
+  final case class WsEnvelope(channel: String)
 
-  /** 盘口一档。`bbo` 是 [买一, 卖一]，任一侧可能为 null (单边盘口) */
-  final case class BboLevel(px: String = "0", sz: String = "0")
-  final case class BboData(coin: String = "", time: Long = 0, bbo: List[Option[BboLevel]] = Nil)
-  final case class BboPush(channel: String = "", data: BboData = BboData())
+  /** 盘口一档 */
+  final case class BboLevel(px: String, sz: String)
+
+  /** `bbo` 是 [买一, 卖一]。**元素可为 null**：单边盘口是稀薄品种的合法市场状态，
+    * 故这一层用 `Option` 而不是默认值 —— 缺的是"那一侧有没有报价"这个事实本身。 */
+  final case class BboData(coin: String, time: Long, bbo: List[Option[BboLevel]])
+  final case class BboPush(data: BboData)
 
   /** 逐笔成交。`side` 是**主动方**方向: "B" = 主动买, "A" = 主动卖 */
-  final case class TradeData(coin: String = "", side: String = "", px: String = "0", sz: String = "0", time: Long = 0)
-  final case class TradesPush(channel: String = "", data: List[TradeData] = Nil)
+  final case class TradeData(coin: String, side: String, px: String, sz: String, time: Long)
+  final case class TradesPush(data: List[TradeData])
 
   /** 资产上下文：标记价、预言机价与资金费率同在一条推送里 */
-  final case class AssetCtx(markPx: String = "0", oraclePx: String = "0", funding: String = "0")
-  final case class AssetCtxData(coin: String = "", ctx: AssetCtx = AssetCtx())
-  final case class AssetCtxPush(channel: String = "", data: AssetCtxData = AssetCtxData())
+  final case class AssetCtx(markPx: String, oraclePx: String, funding: String)
+  final case class AssetCtxData(coin: String, ctx: AssetCtx)
+  final case class AssetCtxPush(data: AssetCtxData)
 
   // ===== REST: /info =====
 
-  final case class AssetInfo(name: String = "", szDecimals: Int = 0, isDelisted: Boolean = false)
-  final case class MetaResp(universe: List[AssetInfo] = Nil)
+  /** 一个资产。只声明用得上的字段，其余由 jsoniter 跳过。
+    *
+    * `isDelisted` 是本文件唯一的 `Option`：接口只在**已下架**的资产上下发它，
+    * 不下发是它表达"在架"的方式 —— 那是合法缺失，不是坏报文。
+    */
+  final case class AssetInfo(name: String, isDelisted: Option[Boolean]):
+    def delisted: Boolean = isDelisted.getOrElse(false)
+
+  final case class MetaResp(universe: List[AssetInfo])
 
   given JsonValueCodec[WsEnvelope] = JsonCodecMaker.make
   given JsonValueCodec[BboPush] = JsonCodecMaker.make

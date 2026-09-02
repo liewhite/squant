@@ -1,6 +1,6 @@
 package hft.exchange.hyperliquid
 
-import com.github.plokhotnyuk.jsoniter_scala.core.readFromString
+import com.github.plokhotnyuk.jsoniter_scala.core.{JsonReaderException, readFromString}
 import HyperliquidCodec.*
 import HyperliquidCodec.given
 
@@ -65,12 +65,14 @@ class HyperliquidCodecSpec extends munit.FunSuite:
     assertEquals(d.ctx.oraclePx, "324.19")
     assertEquals(d.ctx.funding, "0.00000625")
 
-  test("meta: 下架标记与资产名解得出"):
+  test("meta: isDelisted 缺席是合法的 —— 接口只在已下架的资产上下发它"):
     val raw = """{"universe":[{"szDecimals":3,"name":"xyz:TSLA","maxLeverage":20},""" +
       """{"szDecimals":2,"name":"xyz:OLD","maxLeverage":5,"isDelisted":true}]}"""
     val universe = readFromString[MetaResp](raw).universe
     assertEquals(universe.map(_.name), List("xyz:TSLA", "xyz:OLD"))
-    assertEquals(universe.map(_.isDelisted), List(false, true))
+    // 缺席保留为 None (接口没表态), 由使用方决定它意味着什么 —— 而不是在解析时就假装它说了 false
+    assertEquals(universe.map(_.isDelisted), List(None, Some(true)))
+    assertEquals(universe.map(_.delisted), List(false, true))
 
   test("信封只看 channel, 其余字段一概跳过"):
     assertEquals(readFromString[WsEnvelope]("""{"channel":"pong"}""").channel, "pong")
@@ -85,3 +87,46 @@ class HyperliquidCodecSpec extends munit.FunSuite:
     assert(settle > oneMinutePastTheHour)
     assertEquals(settle % 3_600_000L, 0L)
     assert(settle - oneMinutePastTheHour <= 3_600_000L)
+
+  // ==================== 缺字段即坏报文 ====================
+
+  /** 这一组钉死的是本文件最重要的一条约定：**必填字段缺失必须抛，不能变成零值**。
+    *
+    * 少一个 `px` 而得到价格 0，症状不在解析处 —— 它会一路流进价差计算，
+    * 把均线慢慢拖偏，报出来的"异动"全是假的，而且没有任何外在症状。
+    */
+  private def assertRejects(what: String)(raw: => Any): Unit =
+    intercept[JsonReaderException](raw): Unit
+
+  test("bbo 缺 px -> 抛, 不是价格 0"):
+    assertRejects("bbo.px") {
+      readFromString[BboPush]("""{"channel":"bbo","data":{"coin":"xyz:AAPL","time":1,"bbo":[{"sz":"1.0"},null]}}""")
+    }
+
+  test("bbo 缺 time -> 抛, 不是时间戳 0 (那会让报价永远显得陈旧)"):
+    assertRejects("bbo.time") {
+      readFromString[BboPush]("""{"channel":"bbo","data":{"coin":"xyz:AAPL","bbo":[null,null]}}""")
+    }
+
+  test("bbo 缺 coin -> 抛, 不是空 symbol"):
+    assertRejects("bbo.coin") {
+      readFromString[BboPush]("""{"channel":"bbo","data":{"time":1,"bbo":[null,null]}}""")
+    }
+
+  test("trades 缺 sz -> 抛, 不是数量 0"):
+    assertRejects("trade.sz") {
+      readFromString[TradesPush]("""{"channel":"trades","data":[{"coin":"xyz:AAPL","side":"A","px":"1","time":1}]}""")
+    }
+
+  test("activeAssetCtx 缺 funding -> 抛, 不是资金费率 0"):
+    assertRejects("ctx.funding") {
+      readFromString[AssetCtxPush](
+        """{"channel":"activeAssetCtx","data":{"coin":"xyz:AAPL","ctx":{"markPx":"1","oraclePx":"1"}}}"""
+      )
+    }
+
+  test("信封缺 channel -> 抛: 认不出的帧不该被当成某个默认频道"):
+    assertRejects("envelope.channel")(readFromString[WsEnvelope]("""{"data":"whatever"}"""))
+
+  test("meta 缺 name -> 抛, 不是空资产名"):
+    assertRejects("asset.name")(readFromString[MetaResp]("""{"universe":[{"szDecimals":3}]}"""))

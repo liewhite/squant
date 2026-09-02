@@ -39,10 +39,21 @@ class OkxClientSpec extends munit.FunSuite:
   private val instrumentsBody =
     """{"code":"0","msg":"","data":[
       {"instId":"BTC-USDT-SWAP","state":"live","tickSz":"0.1","lotSz":"0.01","minSz":"0.01","ctVal":"0.01"},
+      {"instId":"ETH-USDT-SWAP","state":"suspend","tickSz":"0.01","lotSz":"0.1","minSz":"0.1","ctVal":"0.1"},
       {"instId":"JP225-USDT-SWAP","state":"preopen","tickSz":"","lotSz":"","minSz":"","ctVal":"","instCategory":""}
     ]}"""
 
-  test("只取已上市合约: 预告上市的合约规格字段为空串, 读它就是崩溃"):
-    val backend = SyncBackendStub.whenAnyRequest.thenRespondAdjust(instrumentsBody)
-    val metas = OkxClient.public(backend).fetchAllSymbolMetas()
-    assertEquals(metas.map(_.map(_.symbol)), Right(Vector("BTC")))
+  private def instrumentsFrom(body: String) =
+    OkxClient.public(SyncBackendStub.whenAnyRequest.thenRespondAdjust(body)).fetchAllSymbolMetas()
+
+  test("排除尚未上市的合约: 它的规格字段是空串, 读它就是崩溃"):
+    assert(!instrumentsFrom(instrumentsBody).map(_.map(_.symbol)).exists(_.contains("JP225")))
+
+  test("临时停牌的合约要留下: 账户上可能正持有它的仓位"):
+    // 判据是"尚未上市"而不是"是否 live" —— 后者会把 suspend 一并剔出规格表, 于是
+    // fetchPositions 静默丢掉那条持仓, 启动对齐得出"已平仓"的结论, 比崩溃危险得多
+    assertEquals(instrumentsFrom(instrumentsBody).map(_.map(_.symbol)), Right(Vector("BTC", "ETH")))
+
+  test("规格报文缺 state -> 抛: 兜底成空串会让每一条都被判为不合格, 得到一张空规格表"):
+    val noState = """{"code":"0","msg":"","data":[{"instId":"BTC-USDT-SWAP","tickSz":"0.1","lotSz":"0.01","minSz":"0.01","ctVal":"0.01"}]}"""
+    assert(instrumentsFrom(noState).left.exists(_.isInstanceOf[hft.domain.ExchangeError.Parse]))

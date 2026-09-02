@@ -94,8 +94,8 @@ class OkxPublicClient protected[okx] (
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator
           // 只取配置 quote 的**已上市**永续 —— quote 判定收在 fromOkx 里 (见它的说明);
-          // state 判定在这里, 理由见 InstrumentData
-          .filter(_.state == "live")
+          // "尚未上市"的判据收在 InstrumentData 里 (见它的说明)
+          .filterNot(_.notYetListed)
           .flatMap { d =>
             fromOkx(d.instId, quote).map { sym =>
               SymbolMeta(

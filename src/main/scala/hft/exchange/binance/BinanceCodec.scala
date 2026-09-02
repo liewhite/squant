@@ -82,8 +82,11 @@ private[binance] object BinanceCodec:
       symbol: String = "",
       status: String = "",
       contractType: String = "",
-      /** 标的资产代码 —— 传统资产永续里它就是股票/商品代码 (AAPLUSDT -> "AAPL") */
-      baseAsset: String = "",
+      /** 标的资产代码 —— 传统资产永续里它就是股票/商品代码 (AAPLUSDT -> "AAPL")。
+        *
+        * **无默认值**: 缺了它就抛。给 `""` 兜底的话，[[BinancePublicClient.fetchTradFiPerps]]
+        * 的 `baseAsset.nonEmpty` 会把这一条静默丢掉 —— 少监控一个标的，没有任何症状。 */
+      baseAsset: String,
       filters: List[FilterInfo] = Nil,
   )
   final case class FilterInfo(

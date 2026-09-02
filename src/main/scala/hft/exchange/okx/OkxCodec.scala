@@ -127,15 +127,27 @@ private[okx] object OkxCodec:
     * `state` 是**必须读的**：未上市的合约 (`preopen`) 会带着一整排空字符串下发规格字段，
     * 而空串不是 "0"，`asDouble` 对它抛错 —— 于是交易所预告一个新合约就能让所有 OKX 客户端
     * 在启动拉规格时崩掉，与本进程交易什么毫不相干。规格得等它真正上市才有意义。
+    *
+    * 它**无默认值**，缺了就抛：给 `""` 兜底的话，
+    * [[OkxPublicClient.fetchAllSymbolMetas]] 的状态过滤会把**每一条**都判为不合格，
+    * 于是进程带着一张空的规格表启动 —— 下不了单、换不了算，而启动本身是"成功"的。
     */
   final case class InstrumentData(
-      instId: String = "",
-      state: String = "",
-      tickSz: String = "0",
-      lotSz: String = "0",
-      minSz: String = "0",
-      ctVal: String = "0",
-  )
+      instId: String,
+      state: String,
+      tickSz: String,
+      lotSz: String,
+      minSz: String,
+      ctVal: String,
+  ):
+    /** 尚未上市 —— 规格字段此刻为空串，读它就是崩溃。
+      *
+      * 判据取"尚未上市"而不是"是否 live"：`suspend` (临时停牌) 的合约规格是齐全的，
+      * 而且**账户上可能正持有它的仓位**。把它一并剔出规格表，`fetchPositions` 就会
+      * 静默丢掉那条持仓、启动对齐得出"已平仓"的结论 —— 比崩溃危险得多。
+      */
+    def notYetListed: Boolean = state == "preopen"
+
   final case class InstrumentsResp(code: String = "", msg: String = "", data: List[InstrumentData] = Nil)
 
   final case class BalanceRespData(totalEq: String = "0")
