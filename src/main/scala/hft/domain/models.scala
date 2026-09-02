@@ -7,14 +7,16 @@ enum Exchange:
   case Binance
   case Okx
   case Bybit
+  case Hyperliquid
 
   /** 生成交易所合法的 client_order_id */
   def newClientOrderId: String =
     val hex = UUID.randomUUID().toString.replace("-", "")
     this match
-      case Binance => s"0x$hex" // 34 字符, Binance 上限 36
-      case Okx     => hex // 32 字符纯字母数字, OKX clOrdId 上限 32
-      case Bybit   => hex // 32 字符, Bybit orderLinkId 上限 36
+      case Binance     => s"0x$hex" // 34 字符, Binance 上限 36
+      case Okx         => hex // 32 字符纯字母数字, OKX clOrdId 上限 32
+      case Bybit       => hex // 32 字符, Bybit orderLinkId 上限 36
+      case Hyperliquid => s"0x$hex" // cloid 是 128 位十六进制, 必须是 "0x" + 32 个 hex 字符
 
 /** 账户身份。
   *

@@ -85,5 +85,9 @@ abstract class MarketFeed extends Actor:
   /** 在本插件的作用域内 fork 一条线程 */
   protected final def fork(body: => Unit): Unit = ctx.fork(body)
 
+  /** 协作式睡眠：停机请求会立即唤醒并返回 true。心跳一类的常驻循环用它，不要用裸 `Thread.sleep`
+    * —— 后者要靠中断打断，停机时便多一次"能不能按时退出"的不确定 */
+  protected final def sleepUnlessStopped(ms: Long): Boolean = ctx.sleepUnlessStopped(ms)
+
   /** 把连接等外部资源登记到本插件作用域 */
   protected final def manage[A](resource: A)(release: A => Unit): A = ctx.manage(resource)(release)
