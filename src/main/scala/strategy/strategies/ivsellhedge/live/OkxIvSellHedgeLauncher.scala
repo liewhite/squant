@@ -12,7 +12,7 @@ import org.slf4j.LoggerFactory
 import ox.supervised
 import sttp.client4.DefaultSyncBackend
 
-/** **IV 定量卖出宽跨 + KAMA 死区 delta 对冲** 的实盘启动器 (OKX)。
+/** **IV 定量卖出宽跨 + delta 死区对冲** 的实盘启动器 (OKX)。
   *
   * ```
   *   期权链/IV/持仓/现金 ──> OptionSellerActor ──┬─> REST 卖出 (IOC, 旁路框架下单通道)

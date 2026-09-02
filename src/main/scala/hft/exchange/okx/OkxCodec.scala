@@ -178,7 +178,7 @@ private[okx] object OkxCodec:
 
   final case class InstrumentsResp(code: String = "", msg: String = "", data: List[InstrumentData] = Nil)
 
-  final case class BalanceRespData(totalEq: String = "0")
+  final case class BalanceRespData(totalEq: String = "0", details: List[AccountDetail] = Nil)
   final case class BalanceResp(code: String = "", msg: String = "", data: List[BalanceRespData] = Nil)
 
   final case class GreeksData(

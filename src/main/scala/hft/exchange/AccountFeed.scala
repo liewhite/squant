@@ -69,7 +69,20 @@ enum AccountReport:
       timestamp: Timestamp,
   )
 
-  /** 某币种的钱包余额 */
+  /** 某币种钱包余额的**当前值** (不是变化量)，一次只说一个币种。
+    *
+    * 三家的私有钱包推送都是这个形态：**值是绝对余额，但推送只覆盖发生变动的币种**
+    * (Binance `ACCOUNT_UPDATE.B` 的 `wb`、OKX `account` 的 `event_update`、Bybit `wallet` 的 `coin[]`)。
+    * 因此**没有任何 WS 通道能给出"这就是整份钱包"这个更强的事实** —— 那份全量只能来自
+    * 启动对齐时的 REST 钱包 (见 [[hft.domain.Wallet]] 与 `TradingGateway.currentWallet`)。
+    *
+    * 曾经这里还有一个 `WalletSnapshot`，由 OKX/Bybit 的 WS 推送产出。依据是错的：
+    *   - OKX 文档写明只有 initial/regular snapshot 是全量，`event_update` 只带变化币种，
+    *     且快照本身可能分页 (`curPage`/`lastPage`)；
+    *   - Bybit 文档写明"订阅成功时不给 snapshot"，也从未声明 `coin[]` 是全量
+    *     (官方示例里 `totalWalletBalance` 远大于唯一列出的那条 BTC 的 `usdValue`)。
+    *   下游对每条推送做整表替换，于是**任何一次只有 USDT 变动的推送都会把 ETH 现货抹成 0**，
+    *   而 delta 对冲正拿这个数当敞口 —— Bybit 侧还没有周期性全量推送, 这个错误不自愈。 */
   case BalanceChanged(currency: String, amount: Double, timestamp: Timestamp)
 
   /** 账户净值与总名义价值 */

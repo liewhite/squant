@@ -94,7 +94,7 @@ final class DeltaHedgeStrategy(
   private val warnCounts = scala.collection.mutable.Map.empty[String, Long]
   private def warnThrottled(kind: String, msg: String): Unit =
     val n = warnCounts.getOrElse(kind, 0L)
-    if n % DeltaHedgeStrategy.WarnEvery == 0 then logger.warn(s"[DeltaKamaHedge $symbol] $msg")
+    if n % DeltaHedgeStrategy.WarnEvery == 0 then logger.warn(s"[DeltaHedge $symbol] $msg")
     warnCounts(kind) = n + 1
 
   /** MACD 的 K 线 (粗粒度趋势过滤), 由永续中间价逐笔聚合 */
@@ -251,11 +251,11 @@ final class DeltaHedgeStrategy(
               Vector.empty
             else
               val side = if net > Coin.Zero then Side.Short else Side.Long // 净多->卖, 净空->买
-              val (limitPx, tif) = leg.place(style, side, Some(bbo), bbo.midPrice)
+              val (limitPx, tif) = leg.place(style, side, bbo)
               ctx.place(
                 Order("", exchange, symbol, side, OrderType.Limit(limitPx, tif), qty,
                   reduceOnly = false, clientOrderId = ""),
-                f"delta_kama_hedge | $side qty=${qty.value}%.4f ${style.label} limit=${limitPx.value}%.2f " +
+                f"delta_hedge | $side qty=${qty.value}%.4f ${style.label} limit=${limitPx.value}%.2f " +
                   f"净敞口=${net.value}%.4f 带=(+${upTh.value}%.4f,-${downTh.value}%.4f) " +
                   f"方向=$driftDir σ=${sigma.map(v => f"$v%.3f").getOrElse("预热中")} " +
                   f"gamma=${e.optionGamma.value}%.5f er=${fastKlines.efficiencyRatio.map(v => f"$v%.2f").getOrElse("预热中")} " +

@@ -40,3 +40,11 @@ class BinanceCodecSpec extends munit.FunSuite:
     assertEquals(restWithout.reduceOnly, None)
     val restWith = readFromString[List[OpenOrder]]("""[{"orderId":1,"symbol":"BTCUSDT","side":"BUY","reduceOnly":true}]""").head
     assertEquals(restWith.reduceOnly, Some(true))
+
+  test("解析 /fapi/v2/account 的 assets —— 全量钱包的唯一来源"):
+    // 净值与资产明细必须来自**同一个响应**: 分两次拉会拿到两个时刻的账户状态。
+    val json =
+      """{"totalMarginBalance":"50000.5","assets":[{"asset":"USDT","walletBalance":"10000"},{"asset":"BNB","walletBalance":"1.5"}],"positions":[]}"""
+    val r = readFromString[AccountResp](json)
+    assertEquals(r.totalMarginBalance.asDouble, 50000.5)
+    assertEquals(r.assets.map(a => a.asset -> a.walletBalance.asDouble).toMap, Map("USDT" -> 10000.0, "BNB" -> 1.5))

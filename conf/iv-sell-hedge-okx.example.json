@@ -3,7 +3,7 @@
   "apiSecret": "YOUR_OKX_API_SECRET",
   "passphrase": "YOUR_OKX_PASSPHRASE",
   "quote": "USDT",
-  "simulated": true,
+  "simulated": false,
   "tuning": {
     "symbol": "ETH",
     "baseCoin": "ETH",

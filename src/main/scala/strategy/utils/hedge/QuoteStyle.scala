@@ -26,8 +26,13 @@ sealed trait QuoteStyle:
     */
   def urgency: Int
 
-  /** 这张单该挂什么价。`fallbackPx` 是盘口缺失时的降级基准（调用方应告警）。 */
-  def limitPrice(side: Side, bbo: Option[BBO], fallbackPx: Price): Price
+  /** 这张单该挂什么价。
+    *
+    * 盘口是**必需**的，不是可选：两个调用方都是在拿到盘口之后才走到这里 (见
+    * `MakerHedgeStrategy.manage` 与 `DeltaHedgeStrategy`)。从前签名是
+    * `(bbo: Option[BBO], fallbackPx: Price)`，那条降级分支是给一个不存在的状态预留的防御 ——
+    * 而"降级基准"本身还是从那条据说缺失的盘口算出来的中间价。 */
+  def limitPrice(side: Side, bbo: BBO): Price
 
   /** 诊断用短名，进下单 comment 与日志 */
   def label: String
@@ -36,7 +41,7 @@ object QuoteStyle:
   /** **被动**：挂在对手价**之外** `offsetPct`，PostOnly，给 `ttlMs` 慢慢成交。
     *
     * 卖挂 `bestAsk·(1+off)`、买挂 `bestBid·(1−off)` —— 对手盘外侧，保证 PostOnly 不会被拒。
-    * 用在敞口平缓（KAMA 的效率比低、行情来回折返）的时候：不急，省下 taker 费与价差。
+    * 用在敞口平缓（效率比 ER 低、行情来回折返）的时候：不急，省下 taker 费与价差。
     * 代价是可能一直不成交，所以 `ttlMs` 给得长（分钟级）反而合理 —— 频繁重挂只是换个价再等。
     */
   def passive(offsetPct: Double, ttlMs: Long): QuoteStyle = Passive(offsetPct, ttlMs)
@@ -58,10 +63,10 @@ object QuoteStyle:
     def tif: TimeInForce = TimeInForce.PostOnly
     def urgency: Int = 0
     def label: String = f"被动+${offsetPct * 100}%.3f%%/${ttlMs}ms"
-    def limitPrice(side: Side, bbo: Option[BBO], fallbackPx: Price): Price =
+    def limitPrice(side: Side, bbo: BBO): Price =
       side match // 对手价**外**移
-        case Side.Short => bbo.fold(fallbackPx)(_.askPrice).scaled(1.0 + offsetPct)
-        case Side.Long  => bbo.fold(fallbackPx)(_.bidPrice).scaled(1.0 - offsetPct)
+        case Side.Short => bbo.askPrice.scaled(1.0 + offsetPct)
+        case Side.Long  => bbo.bidPrice.scaled(1.0 - offsetPct)
 
   private final case class Crossing(offsetPct: Double, ttlMs: Long) extends QuoteStyle:
     require(offsetPct >= 0.0, s"跨价穿透余量须 >= 0, 实为 $offsetPct")
@@ -69,7 +74,7 @@ object QuoteStyle:
     def tif: TimeInForce = TimeInForce.GTC // PostOnly 会被拒 —— 跨价的整个用意就是要吃单
     def urgency: Int = 1
     def label: String = f"跨价-${offsetPct * 100}%.3f%%/${ttlMs}ms"
-    def limitPrice(side: Side, bbo: Option[BBO], fallbackPx: Price): Price =
+    def limitPrice(side: Side, bbo: BBO): Price =
       side match // 穿过对手价
-        case Side.Short => bbo.fold(fallbackPx)(_.bidPrice).scaled(1.0 - offsetPct)
-        case Side.Long  => bbo.fold(fallbackPx)(_.askPrice).scaled(1.0 + offsetPct)
+        case Side.Short => bbo.bidPrice.scaled(1.0 - offsetPct)
+        case Side.Long  => bbo.askPrice.scaled(1.0 + offsetPct)

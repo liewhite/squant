@@ -129,10 +129,10 @@ final class QuoteLeg(val cancelConfirmMs: Long = 3000):
     * 只在 [[Step.Ready]] 之后调用；其它态下调用会抛 —— 那意味着调用方绕过了 [[step]]，
     * 而后果正是本类要消灭的孤儿挂单。
     */
-  def place(style: QuoteStyle, side: Side, bbo: Option[BBO], fallbackPx: Price): (Price, TimeInForce) =
+  def place(style: QuoteStyle, side: Side, bbo: BBO): (Price, TimeInForce) =
     require(state == State.Idle, s"只能在空闲态下单，当前 $state —— 绕过 step 会挂出无人管的孤儿单")
     state = State.Placing(style)
-    (style.limitPrice(side, bbo, fallbackPx), style.tif)
+    (style.limitPrice(side, bbo), style.tif)
 
 object QuoteLeg:
   /** 挂单腿的状态 */

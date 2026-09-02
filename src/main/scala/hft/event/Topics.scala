@@ -66,6 +66,14 @@ object Topics:
   object Balance extends Topic[AccountExchange, hft.domain.Balance]("balance"):
     def keyOf(p: hft.domain.Balance): AccountExchange = AccountExchange(p.account, p.exchange)
 
+  /** 完整钱包快照 —— 未列出的币种余额为 0。
+    *
+    * **唯一生产者是启动对齐时的一次 REST 钱包查询** (`TradingGateway.currentWallet`)：
+    * 三家的钱包 WS 通道都只覆盖发生变动的币种, 给不出"这就是整份钱包"这个更强的事实。
+    * 之后由逐币种的 [[Balance]] 推送维持。见 [[hft.domain.Wallet]]。 */
+  object Wallet extends Topic[AccountExchange, hft.domain.Wallet]("wallet"):
+    def keyOf(p: hft.domain.Wallet): AccountExchange = AccountExchange(p.account, p.exchange)
+
   object AccountInfo extends Topic[AccountExchange, hft.domain.AccountInfo]("accountInfo"):
     def keyOf(p: hft.domain.AccountInfo): AccountExchange = AccountExchange(p.account, p.exchange)
 
@@ -107,4 +115,4 @@ object Topics:
   val essentialPrivate: Set[Topic[AccountInstrument, ?]] = Set(Position, OrderUpdate)
 
   /** 账户级读数 */
-  val account: Set[Topic[AccountExchange, ?]] = Set(Balance, AccountInfo, Greeks)
+  val account: Set[Topic[AccountExchange, ?]] = Set(Balance, Wallet, AccountInfo, Greeks)

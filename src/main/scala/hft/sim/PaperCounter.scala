@@ -105,6 +105,12 @@ final class PaperCounter(
   /** 本账户当前净值 —— 策略的杠杆闸门读它。基类按 [[accountRefreshMs]] 周期发布 */
   override protected def currentAccountInfo(): AccountInfo = state.accountInfo(exchange)
 
+  /** 影子账户的钱包: 只有计价货币现金, **没有任何现货持币**。
+    *
+    * 这是它的构造事实而不是"读不到就当 0" —— 影子账户从零开始, 只有 USDT 现金参与撮合,
+    * 期权 delta 的现货修正项因此确实是 0。 */
+  override protected def currentWallet(): Map[String, Double] = Map(USDT -> state.ledger.cash)
+
   /** 撮合一条命令并落地：回报按各自延迟发回策略。
     *
     * 延迟由 [[Counter]] 决定（与回测、实盘替身同一份），这里只负责用 actor 定时器等到点。

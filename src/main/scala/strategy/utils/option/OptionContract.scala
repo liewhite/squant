@@ -30,16 +30,30 @@ final case class OptionInstrument(
     strike: Double,
     right: OptionRight,
     ctVal: Double,
-    minQty: Double = 0.0,
-    qtyStep: Double = 0.0,
-    tickSize: Double = 0.0,
+    minQty: Double,
+    qtyStep: Double,
+    tickSize: Double,
 ):
+  // 三个精度参数**没有默认值**: 交易所一定会给 (给不出的合约在客户端就被整条跳过),
+  // 而 `= 0.0` 会让"忘了填"编译通过, 再在下单时以 `require(tickSize > 0)` 的形式在实盘炸出来。
+  require(minQty > 0, s"$symbol 最小下单量必须为正, 实际 $minQty")
+  require(qtyStep > 0, s"$symbol 下单量步长必须为正, 实际 $qtyStep")
+  require(tickSize > 0, s"$symbol 报价最小变动单位必须为正, 实际 $tickSize")
+
   /** 带符号张数 -> **币本位**标的量。张到币的换算只在这里写一次：写两处的话，改了其中一处
     * 不会有任何编译错误 —— 只是从此 delta 与名义价值按不同的倍数算，两个数各自看着都合理。 */
   def toCoin(contracts: Double): Double = contracts * ctVal
 
-/** 期权盘口最优买卖价 (bid1/ask1)。供卖价决策: 价差 = ask−bid, 公允(中)价 = (bid+ask)/2。 */
+/** 期权盘口最优买卖价 (bid1/ask1)。供卖价决策: 价差 = ask−bid, 公允(中)价 = (bid+ask)/2。
+  *
+  * **两边都有正报价**是这个类型的不变量：只有单边报价的期权 (深度价外常见) 由
+  * `OptionsExchange.optionQuote` 返回 `None`，而不是构造一个 `bid = 0` 的 Quote。
+  * 判据放在类型上, 下游就不必各自防 —— 从前 `SellPlan` 写 `if quote.bid > 0 then ask/bid else Infinity`、
+  * `sellQuote` 写 `require(mid > 0)`, 两处都在替一个上游已经排除的情况兜底。 */
 final case class Quote(bid: Double, ask: Double):
+  require(bid > 0, s"买一价必须为正, 实际 $bid (单边报价的期权应返回 None)")
+  require(ask > 0, s"卖一价必须为正, 实际 $ask (单边报价的期权应返回 None)")
+
   def mid: Double = (bid + ask) / 2.0
   def spread: Double = ask - bid
 

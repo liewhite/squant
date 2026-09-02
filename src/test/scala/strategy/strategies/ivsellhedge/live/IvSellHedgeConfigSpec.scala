@@ -4,12 +4,14 @@ import strategy.strategies.ivsellhedge.logic.{SellPlan, SigmaSource}
 import strategy.utils.hedge.DeltaCtx
 import hft.domain.{Coin, Price}
 
+import java.nio.file.Files
+
 /** 配置单测：JSON 解析 + 默认回填、K 线粒度换算 (SSOT)、越界即抛。 */
 class IvSellHedgeConfigSpec extends munit.FunSuite:
 
   private def tuning = IvSellTuning(symbol = "ETH", baseCoin = "ETH", ccy = "ETH", ivStart = 0.2)
 
-  test("K 线粒度只配一处, 毫秒由它派生 (MACD 与 KAMA 各一条)"):
+  test("K 线粒度只配一处, 毫秒由它派生 (MACD 与快线各一条)"):
     assertEquals(tuning.copy(macdBar = "1H").macdBarMs, 3_600_000L)
     assertEquals(tuning.copy(fastBar = "1m").fastBarMs, 60_000L)
     assertEquals(tuning.copy(fastBar = "5m").fastBarMs, 300_000L)
@@ -76,4 +78,25 @@ class IvSellHedgeConfigSpec extends munit.FunSuite:
         assertEquals(c.tuning.fastBar, "1m")
         assertEquals(c.tuning.passiveTtlMs, 60_000L)
         assertEquals(c.tuning.crossTtlMs, 1000L)
-        assertEquals(c.simulated, true)
+        // 模板里 simulated 必须是 false: true 会被启动器拒绝启动 (永续腿只连主网,
+        // 期权腿去模拟环境 -> 两条腿持仓互不相干), 一个跑不起来的模板不该是模板。
+        assertEquals(c.simulated, false)
+
+  test("JSON 漏写 ivStart 即解析失败 —— 它没有默认值"):
+    // 给它一个"看着合理"的默认值等于埋一个错配置: 起卖点决定从多高的 IV 开始卖,
+    // 猜错就是在不该卖的波动率上持续卖出, 而没有任何症状。
+    val f = Files.createTempFile("iv-sell-hedge", ".json")
+    try
+      Files.writeString(f, """{"apiKey":"k","apiSecret":"s","passphrase":"p","tuning":{"symbol":"ETH","baseCoin":"ETH","ccy":"ETH"}}""")
+      assert(IvSellHedgeConfig.loadOkx(f.toString).isLeft, "漏写 ivStart 必须解析失败")
+    finally Files.deleteIfExists(f)
+
+  test("minTtlDays 默认值来自唯一来源, 且不超过 targetDays"):
+    // 两者是同一条选到期逻辑的两头: minTtl 一旦超过 targetDays, 目标那一档就被自己的下限
+    // 筛掉, 策略静默改卖更远的到期 (配置侧从前写死 7、而 targetDays 是 3, 正是这个形态)。
+    assertEquals(tuning.minTtlDays, OptionSellerActor.Defaults.MinTtlDays)
+    assert(tuning.minTtlDays <= tuning.targetDays, s"minTtlDays=${tuning.minTtlDays} 不该超过 targetDays=${tuning.targetDays}")
+    assertEquals(tuning.toSellerConfig.minTtlMs, OptionSellerActor.Defaults.MinTtlMs)
+
+  test("riskFreeRate 默认值与 BS 定价那份是同一个事实"):
+    assertEquals(tuning.toSellerConfig.riskFreeRate, strategy.strategies.ivsellhedge.logic.PortfolioDelta.DefaultRate)

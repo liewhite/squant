@@ -39,6 +39,7 @@ class TradingGatewaySpec extends munit.FunSuite:
     override def cancelOrder(symbol: Symbol, ref: OrderRef) = Right(())
     override def fetchPendingOrders(symbol: Symbol) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, Exchange.Binance, 10_000.0))
+    override def fetchWallet() = Right(Map("USDT" -> 10_000.0))
     override def fetchPositions() = Right(Vector.empty)
 
   private def eventually(what: => String)(cond: => Boolean): Unit =
@@ -307,6 +308,7 @@ class TradingGatewaySpec extends munit.FunSuite:
     override def fetchPendingOrders(symbol: Symbol) = fail("unexpected call")
     // 柜台启动即周期刷净值 —— 给一个固定读数, 免得测试依赖网络
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, Exchange.Binance, 10_000.0))
+    override def fetchWallet() = Right(Map("USDT" -> 10_000.0))
     override def fetchPositions() = fail("unexpected call")
 
   private def orderOf(quantity: Coin) = Order(

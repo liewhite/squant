@@ -96,3 +96,58 @@ class StateManagerSpec extends munit.FunSuite:
     val ex = Exchange.Binance
     state.apply(Event.at(Topics.Bbo, BBO(ex, "BTCUSDT", 100.0, Coin(1.0), 100.1, Coin(1.0), t0), t0))
     assertEquals(state.symbolState("BTCUSDT").flatMap(_.bbo(ex)).map(_.bidPrice.value), Some(100.0))
+
+  test("钱包快照到达前, greeks 返回 None —— 而不是把'没见过该币'当成 0"):
+    // 期权 delta 对冲要 `期权 delta + 该币现金余额` 才是总敞口。缺余额只能暂停对冲,
+    // 不能按残缺敞口下单。从前有个 feed 注入假的 BalanceChanged(ccy, 0.0) 绕过这一点。
+    val state = StateManager(List(Instrument(Exchange.Okx, "ETH-USDT-SWAP")), orderTimeoutMs = 5000)
+    state.apply(Event.local(Topics.Greeks, Greeks(AccountId.Live, Exchange.Okx, "ETH", 1.0, 0.1, 0.0, 0.0, t0)))
+    assertEquals(state.greeks(Exchange.Okx, "ETH"), None, "没有钱包快照 -> 给不出总敞口")
+
+  test("钱包快照之后, 未列出的币种余额如实解读为 0"):
+    // OKX 余额为 0 时不下发该币种行 —— 只卖期权不持现货的账户永远等不到那条 Balance。
+    // "完整"这个事实由协议给出 (REST 钱包一次返回整份), 因此缺失即可解读为 0。
+    val state = StateManager(List(Instrument(Exchange.Okx, "ETH-USDT-SWAP")), orderTimeoutMs = 5000)
+    state.apply(Event.local(Topics.Greeks, Greeks(AccountId.Live, Exchange.Okx, "ETH", 1.0, 0.1, 0.0, 0.0, t0)))
+    state.apply(Event.local(Topics.Wallet, Wallet(AccountId.Live, Exchange.Okx, Map("USDT" -> 500.0), t0)))
+    assertEquals(state.greeks(Exchange.Okx, "ETH").map(_.delta), Some(1.0), "ETH 未列出 -> 现货修正为 0")
+
+  test("钱包快照整表替换 —— 清空的现货不再参与 delta 修正"):
+    val state = StateManager(List(Instrument(Exchange.Okx, "ETH-USDT-SWAP")), orderTimeoutMs = 5000)
+    state.apply(Event.local(Topics.Greeks, Greeks(AccountId.Live, Exchange.Okx, "ETH", 1.0, 0.1, 0.0, 0.0, t0)))
+    state.apply(Event.local(Topics.Wallet, Wallet(AccountId.Live, Exchange.Okx, Map("ETH" -> 2.0), t0)))
+    assertEquals(state.greeks(Exchange.Okx, "ETH").map(_.delta), Some(3.0), "1.0 + 2.0 现货")
+    // 下一份快照里 ETH 没了 = 现货已清空
+    state.apply(Event.local(Topics.Wallet, Wallet(AccountId.Live, Exchange.Okx, Map("USDT" -> 500.0), t0)))
+    assertEquals(state.greeks(Exchange.Okx, "ETH").map(_.delta), Some(1.0), "留着旧值会让已清空的现货继续参与修正")
+
+  test("钱包快照只清本交易所 —— 不抹掉另一家的余额"):
+    val state = StateManager(
+      List(Instrument(Exchange.Okx, "ETH-USDT-SWAP"), Instrument(Exchange.Bybit, "ETHUSDT")),
+      orderTimeoutMs = 5000,
+    )
+    state.apply(Event.local(Topics.Greeks, Greeks(AccountId.Live, Exchange.Okx, "ETH", 1.0, 0.1, 0.0, 0.0, t0)))
+    state.apply(Event.local(Topics.Greeks, Greeks(AccountId.Live, Exchange.Bybit, "ETH", 1.0, 0.1, 0.0, 0.0, t0)))
+    state.apply(Event.local(Topics.Wallet, Wallet(AccountId.Live, Exchange.Bybit, Map("ETH" -> 3.0), t0)))
+    state.apply(Event.local(Topics.Wallet, Wallet(AccountId.Live, Exchange.Okx, Map("USDT" -> 1.0), t0)))
+    assertEquals(state.greeks(Exchange.Bybit, "ETH").map(_.delta), Some(4.0), "OKX 的快照不该动 Bybit 的现货")
+    assertEquals(state.greeks(Exchange.Okx, "ETH").map(_.delta), Some(1.0))
+
+  test("钱包快照里没有 USDT = 计价货币余额确实是 0"):
+    // 从前这里是 `foreach`: 快照没有 USDT 时留着旧值, 正是这份快照要消灭的
+    // "已清空却继续参与计算"。
+    val state = StateManager(List(Instrument(Exchange.Okx, "ETH-USDT-SWAP")), orderTimeoutMs = 5000)
+    state.apply(Event.local(Topics.Wallet, Wallet(AccountId.Live, Exchange.Okx, Map("USDT" -> 500.0), t0)))
+    assertEquals(state.usdtBalance(Exchange.Okx), Some(500.0))
+    state.apply(Event.local(Topics.Wallet, Wallet(AccountId.Live, Exchange.Okx, Map("ETH" -> 2.0), t0)))
+    assertEquals(state.usdtBalance(Exchange.Okx), Some(0.0), "留着旧的 500 就是拿一笔已清空的现金继续做决策")
+
+  test("WS 的逐币种余额在快照之后维持它 —— 只改这一个币种, 不动其它"):
+    // 三家 WS 推的都是"该币种当前余额", 只是不覆盖未变动的币种; 所以增量维护是正确的。
+    val state = StateManager(List(Instrument(Exchange.Okx, "ETH-USDT-SWAP")), orderTimeoutMs = 5000)
+    state.apply(Event.local(Topics.Greeks, Greeks(AccountId.Live, Exchange.Okx, "ETH", 1.0, 0.1, 0.0, 0.0, t0)))
+    state.apply(Event.local(Topics.Wallet, Wallet(AccountId.Live, Exchange.Okx, Map("USDT" -> 500.0, "ETH" -> 2.0), t0)))
+    state.apply(Event.local(Topics.Balance, Balance(AccountId.Live, Exchange.Okx, "USDT", 600.0, t0)))
+    assertEquals(state.greeks(Exchange.Okx, "ETH").map(_.delta), Some(3.0), "只有 USDT 变动, ETH 现货必须还在")
+    state.apply(Event.local(Topics.Balance, Balance(AccountId.Live, Exchange.Okx, "ETH", 0.0, t0)))
+    assertEquals(state.greeks(Exchange.Okx, "ETH").map(_.delta), Some(1.0), "ETH 归零如实生效")

@@ -185,5 +185,8 @@ final class SimulatedExchange(
 
   override protected def currentAccountInfo(): AccountInfo = state.accountInfo(exchange)
 
+  /** 替身账户的钱包: 只有计价货币现金 (构造事实, 见 [[hft.sim.PaperCounter.currentWallet]])。 */
+  override protected def currentWallet(): Map[String, Double] = Map(USDT -> state.ledger.cash)
+
   /** 本账户当前的账本快照 (供绩效统计与测试) */
   def ledger: Ledger = state.ledger

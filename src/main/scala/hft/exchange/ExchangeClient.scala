@@ -52,8 +52,21 @@ trait TradingClient extends ExchangeClient:
   /** 查询当前挂单 (live + partially_filled) */
   def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]]
 
-  /** 获取账户信息 (净值 + 总持仓名义价值) */
+  /** 获取账户信息 (净值) */
   def fetchAccountInfo(): Either[ExchangeError, AccountInfo]
+
+  /** 账户的**完整**钱包 (币种 -> 余额)。未列出的币种余额为 0。
+    *
+    * ## 为什么它必须是 REST，而不只靠私有流
+    *
+    * 期权 delta 对冲要 `期权 delta + 该币现金余额` 才能给出总敞口，缺余额就只能暂停对冲
+    * (见 `hft.state.StateManager.greeks`)。而"某币余额是 0"与"还没见过这个币"必须分得开：
+    * OKX 余额为 0 时**不下发该币种行**，Bybit 的 wallet 频道更是明确"订阅成功时不给
+    * snapshot、只在变动时推" —— 一个不做现货的账户可能几天等不到一条推送。
+    *
+    * 所以完整钱包由启动对齐经 REST 建立 (与持仓同理)，私有流之后只负责更新。
+    * 两家的 REST 钱包接口本来就一次返回整份，此前只是把币种明细丢掉了。 */
+  def fetchWallet(): Either[ExchangeError, Map[String, Double]]
 
   /** 启动对齐用的持仓快照 —— **必须 REST 直查, 不允许返回空让私有流去补**。
     *

@@ -1,6 +1,6 @@
 package strategy.strategies.ivsellhedge.live
 
-import strategy.strategies.ivsellhedge.logic.{SellPlan, SigmaSource}
+import strategy.strategies.ivsellhedge.logic.{PortfolioDelta, SellPlan, SigmaSource}
 import strategy.utils.hedge.{DeltaBand, QuotePolicy, QuoteStyle}
 import hft.domain.Coin
 
@@ -10,7 +10,7 @@ import com.github.plokhotnyuk.jsoniter_scala.macros.*
 import java.nio.file.{Files, Path}
 import scala.util.control.NonFatal
 
-/** IV 定量卖出 + KAMA 死区对冲的**全部调参** (SSOT)。缺省字段由 jsoniter 回填默认值。
+/** IV 定量卖出 + delta 死区对冲的**全部调参** (SSOT)。缺省字段由 jsoniter 回填默认值。
   *
   * 分两段：`卖出腿` 归 [[OptionSellerActor]]，`对冲腿` 归 `DeltaHedgeStrategy`。
   *
@@ -34,19 +34,28 @@ import scala.util.control.NonFatal
   * @param refreshMarksMs    IV / 持仓 / 现金的刷新间隔
   * @param sellIntervalMs    卖出对账间隔。**必须显著大于成交结算延迟** (IOC 无挂单可跟, 判据是已结算持仓)
  * @param settleRounds      提交过卖单后强制静默的轮数 (给持仓落地留时间, 防同一缺口被连卖两轮)
-  * @param deltaThreshold    对冲死区基准阈值 (币本位, 如 0.3 ETH)
-  * @param macdTightenRatio  MACD 逆势侧的收紧系数 (0.5 = 减半; 1.0 = 不收紧)
- * @param chopWidenMult     ER→0 (震荡) 时死区阈值的放宽倍数 (>= 1)。**它同时是真实敞口的上界系数**:
- *                          阈值最宽 = deltaThreshold × 它, 超过必然对冲
- * @param trendTightenMult  ER→1 (趋势) 时死区阈值的收紧系数 ∈ (0,1]
+  * @param tightMult         顺势侧死区阈值的收紧系数 (× 预测波动范围)
+  * @param looseMult         逆势侧死区阈值的放宽系数 (× 预测波动范围)
+  * @param hedgeHorizonMinutes 预测波动范围的时间跨度 (分钟)：阈值 ∝ σ×√(horizon)
+  * @param minTheta          死区阈值下限 (币本位)：σ 未就绪或极小时兜住"裸着敞口"
+  * @param maxTheta          死区阈值上限 (币本位)：σ 异常放大时兜住"永不对冲"
+  * @param sigmaSource       σ 的取数口径 ("realized" = 已实现波动)
   * @param fastBar           细粒度序列的 K 线粒度 (OKX 粒度串, 默认 "1m")。σ 与 ER 都建在它上面,
  *                          所以都能用历史 K 线预热, 开机即就绪
  * @param erPeriod          ER 的回看根数 (默认 10)。ER **只用于选报价方式**, 不再参与死区
  * @param rvBars            实现波动的回看根数 (默认 30)
   * @param macdBar           MACD 的 K 线粒度 (OKX 粒度串, 如 "1H")；预热与实时聚合共用这一个事实
-  * @param offset            对冲挂单相对盘口的外移比例 (保证 PostOnly 不吃单)
-  * @param requoteMs         对冲挂单未成交的重挂间隔
-  * @param minHedgeQty       最小对冲量 (低于它不动, 兼作 KAMA 滞后导致的微量触发的吸收器)
+  * @param macdFast          MACD 快线周期
+  * @param macdSlow          MACD 慢线周期
+  * @param macdSignal        MACD 信号线周期
+  * @param trendErThreshold  ER 高于它按"单边"选报价方式 (跨价), 否则按"折返" (被动挂)
+  * @param passiveOffset     被动挂单相对盘口的外移比例 (保证 PostOnly 不吃单)
+  * @param passiveTtlMs      被动挂单的存活时间, 超时撤单重挂
+  * @param crossOffset       跨价挂单相对盘口的让价比例
+  * @param crossTtlMs        跨价挂单的存活时间
+  * @param cancelConfirmMs   撤单确认等待上限 (超时视为撤单请求丢失, 重发)
+  * @param riskFreeRate      BS 定价的无风险利率
+  * @param minHedgeQty       最小对冲量 (低于它不动, 吸收死区边缘的微量反复触发)
   * @param maxHedgeQty       单笔对冲量硬上限 (sanity: 疑似 delta 计算 bug 时不下单 + 告警)
   * @param maxExposureStaleMs 敞口读数陈旧阈值; 缺省 = 4×publishExposureMs
   */
@@ -55,22 +64,26 @@ final case class IvSellTuning(
     baseCoin: String,
     ccy: String,
     // ---- 卖出腿 ----
-    targetDays: Int = 14,
-    minTtlDays: Int = 7,
-    minStrikeDistance: Double = 0.0,
-    ivStart: Double = 0.35,
+    // 默认值全部取自 [[OptionSellerActor.Defaults]] —— **这里不再有第二份**。
+    // 从前两处各写一份, 且在危险方向上不一致: 配置漏写 enableOpen 就真实下单、
+    // 漏写 minStrikeDistance 就卖平值跨式。
+    targetDays: Int = OptionSellerActor.Defaults.TargetDays,
+    minTtlDays: Int = OptionSellerActor.Defaults.MinTtlDays,
+    minStrikeDistance: Double = OptionSellerActor.Defaults.MinStrikeDistance,
+    /** 起卖点 IV。**必填** —— 见字段文档: 给它默认值等于埋一个看着合理的错配置。 */
+    ivStart: Double,
     ivQtyStart: Double = 3.0,
     ivQtySlope: Double = 1.0,
     ivQtyMax: Double = 10.0,
-    minPremium: Double = 0.01,
-    maxSpreadRatio: Double = 1.1,
-    maxOptionLeverage: Double = 2.0,
-    enableOpen: Boolean = true,
-    publishExposureMs: Long = 1000,
-    refreshMarksMs: Long = 5000,
-    sellIntervalMs: Long = 5000,
-    settleRounds: Int = 1,
-    riskFreeRate: Double = 0.0,
+    minPremium: Double = OptionSellerActor.Defaults.MinPremium,
+    maxSpreadRatio: Double = OptionSellerActor.Defaults.MaxSpreadRatio,
+    maxOptionLeverage: Double = OptionSellerActor.Defaults.MaxOptionLeverage,
+    enableOpen: Boolean = OptionSellerActor.Defaults.EnableOpen,
+    publishExposureMs: Long = OptionSellerActor.Defaults.PublishExposureMs,
+    refreshMarksMs: Long = OptionSellerActor.Defaults.RefreshMarksMs,
+    sellIntervalMs: Long = OptionSellerActor.Defaults.SellIntervalMs,
+    settleRounds: Int = OptionSellerActor.Defaults.SettleRounds,
+    riskFreeRate: Double = PortfolioDelta.DefaultRate,
     // ---- 对冲腿 ----
     tightMult: Double = 0.5,
     looseMult: Double = 2.0,

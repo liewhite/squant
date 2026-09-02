@@ -28,6 +28,31 @@ final case class OkxCredentials(apiKey: String, secret: String, passphrase: Stri
     OkxClient.hmacSha256Base64(secret, s"${timestamp}GET/users/self/verify")
 
 object OkxClient:
+  /** 读 `/api/v5/account/greeks` 的一个希腊字母字段。**空串是协议规定的合法值, 不是坏报文。**
+    *
+    * OKX 通用约定: `"" will be returned for inapplicable fields under the current account level`,
+    * 而 `gammaBS/thetaBS/vegaBS` 标注 `only applicable to OPTION` —— 该币种没有期权持仓时
+    * 这几个字段就是空串 (Get Greeks 的官方响应示例本身即 `{"deltaBS":"","gammaBS":"",...,"ccy":"BTC"}`)。
+    * 不带 `ccy` 请求时接口返回账户里所有有余额的币种, 因此一个 USDT 行、或者卖出第一张期权
+    * 之前的 ETH 行, 就足以触发。
+    *
+    * 把它当坏报文抛的后果: [[OkxAccountFeed.pollGreeks]] 只把 `Left` 当可重试, 异常会穿出
+    * 受管任务并**级联终止整个引擎** —— 而 OKX 路径上它是唯一的 greeks 来源。
+    *
+    * 只有**非空且非数字**才是真的坏报文, 那时必须抛: 静默归零会让账户 delta 少算一块,
+    * 而对冲正是按它下单。
+    *
+    * 这条规则公开在这里 (而不是留在 `private[okx]` 的 codec 里) 是因为它有**两个消费者**:
+    * [[OkxClient.fetchGreeks]] 与 `strategy.utils.option.OkxOptionsClient.optionAccountGreeks`,
+    * 而后者在别的包。各写一份的结果是同一段文档在同一个仓库里有两个相反的实现 ——
+    * 那正是本条规则被抽出来的原因。报文类型本身仍留在适配层内, 不跨包泄漏。 */
+  def greekField(raw: String, field: String, ccy: String): Double =
+    if raw.isEmpty then 0.0
+    else
+      raw.toDoubleOption.getOrElse(
+        throw IllegalStateException(s"OKX greeks 的 $field 不是数字: ccy=$ccy 原始值='$raw'")
+      )
+
   /** 只读客户端（无凭证）：只能取公共数据，私有端点在**类型上**够不着。
     *
     * 返回具体类型而非 `ExchangeClient`：行情插件要读 `quote` 才能拼出 instId
@@ -273,11 +298,18 @@ final class OkxClient private[okx] (
 
   /** OKX 净值走 REST (totalEq)；名义价值由私有 WS account 频道推送，此处置 0 */
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] =
+    balance().map(b => AccountInfo(AccountId.Live, exchange, equity = b.totalEq.asDouble))
+
+  /** 完整钱包: `/api/v5/account/balance` 的 details 就是整份币种明细 (余额为 0 的币种 OKX
+    * 不下发该行, 因此"未列出 = 0"正是它的语义)。 */
+  override def fetchWallet(): Either[ExchangeError, Map[String, Double]] =
+    balance().map(_.details.map(d => d.ccy -> d.cashBal.asDouble).toMap)
+
+  /** 净值与币种明细来自同一个响应 —— 分两次拉会拿到两个时刻的账户状态。 */
+  private def balance(): Either[ExchangeError, OkxCodec.BalanceRespData] =
     signedRequest[BalanceResp](Method.GET, "/api/v5/account/balance").flatMap { r =>
       ensureOk(r.code, r.msg).flatMap { _ =>
-        r.data.headOption
-          .toRight(ExchangeError.Other("OKX no balance data"))
-          .map(b => AccountInfo(AccountId.Live, exchange, equity = b.totalEq.asDouble))
+        r.data.headOption.toRight(ExchangeError.Other("OKX no balance data"))
       }
     }
 
@@ -336,10 +368,11 @@ final class OkxClient private[okx] (
             account = AccountId.Live,
             exchange = Exchange.Okx,
             ccy = d.ccy,
-            delta = d.deltaBS.asDouble,
-            gamma = d.gammaBS.asDouble,
-            theta = d.thetaBS.asDouble,
-            vega = d.vegaBS.asDouble,
+            // 空串 = 该币种没有期权持仓, 是合法值; 判据见 GreeksData.greek
+            delta = OkxClient.greekField(d.deltaBS, "deltaBS", d.ccy),
+            gamma = OkxClient.greekField(d.gammaBS, "gammaBS", d.ccy),
+            theta = OkxClient.greekField(d.thetaBS, "thetaBS", d.ccy),
+            vega = OkxClient.greekField(d.vegaBS, "vegaBS", d.ccy),
             timestamp = d.ts.toLongOption.getOrElse(throw IllegalStateException(s"Invalid OKX greeks ts: '${d.ts}'")),
           )
         }.toVector

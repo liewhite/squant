@@ -225,6 +225,43 @@ final case class Balance(
     timestamp: Timestamp,
 )
 
+/** 一份**完整**的钱包快照 —— 未列出的币种余额就是 0。
+  *
+  * ## 为什么需要"完整"这个事实
+  *
+  * 单条 [[Balance]] 只说"这个币种现在有多少"，说不出"别的币种是 0"。而 OKX 在余额为 0 时
+  * **不下发该币种行**，于是"从没见过 ETH 的余额"与"ETH 余额确实是 0"在下游完全无从分辨。
+  *
+  * 这个区分不是学术问题：`StateManager.greeks` 要 `期权 delta + 该币现金余额` 才能给出总敞口，
+  * 缺余额就返回 None、对冲静默不触发 —— 一个只卖期权、不持现货的账户会因此**永远裸着敞口**。
+  * 从前的做法是让一个 feed 在启动时注入一条假的 `BalanceChanged(ccy, 0.0)` 把键"占上"，
+  * 那等于用一句谎话换来对冲能跑：真实余额非零的账户在快照到达前会按 0 对冲。
+  *
+  * ## "完整"只能来自 REST
+  *
+  * 三家的私有钱包 WS 通道**都给不出这个事实**，各自的原文如下：
+  *   - OKX `account` 频道：只有 initial/regular snapshot 是全量，"when there is change in balance
+  *     or equity of an token, **only the incremental data of that currency will be pushed**"，
+  *     且快照可能按 `curPage`/`lastPage` 分页；
+  *   - Bybit `wallet` 频道："**There is no snapshot event given at the time when the subscription
+  *     is successful**"，且从未声明 `coin[]` 覆盖全部币种；
+  *   - Binance `ACCOUNT_UPDATE.B`：只带变化项。
+  *
+  * 因此这份全量由**启动对齐时的一次 REST 钱包查询**建立 (`TradingClient.fetchWallet` ->
+  * `TradingGateway.currentWallet`)，之后由逐币种的 [[Balance]] 维持 —— 三家的 WS 推送里
+  * 每个币种的值都是**当前余额**而非变化量，只是不覆盖未变动的币种，所以增量维护是正确的。
+  *
+  * 反过来把 WS 推送当全量做整表替换，代价是：一次只有 USDT 变动的推送会把 ETH 现货抹成 0，
+  * 而 delta 对冲正拿这个数当敞口。Bybit 侧没有周期性全量推送，这个错误不会自愈。
+  */
+final case class Wallet(
+    account: AccountId,
+    exchange: Exchange,
+    /** 币种 -> 余额。**未列出即为 0** */
+    balances: Map[String, Double],
+    timestamp: Timestamp,
+)
+
 /** Best Bid Offer (L1 行情) */
 final case class BBO(
     exchange: Exchange,

@@ -22,6 +22,15 @@ class OkxOptionsClientSpec extends munit.FunSuite:
     // ctVal 缺失 -> None: 张数换算不了, 按 1 猜会把 delta 静默错算一个整数倍
     assertEquals(instrumentOf(InstrumentItem("x", "3000", "C", "1711699200000", "1", "1", "0.1")), None)
 
+  test("instrumentOf: 精度三件套缺一个也跳过整个合约"):
+    // 从前它们是 getOrElse(0.0): 一行坏报文换来的是一个"可交易"的合约, 而
+    // OptionQty.alignDown 在 step<=0 时跳过对齐、minQty=0 放过任何量 —— 下单量校验整体失效。
+    val ok = InstrumentItem("x", "3000", "C", "1711699200000", "1", "1", "0.1", ctVal = "0.01")
+    assert(instrumentOf(ok).isDefined)
+    assertEquals(instrumentOf(ok.copy(minSz = "")).map(_.symbol), None, "minSz 缺失")
+    assertEquals(instrumentOf(ok.copy(lotSz = "0")).map(_.symbol), None, "lotSz 非正")
+    assertEquals(instrumentOf(ok.copy(tickSz = "abc")).map(_.symbol), None, "tickSz 非法")
+
   test("clOrdIdOf: 去连字符 + 截断 32, 确定性 (幂等)"):
     assertEquals(clOrdIdOf("vs-1711699200000-c"), "vs1711699200000c")
     assertEquals(clOrdIdOf("vs-1711699200000-p"), "vs1711699200000p")
@@ -67,6 +76,11 @@ class OkxOptionsClientSpec extends munit.FunSuite:
     assert(!"BTC-USD-260327-60000-C".startsWith("ETH-USD-"))
 
   test("holdingOf: pos 带符号 (负=空头); 0 张也保留 (让日志能区分刚平完和从没开过)"):
-    assertEquals(holdingOf(PositionItem("ETH-USD-C", "-10")), Some(OptionHolding("ETH-USD-C", -10.0)))
-    assertEquals(holdingOf(PositionItem("ETH-USD-C", "0")), Some(OptionHolding("ETH-USD-C", 0.0)))
-    assertEquals(holdingOf(PositionItem("ETH-USD-C", "")), None)
+    assertEquals(holdingOf(PositionItem("ETH-USD-C", "-10")), OptionHolding("ETH-USD-C", -10.0))
+    assertEquals(holdingOf(PositionItem("ETH-USD-C", "0")), OptionHolding("ETH-USD-C", 0.0))
+
+  test("holdingOf: pos 读不出来即抛 —— 那不等于'没有持仓'"):
+    // 丢掉这一行的后果: 声明式对账看不见这条腿, 把它当成"还没开"再开一次。
+    // PortfolioDelta.resolve 只报得出"拿到了却配不上"的腿, 报不出"根本没拿到"的腿。
+    val e = intercept[IllegalStateException](holdingOf(PositionItem("ETH-USD-C", "")))
+    assert(e.getMessage.contains("pos 不是数字"), e.getMessage)

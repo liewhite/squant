@@ -15,8 +15,33 @@ import OkxCodec.*
 import OkxCodec.given
 
 object OkxAccountFeed:
-  /** Greeks REST 轮询间隔。OKX account-greeks WS 推送频率过低，改用 REST 轮询 (官方限速 10/2s) */
+  /** Greeks REST 轮询间隔的**默认值**。OKX account-greeks WS 推送频率过低，改用 REST 轮询。
+    *
+    * 可由构造参数覆盖 —— 因为下游的"读数陈旧即暂停对冲"闸门是按这个间隔的倍数定的
+    * (见 `MakerHedgeStrategy.maxGreeksStaleMs`)：写死在这里的话，闸门与真实发布节奏各说各话,
+    * 把闸门调紧到小于实际轮询周期就会让对冲永久暂停, 而没有任何一处会报错。 */
   val GreeksPollIntervalMs: Long = 1000
+
+  /** OKX `/account/greeks` 的限速是 10 次 / 2 秒 (官方文档), 即最快 200ms 一次。 */
+  val MinGreeksPollIntervalMs: Long = 200
+
+  /** `account` 推送 -> 净值 + **逐币种当前余额**。
+    *
+    * 纯函数: 这里是本连接器对余额的全部业务判断所在, 而它决定的是 delta 对冲把多少现货算进敞口。
+    *
+    * **不报"整份钱包"**: OKX 文档写明只有 initial/regular snapshot 是全量, 变动触发的
+    * `event_update` 只带那一个币种, 且全量快照本身可能按 `curPage`/`lastPage` 分页。
+    * 报文里没有 `eventType`/分页字段可读 (见 [[OkxCodec.WsPush]]), 因此这条通道给不出"全量"
+    * 这个事实 —— 那份全量来自启动对齐的 REST 钱包 (`TradingGateway.currentWallet`)。
+    *
+    * 当成全量做整表替换的代价: 一次只有 USDT 变动的推送会把 ETH 现货抹成 0, 对冲随即按
+    * 少算了整份现货的 delta 下单, 直到下一次 regular snapshot 才自愈。 */
+  private[okx] def accountReports(d: AccountData): Vector[AccountReport] =
+    val ts = d.uTime.toLongOption.getOrElse(
+      throw IllegalStateException(s"OKX account 推送缺 uTime: 原始值='${d.uTime}'")
+    )
+    AccountReport.EquityChanged(d.totalEq.asDouble, ts) +:
+      d.details.map(detail => AccountReport.BalanceChanged(detail.ccy, detail.cashBal.asDouble, ts)).toVector
 
 /** OKX 永续合约私有账户连接器。
   *
@@ -38,8 +63,13 @@ object OkxAccountFeed:
 final class OkxAccountFeed(
     client: OkxClient,
     backend: WebSocketSyncBackend,
+    greeksPollMs: Long = OkxAccountFeed.GreeksPollIntervalMs,
     wsUrl: String = OkxClient.WsPrivateUrl,
 ) extends AccountFeed:
+  require(
+    greeksPollMs >= OkxAccountFeed.MinGreeksPollIntervalMs,
+    s"greeks 轮询间隔 ${greeksPollMs}ms 快于 OKX 限速 (10 次/2 秒 -> 最快 ${OkxAccountFeed.MinGreeksPollIntervalMs}ms)",
+  )
   private val logger = LoggerFactory.getLogger(classOf[OkxAccountFeed])
   private val credentials = client.wsCredentials
 
@@ -69,7 +99,7 @@ final class OkxAccountFeed(
 
     // Greeks REST 轮询 (受管任务, 与私有 WS 并行)。协作式睡眠: 停机即退出。
     spawn {
-      while !sleepUnlessStopped(OkxAccountFeed.GreeksPollIntervalMs) do pollGreeks()
+      while !sleepUnlessStopped(greeksPollMs) do pollGreeks()
     }
 
   private def loginFrame(): String =
@@ -95,7 +125,10 @@ final class OkxAccountFeed(
 
   // ==================== 私有流解析 (任何不理解的消息 -> 异常上抛终止) ====================
 
-  private def onPrivateText(text: String): Unit =
+  /** 私有流报文入口。`private[okx]` 而非 `private`: 报文 -> [[AccountReport]] 的映射是本连接器
+    * 全部业务含义所在 (增量还是全量、方向、单位换算), 而它从前没有任何测试能碰到 ——
+    * "把增量当全量" 这个 bug 就藏在这一层。 */
+  private[okx] def onPrivateText(text: String): Unit =
     val env = readFromString[OkxEnvelope](text)
     if env.event.nonEmpty then handleControl(env, text)
     else
@@ -136,12 +169,7 @@ final class OkxAccountFeed(
     }
 
   private def publishAccount(d: AccountData): Unit =
-    val ts = d.uTime.toLongOption.getOrElse(
-      throw IllegalStateException(s"OKX account 推送缺 uTime: 原始值='${d.uTime}'")
-    )
-    report(AccountReport.EquityChanged(d.totalEq.asDouble, ts))
-    // 各币种现金余额：供 StateManager 修正 greeks delta 的现货敞口
-    d.details.foreach(detail => report(AccountReport.BalanceChanged(detail.ccy, detail.cashBal.asDouble, ts)))
+    OkxAccountFeed.accountReports(d).foreach(report)
 
   private def publishOrder(d: OrderPushData): Unit =
     val sym = fromOkx(d.instId, client.quote).getOrElse(throw IllegalStateException(s"Unknown OKX instId in order: '${d.instId}'"))

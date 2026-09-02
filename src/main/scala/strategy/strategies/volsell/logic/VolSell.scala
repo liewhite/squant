@@ -58,10 +58,33 @@ object VolSell:
       quoteOpt <- ex.optionQuote(inst.symbol)
       quote <- quoteOpt.toRight(s"${inst.symbol} 无两边盘口报价, 跳过 (无法定价)")
     yield
-      val (price, postOnly) = SellVolPlan.sellQuote(quote)
+      val (price, postOnly) = SellVolPlan.sellQuote(quote, inst.tickSize)
       val tag = if inst.right == OptionRight.Call then "c" else "p"
       Leg(inst.symbol, qty, price, postOnly, s"vs-$periodMs-$tag".take(36), inst.right)
 
   /** 下单 (按 leg.postOnly 选 maker/taker)。返回每腿结果。 */
   def execute(ex: OptionsExchange, d: Decision): Seq[(Leg, Either[String, String])] =
     d.legs.map(l => l -> ex.sellOption(l.symbol, l.qty, l.price, l.postOnly, l.orderLinkId))
+
+  /** 一轮下单的**结局判定**。宽跨是两条腿的整体, 只有两腿全部提交成功才算这一周做完。
+    *
+    * 这三条是业务事实, 不是日志格式：
+    *   - [[Outcome.Complete]] -> 记下本周锚点, 本周不再决策;
+    *   - [[Outcome.Naked]] -> **存在裸方向敞口**, 必须人工处理 (撤掉成的那条或补上没成的那条);
+    *     且**不能**记锚点 —— 记了就等于宣称本周已妥, 下次重启也不会再看它;
+    *   - [[Outcome.AllFailed]] -> 一张都没出去, 没有敞口, 下一个周期正常重试。
+    *
+    * 从前这段判断以 `ok == results.size` / `ok > 0` 的形式散在常驻循环里, 与 `while true` 缠在一起
+    * 因而无法单测 —— 而它决定的是"要不要把裸敞口当成正常完成"。 */
+  enum Outcome:
+    case Complete
+    case Naked(submitted: Int, total: Int)
+    case AllFailed(total: Int)
+
+  object Outcome:
+    def of(results: Seq[(Leg, Either[String, String])]): Outcome =
+      require(results.nonEmpty, "决策产出的腿不可能为空 —— plan 要么给完整两腿, 要么给 Left")
+      val submitted = results.count(_._2.isRight)
+      if submitted == results.size then Complete
+      else if submitted == 0 then AllFailed(results.size)
+      else Naked(submitted, results.size)

@@ -46,7 +46,7 @@ import java.time.{LocalDate, ZoneOffset}
   val source = SyntheticBboSource(
     provider.source(Seq(symbol), start.minusDays(warmupDays), end, Set(MarketDataKind.Trades))
   )
-  val strategy = MacdGridStrategy(exchange = provider.exchange, symbol = symbol, leverage = 1.0, referenceEquity = initBalance)
+  val strategy = MacdGridStrategy(exchange = provider.exchange, symbol = symbol, leverage = 1.0)
   val runner = StrategyRunner.backtest(strategy)
 
   val rec = BacktestRecorder(exchange = provider.exchange, symbol = symbol, startMs = startMs, initialBalance = initBalance)

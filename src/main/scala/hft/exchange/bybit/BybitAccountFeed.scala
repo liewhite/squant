@@ -48,6 +48,23 @@ object BybitAccountFeed:
   /** auth 帧 expires 相对当前时间的前移量 (ms)，给握手留出窗口 */
   val AuthExpiresBufferMs: Long = 10_000
 
+  /** `wallet` 推送 -> 净值 + **列出的各币种当前余额**。
+    *
+    * 纯函数: 这里是本连接器对余额的全部业务判断所在, 而它决定的是 delta 对冲把多少现货算进敞口。
+    *
+    * **不报"整份钱包"**: Bybit 文档只写了"订阅成功时不给 snapshot"
+    * ("There is no snapshot event given at the time when the subscription is successful"),
+    * 从未声明 `coin[]` 覆盖全部币种 —— 官方示例里 `totalWalletBalance` 远大于唯一列出的那条的
+    * `usdValue`, 自己就反证了。全量只信启动对齐的 REST 钱包。
+    *
+    * 当成全量做整表替换的代价比 OKX 更重: Bybit **没有**周期性全量推送, 于是一次只有 USDT
+    * 变动的推送会把 ETH 现货抹成 0, 并一直保持到 ETH 余额自己再变一次。
+    *
+    * @param ts 本地接收时刻 —— Bybit 的 wallet 帧不带交易所时间戳 */
+  private[bybit] def walletReports(d: WalletData, ts: Timestamp): Vector[AccountReport] =
+    AccountReport.EquityChanged(d.totalEquity.asDouble, ts) +:
+      d.coin.map(c => AccountReport.BalanceChanged(c.coin, c.walletBalance.asDouble, ts)).toVector
+
 /** Bybit v5 USDT linear 永续私有账户连接器。
   *
   * 连接 `/v5/private`，带内握手 (WsLoop 无建连钩子，故事件驱动)：
@@ -102,7 +119,9 @@ final class BybitAccountFeed(
 
   // ==================== 私有流解析 (任何不理解的消息 -> 异常上抛终止) ====================
 
-  private def onPrivateText(text: String): Unit =
+  /** 私有流报文入口。`private[bybit]` 而非 `private`: 报文 -> [[AccountReport]] 的映射是本连接器
+    * 全部业务含义所在, 而它从前没有任何测试能碰到 —— "把增量当全量" 这个 bug 就藏在这一层。 */
+  private[bybit] def onPrivateText(text: String): Unit =
     val msg = readFromString[BybitWsMsg](text)
     if msg.op.nonEmpty then handleControl(msg, text)
     else
@@ -196,11 +215,8 @@ final class BybitAccountFeed(
         throw IllegalStateException(s"未知的 Bybit 持仓方向: '$other' (symbol=${d.symbol} size=${d.size})")
     report(AccountReport.PositionReported(sym, Coin(signed), nowMs))
 
-  /** 钱包快照 -> 账户净值 + 各币种现金余额 */
   private def publishWallet(d: WalletData): Unit =
-    val ts = nowMs
-    report(AccountReport.EquityChanged(d.totalEquity.asDouble, ts))
-    d.coin.foreach(c => report(AccountReport.BalanceChanged(c.coin, c.walletBalance.asDouble, ts)))
+    BybitAccountFeed.walletReports(d, nowMs).foreach(report)
 
   /** 心跳发送线程：定期入队 ping 帧，维持私有连接 (无成交时也不致空闲被断) */
   private def startHeartbeat(): Unit =

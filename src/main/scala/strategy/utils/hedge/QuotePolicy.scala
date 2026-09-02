@@ -2,12 +2,12 @@ package strategy.utils.hedge
 
 /** 按**体制**挑选报价方式 —— "现在该慢慢挂还是立刻吃"。
   *
-  * 判据是 KAMA 的**效率比** ER = |净位移| / |路径长度| ∈ [0,1]：→1 说明敞口在走直线（单边），
-  * →0 说明来回折返（震荡）。它已经在算了 —— 正是它让 KAMA 自适应快慢，所以不必再引入第二个
+  * 判据是**效率比** ER = |净位移| / |路径长度| ∈ [0,1]：→1 说明敞口在走直线（单边），
+  * →0 说明来回折返（震荡）。对冲策略已经在算它了（`EfficiencyRatio`），所以不必再引入第二个
   * 体制指标。注意这个 ER 是**敞口序列**的，而不是价格的：要追的是敞口，行情单边只是它单边的原因。
   */
 trait QuotePolicy:
-  /** @param efficiencyRatio KAMA 的效率比；None = 预热不足 */
+  /** @param efficiencyRatio 效率比 ER（见 `hft.indicator.EfficiencyRatio`）；None = 预热不足 */
   def styleFor(efficiencyRatio: Option[Double]): QuoteStyle
 
   /** 可能挂出的最长存活时间 —— 框架的订单超时必须比它宽，否则正常挂单会被当成丢单清理 */

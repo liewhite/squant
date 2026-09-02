@@ -11,7 +11,7 @@
 期权链/IV/持仓/现金 ──> OptionSellerActor ──┬─> REST 卖出 (IOC, 旁路框架下单通道)
                                            └─> OptionExposure (每秒) ─┐
                                                                       ↓
-永续 BBO ──> 引擎行情流 ─────────────────────> DeltaKamaHedgeStrategy ──> 框架下单通道 ──> 永续
+永续 BBO ──> 引擎行情流 ─────────────────────> DeltaHedgeStrategy ──> 框架下单通道 ──> 永续
 永续持仓/回报 ──> OkxAccountFeed ───────────↗
 ```
 
@@ -295,7 +295,7 @@ Idle ──place──> Placing ──Pending──> Resting ──超时/被抢
 
 ## 无持久化
 
-对冲的 KAMA 状态与 MACD 序列仅在进程内存，重启即丢：
+对冲的 ER 与 MACD 序列仅在进程内存，重启即丢：
 
 - **卖出**：纯声明式，本就无状态，重启后按当前 IV 与实际持仓对账即可，天然自愈。
 - **对冲**：判据 = 当下的真实净敞口，每秒实时派生、与历史无关；重启后第一秒就能算出正确目标，
@@ -320,7 +320,7 @@ Idle ──place──> Placing ──Pending──> Resting ──超时/被抢
 ## 测试
 
 ```
-sbt "testOnly strategy.strategies.ivsellhedge.* strategy.utils.hedge.* hft.indicator.KamaSpec"
+sbt "testOnly strategy.strategies.ivsellhedge.* strategy.utils.hedge.* hft.indicator.*"
 ```
 
 纯逻辑（IV 定量 / 选到期 / 选行权 / 闸门 / 杠杆率 / 组合 delta / 死区 / 挂单腿状态机）与

@@ -70,7 +70,7 @@ object AlphaSignal extends Topic[Symbol, Score]("alphaSignal"):
 |---|---|---|
 | `Instrument` | Bbo / Trade / MarkPrice / IndexPrice / FundingRate | 公共行情，**无账户归属**，一份服务所有账户 |
 | `AccountInstrument` | Position / OrderUpdate / Fill | 私有回报，账户流推送 |
-| `AccountExchange` | Balance / AccountInfo / Greeks | 账户级读数 |
+| `AccountExchange` | Balance / Wallet / AccountInfo / Greeks | 账户级读数 |
 | `AccountExchange` | OrderIntent | 策略信号，按账户与交易所路由到唯一柜台 |
 | 无 | Clock | 全局节拍，用 `Interest.All` 订阅 |
 
@@ -332,6 +332,15 @@ def handlers = StrategyHandlers.empty
   把静默停滞转化为错误；限频 (HTTP 429/418) 说明请求节奏假设被打破，同样致命。
 - **不丢弃**: 消息解析失败、未知事件类型、未知订单状态，一律抛错。静默丢弃一条
   私有流消息等于丢一笔成交。
+- **不给通道赋予它给不出的事实**: "这就是整份钱包"是个比"某币种现在有多少"更强的事实，
+  而三家的私有钱包 WS 通道**都给不出它** —— 值是绝对余额，但推送只覆盖发生变动的币种
+  (OKX `account` 的 `event_update`、Bybit `wallet` 的 `coin[]`、Binance `ACCOUNT_UPDATE.B`)。
+  Bybit 更明确写着订阅时不给 snapshot。所以 `Topics.Wallet` (全量) **只由启动对齐的一次
+  REST 钱包查询产出**，之后由逐币种的 `Topics.Balance` 维持。
+  把推送当全量做整表替换的代价是：一次只有 USDT 变动的推送会把 ETH 现货抹成 0，
+  而 delta 对冲正拿这个数当敞口；Bybit 侧没有周期性全量推送，这个错误不自愈。
+  这条区分不是学术问题 —— "某币余额是 0"与"还没见过该币"决定了要不要把现货算进敞口，
+  而一个只卖期权、不持现货的账户永远等不到那条余额推送。
 - **不确定即终止**: 下单/撤单遇到网络错误或超时，订单是否成立**不确定**，立即终止；
   只有交易所**明确拒绝**才作为正常业务结果以 OrderUpdate(Error) 回流策略。
   判据是 `ExchangeError` 的语义 (`Rejected` / `RateLimited` / 其余)，**不是 HTTP 状态码**：

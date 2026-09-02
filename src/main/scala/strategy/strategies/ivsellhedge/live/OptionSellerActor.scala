@@ -258,6 +258,34 @@ object OptionSellerActor:
       at: Timestamp,
   )
 
+  /** 卖出腿参数的**唯一默认值来源**。
+    *
+    * 从前同一批参数有两份各自独立的默认值 ([[Config]] 与 `IvSellTuning`)，而它们在**危险的
+    * 那个方向上不一致**：`enableOpen` 一处 false 一处 **true** (配置文件漏写就真实下单)、
+    * `minStrikeDistance` 一处 2% 一处 **0.0** (漏写就卖平值跨式)、`maxOptionLeverage`
+    * 一处 1.0 一处 2.0。同一个事实两份副本，改一处不会有任何编译错误。
+    *
+    * 危险侧一律取保守值：不下单、要距离、低杠杆。 */
+  object Defaults:
+    val TargetDays: Int = 3
+    /** 剩余期限下限 = **1 天**: 只排掉当日到期 (权利金≈0 而 gamma 极大)。
+      *
+      * 不能更大: 它和 [[TargetDays]] (3) 是同一条选到期逻辑的两头 —— `minTtl` 一旦超过
+      * `targetDays`, 目标那一档就被自己的下限筛掉, 策略会静默改卖更远的到期
+      * (配置侧从前写的 7 正是这个形态)。 */
+    val MinTtlDays: Int = 1
+    val MinTtlMs: Long = MinTtlDays.toLong * SellPlan.DayMs
+    val MinStrikeDistance: Double = 0.02
+    val MinPremium: Double = 0.0
+    val MaxSpreadRatio: Double = 1.1
+    val MaxOptionLeverage: Double = 1.0
+    /** **默认不下单**：真实下单必须由配置显式开启。 */
+    val EnableOpen: Boolean = false
+    val PublishExposureMs: Long = 1000
+    val RefreshMarksMs: Long = 5000
+    val SellIntervalMs: Long = 5000
+    val SettleRounds: Int = 1
+
   /** 卖方 actor 的全部调参。
     *
     * @param symbol            标的 symbol (OKX: 基础币 ETH, 内部拼 ETH-quote-SWAP 取永续价)
@@ -278,18 +306,18 @@ object OptionSellerActor:
       symbol: String,
       baseCoin: String,
       ccy: String,
-      targetDays: Int = 3,
-      minTtlMs: Long = SellPlan.DayMs,
-      minStrikeDistance: Double = 0.02,
+      targetDays: Int = Defaults.TargetDays,
+      minTtlMs: Long = Defaults.MinTtlMs,
+      minStrikeDistance: Double = Defaults.MinStrikeDistance,
       ivQty: SellPlan.IvQty,
-      minPremium: Double = 0.0,
-      maxSpreadRatio: Double = 1.1,
-      maxOptionLeverage: Double = 1.0,
-      enableOpen: Boolean = false,
-      publishExposureMs: Long = 1000,
-      refreshMarksMs: Long = 5000,
-      sellIntervalMs: Long = 5000,
-      settleRounds: Int = 1,
+      minPremium: Double = Defaults.MinPremium,
+      maxSpreadRatio: Double = Defaults.MaxSpreadRatio,
+      maxOptionLeverage: Double = Defaults.MaxOptionLeverage,
+      enableOpen: Boolean = Defaults.EnableOpen,
+      publishExposureMs: Long = Defaults.PublishExposureMs,
+      refreshMarksMs: Long = Defaults.RefreshMarksMs,
+      sellIntervalMs: Long = Defaults.SellIntervalMs,
+      settleRounds: Int = Defaults.SettleRounds,
       riskFreeRate: Double = PortfolioDelta.DefaultRate,
   ):
     def validated: Config =

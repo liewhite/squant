@@ -95,7 +95,7 @@ final class OkxOptionsClient(
       // 若那个查询参数被忽略, 账户里其它标的的期权就会混进来 —— 它们配不上本标的的期权链与
       // 标记 IV, 于是每一轮都被判为"敞口不完整", 对冲**永久冻结**。症状是"一直不对冲",
       // 而原因在一个跟对冲毫无关系的持仓上, 极难查。
-      env.asEither.map(_.filter(_.instId.startsWith(s"$family-")).flatMap(holdingOf).toVector)
+      env.asEither.map(_.filter(_.instId.startsWith(s"$family-")).map(holdingOf).toVector)
     }
 
   override def underlyingLast(symbol: String): Either[String, Double] =
@@ -111,8 +111,14 @@ final class OkxOptionsClient(
       env.asEither.flatMap { rows =>
         rows.headOption.toRight("OKX account/balance 无数据").flatMap { b =>
           b.totalEq.toDoubleOption.toRight(s"OKX totalEq 非法: '${b.totalEq}'").map { equity =>
-            // 币种行缺失 = 该币余额为 0 (OKX 余额为 0 时常不下发该行), 不是错误
-            val cash = b.details.find(_.ccy == ccy).flatMap(_.cashBal.toDoubleOption).getOrElse(0.0)
+            // 币种行缺失 = 该币余额为 0 (OKX 余额为 0 时常不下发该行), 不是错误。
+            // 但**行在、值非法**是坏报文, 与"没有这一行"是两件事 —— 前者不能也当成 0。
+            val cash = b.details.find(_.ccy == ccy) match
+              case None => 0.0
+              case Some(d) =>
+                d.cashBal.toDoubleOption.getOrElse(
+                  throw IllegalStateException(s"OKX balance 的 cashBal 不是数字: ccy=$ccy 原始值='${d.cashBal}'")
+                )
             OptionAccountCash(equity, cash)
           }
         }
@@ -120,12 +126,20 @@ final class OkxOptionsClient(
     }
 
   override def optionAccountGreeks(): Either[String, (Double, Double)] =
-    // OKX 账户级、按币种(分行)聚合的 BS 希腊字母 (deltaBS/gammaBS, 与框架 hft.OkxClient.fetchGreeks 同字段同口径——
-    // 该路径已是 OKX 永续对冲使用的 delta 定义, 故复用一致)。optionCcy=Some 时只取该币行 (避免多币 delta 跨币相加)。
+    // OKX 账户级、按币种(分行)聚合的 BS 希腊字母。报文类型与字段读法都复用框架那份
+    // (hft.exchange.okx.OkxCodec.GreeksData) —— 同一个端点各写一份 codec 的结果是
+    // 同一段文档在同一个仓库里有两个相反的实现 (空串一处当 0、一处当坏报文)。
+    // optionCcy=Some 时只取该币行 (避免多币 delta 跨币量纲相加)。
     signedGet[Envelope[GreeksItem]]("/api/v5/account/greeks", "").flatMap { env =>
       env.asEither.map { rows =>
         val rel = optionCcy.fold(rows)(c => rows.filter(_.ccy == c))
-        (rel.flatMap(_.deltaBS.toDoubleOption).sum, rel.flatMap(_.gammaBS.toDoubleOption).sum)
+        // 不可解析的行**不能丢**: 那会让账户 delta 少算一块, 而对冲正是按它下单。
+        // 空串 = 该币种没有期权持仓, 是协议规定的合法值 —— 判据只有一份, 见 OkxClient.greekField
+        // (框架的 fetchGreeks 走的是同一个)。各写一份的结果是同一段文档两个相反的实现。
+        (
+          rel.map(r => OkxClient.greekField(r.deltaBS, "deltaBS", r.ccy)).sum,
+          rel.map(r => OkxClient.greekField(r.gammaBS, "gammaBS", r.ccy)).sum,
+        )
       }
     }
 
@@ -197,17 +211,22 @@ object OkxOptionsClient:
   def clOrdIdOf(orderLinkId: String): String = orderLinkId.filter(_.isLetterOrDigit).take(32)
 
   /** OKX 期权 instruments 行 -> [[OptionInstrument]] (直接读 stk/optType/expTime 字段, 不解析符号)。
-    * strike/optType/expTime/ctVal 任一缺失或非法 -> None (跳过该合约, 不污染期权链)。 */
+    * 任一必需字段缺失或非法 -> None (跳过该合约, 不污染期权链)。
+    *
+    * **精度三件套 (minSz/lotSz/tickSz) 与 ctVal 同等对待**: 从前它们是 `getOrElse(0.0)`,
+    * 于是一个字段坏了的合约照样进链, 而 `OptionQty.alignDown` 在 `step <= 0` 时**跳过对齐**、
+    * `minQty = 0` 又放过任何量 —— 一行坏报文换来两条卖方策略同时失去下单量校验。
+    * 跳过整个合约才是这里唯一诚实的选择: 一个校验不了下单量的合约不该是可交易的。 */
   def instrumentOf(i: InstrumentItem): Option[OptionInstrument] =
     for
       strike <- i.stk.toDoubleOption
       right <- rightOf(i.optType)
       exp <- i.expTime.toLongOption.filter(_ > 0)
       ctVal <- i.ctVal.toDoubleOption.filter(_ > 0) // ctVal 缺失/非法则跳过该合约: 张数换算不了, 宁缺勿错
-    yield OptionInstrument(i.instId, exp, strike, right, ctVal,
-      minQty = i.minSz.toDoubleOption.getOrElse(0.0),
-      qtyStep = i.lotSz.toDoubleOption.getOrElse(0.0),
-      tickSize = i.tickSz.toDoubleOption.getOrElse(0.0))
+      minQty <- i.minSz.toDoubleOption.filter(_ > 0)
+      qtyStep <- i.lotSz.toDoubleOption.filter(_ > 0)
+      tickSize <- i.tickSz.toDoubleOption.filter(_ > 0)
+    yield OptionInstrument(i.instId, exp, strike, right, ctVal, minQty, qtyStep, tickSize)
 
   /** opt-summary 行 -> [[OptionMark]]; markVol 缺失/非法 -> None (该腿无标记 IV, 上层据此跳过) */
   def markOf(i: SummaryItem): Option[OptionMark] =
@@ -216,8 +235,16 @@ object OkxOptionsClient:
   /** positions 行 -> [[OptionHolding]]; pos 非法 -> None。**pos=0 也保留** ——
     * "这个合约现在是 0 张"与"没这行"对声明式对账是同一个结论, 但保留它让日志能区分
     * "刚平完"和"从没开过"。 */
-  def holdingOf(i: PositionItem): Option[OptionHolding] =
-    i.pos.toDoubleOption.map(p => OptionHolding(i.instId, p))
+  def holdingOf(i: PositionItem): OptionHolding =
+    // `pos` 读不出来**不等于没有持仓**。丢掉这一行的后果是: 声明式对账看不见这条腿,
+    // 于是把它当成"还没开", 再开一次 —— 而 PortfolioDelta.resolve 只报得出"拿到了却配不上"
+    // 的腿, 报不出"根本没拿到"的腿。坏报文就在第一现场抛。
+    OptionHolding(
+      i.instId,
+      i.pos.toDoubleOption.getOrElse(
+        throw IllegalStateException(s"OKX positions 的 pos 不是数字: instId=${i.instId} 原始值='${i.pos}'")
+      ),
+    )
 
   /** 一根 K 线 (ts ms + OHLC), 由 OKX candles 行 [ts,o,h,l,c,...] 解析 */
   final case class Bar(ts: Long, high: Double, low: Double, close: Double)
@@ -244,17 +271,19 @@ object OkxOptionsClient:
   final case class InstrumentItem(instId: String, stk: String, optType: String, expTime: String, lotSz: String, minSz: String, tickSz: String, ctVal: String = "")
   final case class TickerItem(bidPx: String = "", askPx: String = "", last: String = "")
   final case class SummaryItem(instId: String = "", markVol: String = "")
+  /** `/account/greeks` 的行 —— 只取本客户端要的两个字段。字段**读法**共用 `OkxClient.greekField`。 */
+  final case class GreeksItem(ccy: String, deltaBS: String, gammaBS: String)
+
   final case class PositionItem(instId: String = "", pos: String = "")
   final case class BalanceDetail(ccy: String = "", cashBal: String = "")
   final case class BalanceItem(totalEq: String = "", details: List[BalanceDetail] = Nil)
   final case class OrderItem(ordId: String, clOrdId: String, sCode: String, sMsg: String)
-  final case class GreeksItem(ccy: String, deltaBS: String, gammaBS: String)
 
   given candlesCodec: JsonValueCodec[CandlesEnvelope] = JsonCodecMaker.make
   given instrumentsCodec: JsonValueCodec[Envelope[InstrumentItem]] = JsonCodecMaker.make
   given tickerCodec: JsonValueCodec[Envelope[TickerItem]] = JsonCodecMaker.make
   given orderCodec: JsonValueCodec[Envelope[OrderItem]] = JsonCodecMaker.make
-  given greeksCodec: JsonValueCodec[Envelope[GreeksItem]] = JsonCodecMaker.make
   given summaryCodec: JsonValueCodec[Envelope[SummaryItem]] = JsonCodecMaker.make
+  given greeksCodec: JsonValueCodec[Envelope[GreeksItem]] = JsonCodecMaker.make
   given positionsCodec: JsonValueCodec[Envelope[PositionItem]] = JsonCodecMaker.make
   given balanceCodec: JsonValueCodec[Envelope[BalanceItem]] = JsonCodecMaker.make

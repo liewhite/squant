@@ -61,7 +61,8 @@ class VolSellSpec extends munit.FunSuite:
     assertEquals(dec.legs.map(_.qty).toSet, Set(2.0)) // baseQty 1 × 2
     val byRight = dec.legs.map(l => l.right -> l).toMap
     assertEquals((byRight(OptionRight.Call).price, byRight(OptionRight.Call).postOnly), (49.9, false)) // 价差0.1 -> 对手价 taker
-    assertEquals((byRight(OptionRight.Put).price, byRight(OptionRight.Put).postOnly), (39.3, true))    // 价差1.0 -> 中价39.5-0.2 maker
+    // 价差1.0 -> maker: 中价 39.5 让 0.375%, 向上对齐到 tick 0.1 -> 39.4 (且高于买一 39.0)
+    assertEquals((byRight(OptionRight.Put).price, byRight(OptionRight.Put).postOnly), (39.4, true))
     val period = SellVolPlan.currentDecisionTime(now)
     assertEquals(byRight(OptionRight.Call).orderLinkId, s"vs-$period-c")
     assertEquals(byRight(OptionRight.Put).orderLinkId, s"vs-$period-p")
@@ -97,3 +98,22 @@ class VolSellSpec extends munit.FunSuite:
     assertEquals(results.size, 2)
     assert(results.forall(_._2.isRight))
     assertEquals(ex.placed.map(p => (p._1, p._4)).toSet, Set(("ETH-3100-C", false), ("ETH-3000-P", true)))
+
+  test("Outcome: 两腿全成 = Complete (才能记锚点, 宣称本周做完)"):
+    val ex = FakeEx()
+    val dec = VolSell.plan(ex, cfg, now).toOption.get
+    assertEquals(VolSell.Outcome.of(VolSell.execute(ex, dec)), VolSell.Outcome.Complete)
+
+  test("Outcome: 只成一腿 = Naked —— 裸方向敞口, 不能当成本周做完"):
+    // 记了锚点就等于宣称本周已妥: 重启后也不会再看它, 那条单腿的方向敞口就此没人管。
+    val ex = FakeEx(failLeg = Set("ETH-3000-P"))
+    val dec = VolSell.plan(ex, cfg, now).toOption.get
+    assertEquals(VolSell.Outcome.of(VolSell.execute(ex, dec)), VolSell.Outcome.Naked(1, 2))
+
+  test("Outcome: 两腿全失败 = AllFailed —— 没有敞口, 下一周期正常重试"):
+    val ex = FakeEx(failLeg = Set("ETH-3000-P", "ETH-3100-C"))
+    val dec = VolSell.plan(ex, cfg, now).toOption.get
+    assertEquals(VolSell.Outcome.of(VolSell.execute(ex, dec)), VolSell.Outcome.AllFailed(2))
+
+  test("Outcome: 空结果即抛 —— plan 要么给完整两腿, 要么给 Left"):
+    intercept[IllegalArgumentException](VolSell.Outcome.of(Seq.empty))

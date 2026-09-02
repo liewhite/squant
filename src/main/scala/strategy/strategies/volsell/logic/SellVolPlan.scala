@@ -44,16 +44,66 @@ object SellVolPlan:
   def targetExpiryMs(anchorMs: Long, targetDays: Int): Long =
     anchorMs + targetDays.toLong * DayMs
 
-  /** 卖价决策的两个参数 (微观结构相关, 命名常量替代魔法值): 价差 ≤ [[SpreadTakerCutoff]] 用对手价 taker,
-    * 否则中价 − [[PassiveOffset]] 挂 maker。 */
-  val SpreadTakerCutoff: Double = 0.3
-  val PassiveOffset: Double = 0.2
+  /** 卖价决策的两个参数，**单位是中价的比例**，不是绝对价格。
+    *
+    * ## 为什么不能是绝对值
+    *
+    * 从前它们是 `0.3` / `0.2` 个报价货币单位，而报价货币是**交易所的事实**：
+    * Bybit 的 USDT 期权按美元报价 (周度 OTM 权利金常在几十美元)，而 OKX 的币本位期权
+    * `px` 以标的币计 (ETH 期权约 0.005–0.1 ETH)。同一份常量跨过 `OptionsExchange` 抽象后：
+    * 在 OKX 上价差恒 `<= 0.3` -> **永远走 taker**；万一走到 maker 分支，`mid - 0.2` 还是负数。
+    * `OkxVolSellLauncher` 宣称"策略逻辑零改动"，恰恰把这处单位泄漏盖住了。
+    *
+    * 比例形式在两家都成立，而且对便宜的期权也成立 —— 绝对值 0.3 对一张 1 美元的期权是 30%。
+    *
+    * ## 默认值的来历
+    *
+    * `SpreadTakerCutoffRatio` 由原来的绝对值在 **Bybit ETH 周度期权的典型权利金量级 (~40 USDT)**
+    * 上换算而来：`0.3/40 ≈ 0.75%`。**换交易所或换标的请重新校准** —— 它是微观结构参数，
+    * 不是普适常数。
+    *
+    * `PassiveOffsetRatio` **不是独立调参, 而是由 cutoff 派生**：让价超过半个 cutoff 价差,
+    * maker 单就会报到买一以下而被拒 (推导见 [[sellQuote]])。原来的一对绝对值
+    * `0.3` / `0.2` 恰好破了这条关系, 于是相对价差落在 0.75%~1.0% 时永远挂不上单。
+    * 派生之后这个失效形态在类型层面就不可能出现。 */
+  val SpreadTakerCutoffRatio: Double = 0.0075
+  val PassiveOffsetRatio: Double = SpreadTakerCutoffRatio / 2
 
-  /** 由盘口 [[Quote]] 定卖价与下单方式: 价差 ≤ cutoff -> (对手价=买一, taker); 否则 (中价 − offset, maker)。
+  /** 由盘口 [[Quote]] 定卖价与下单方式: 相对价差 ≤ cutoffRatio -> (对手价=买一, taker);
+    * 否则 (中价 × (1 − offsetRatio) 并**按 tick 向上对齐**, maker)。
+    *
+    * ## 两个参数之间的约束
+    *
+    * maker 卖单要挂得住, 价格必须**严格高于买一**: `mid×(1−offset) > bid ⟺ spread > 2×mid×offset`。
+    * 而进 maker 分支只保证 `spread > mid×cutoff`。于是 `cutoff < 2×offset` 时存在一段价差
+    * (原来的 0.75%~1.0%) 落进 maker 分支却报出低于买一的价 —— postOnly 单**必被交易所拒**,
+    * 表现是"这一档价差下永远挂不上单"。所以 `cutoffRatio >= 2 × offsetRatio` 是前置条件, 不是调参建议。
+    *
+    * ## 为什么向上对齐
+    *
+    * `tickSize` 两家客户端都解析了却从来没人用, 而落在 tick 网格之外会被交易所按精度拒。
+    * 对齐方向要选**远离对手盘**的那侧: 卖方向上 = 多收一点权利金, 且不会因对齐把价格推到买一
+    * 以下而触发 postOnly 拒单。向下对齐两头都亏 —— 白让权利金, 还增加穿价概率
+    * (OKX 币本位 ETH 期权 `tickSz=0.0001`, 权利金 0.005 ETH 时一个 tick 就是 2%, 远大于 0.5% 的 offset)。
+    *
     * 返回 (卖价, postOnly)。 */
-  def sellQuote(q: Quote, cutoff: Double = SpreadTakerCutoff, offset: Double = PassiveOffset): (Double, Boolean) =
-    if q.spread <= cutoff then (q.bid, false)      // 价差窄: 对手价(买一)直接成交 (taker)
-    else (q.mid - offset, true)                     // 价差宽: 公允(中)价 − offset 挂单 (maker)
+  def sellQuote(
+      q: Quote,
+      tickSize: Double,
+      cutoffRatio: Double = SpreadTakerCutoffRatio,
+      offsetRatio: Double = PassiveOffsetRatio,
+  ): (Double, Boolean) =
+    require(tickSize > 0, s"报价最小变动单位必须为正, 实际 $tickSize")
+    require(
+      cutoffRatio >= 2 * offsetRatio,
+      s"cutoffRatio ($cutoffRatio) 须 >= 2×offsetRatio ($offsetRatio) —— 否则 maker 分支会报出低于买一的价, postOnly 必被拒",
+    )
+    if q.spread <= q.mid * cutoffRatio then (q.bid, false) // 价差窄: 对手价(买一)直接成交 (taker)
+    else
+      // 价差宽: 公允(中)价让出 offsetRatio 挂单 (maker), 并向上对齐到 tick 网格 (远离对手盘)
+      val raw = q.mid * (1.0 - offsetRatio)
+      val ticks = BigDecimal(math.ceil(raw / tickSize - 1e-9))
+      ((ticks * BigDecimal(tickSize)).toDouble, true)
 
   /** 从期权链选 **离 targetExpiryMs 最近的到期、当前价位最近的宽跨 (strangle)**:
     * 同一到期内, call 取**严格高于 spot 的最小行权** (OTM), put 取**严格低于 spot 的最大行权** (OTM)。
@@ -98,7 +148,8 @@ object SellVolPlan:
     val from = ZonedDateTime.ofInstant(Instant.ofEpochMilli(fromMs), zone)
     from.`with`(TemporalAdjusters.previous(DayOfWeek.FRIDAY)).`with`(LocalTime.of(decisionHour, 0)).toInstant.toEpochMilli
 
-  /** 按交易所 qtyStep 向下取整并校验 minQty: 返回合规下单量, 低于最小量返回 None。step<=0 时只校验 minQty。
+  /** 按交易所 qtyStep 向下取整并校验 minQty: 返回合规下单量, 低于最小量返回 None。
+    * `qtyStep`/`minQty` 必须为正 (由 [[OptionInstrument]] 的不变量保证)。
     * 判据在 [[OptionQty.alignDown]] —— 与 IV 定量卖方策略共用一份, 两处各写会在同一交易所上给出
     * 不同答案而没有任何编译错误。 */
   def quantizeQty(qty: Double, qtyStep: Double, minQty: Double): Option[Double] =

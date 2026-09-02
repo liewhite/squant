@@ -255,11 +255,18 @@ final class BybitClient private[bybit] (
     * (与 OKX REST 路径一致，需精确杠杆率时由持仓聚合计算)
     */
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] =
+    wallet().map(w => AccountInfo(AccountId.Live, exchange, equity = w.totalEquity.asDouble))
+
+  /** 完整钱包: `/v5/account/wallet-balance` 一次返回整份币种明细。
+    * **必须靠它**建立钱包 —— wallet 频道文档明确写着订阅成功时不给 snapshot。 */
+  override def fetchWallet(): Either[ExchangeError, Map[String, Double]] =
+    wallet().map(_.coin.map(c => c.coin -> c.walletBalance.asDouble).toMap)
+
+  /** 净值与币种明细来自同一个响应 —— 分两次拉会拿到两个时刻的账户状态。 */
+  private def wallet(): Either[ExchangeError, BybitCodec.WalletData] =
     signedGet[WalletResp]("/v5/account/wallet-balance", s"accountType=$accountType").flatMap { resp =>
-      ensureOk(resp.retCode, resp.retMsg).flatMap { _ =>
-        resp.result.list.headOption
-          .toRight(ExchangeError.Other("Bybit no wallet data"))
-          .map(w => AccountInfo(AccountId.Live, exchange, equity = w.totalEquity.asDouble))
+      ensureOk(resp.retCode, resp.retMsg, "查钱包").flatMap { _ =>
+        resp.result.list.headOption.toRight(ExchangeError.Other("Bybit no wallet data"))
       }
     }
 

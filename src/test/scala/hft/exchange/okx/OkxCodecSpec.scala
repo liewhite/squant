@@ -103,6 +103,31 @@ class OkxCodecSpec extends munit.FunSuite:
     assertEquals(d.notionalUsd.asDouble, 12345.6)
     assertEquals(d.details.map(x => x.ccy -> x.cashBal.asDouble).toMap, Map("BTC" -> 2.5, "USDT" -> 10000.0))
 
+  test("greekField: 空串 = 该币种没有期权持仓, 按 0 读 (OKX 文档示例即全空串)"):
+    // OKX 通用约定: `"" will be returned for inapplicable fields under the current account level`;
+    // gammaBS/thetaBS/vegaBS 标注 "only applicable to OPTION"。Get Greeks 的官方响应示例本身
+    // 就是全空串。当成坏报文抛的话, OkxAccountFeed 的 greeks 轮询会把异常穿出受管任务、
+    // 级联终止整个引擎 —— 而 OKX 路径上它是唯一的 greeks 来源。
+    val json =
+      """{"code":"0","msg":"","data":[{"thetaBS":"","thetaPA":"","gammaBS":"","gammaPA":"","deltaBS":"","deltaPA":"","vegaBS":"","vegaPA":"","ccy":"BTC","ts":"1620282889345"}]}"""
+    val d = readFromString[GreeksResp](json).data.head
+    assertEquals(OkxClient.greekField(d.deltaBS, "deltaBS", d.ccy), 0.0)
+    assertEquals(OkxClient.greekField(d.gammaBS, "gammaBS", d.ccy), 0.0)
+    assertEquals(OkxClient.greekField(d.thetaBS, "thetaBS", d.ccy), 0.0)
+    assertEquals(OkxClient.greekField(d.vegaBS, "vegaBS", d.ccy), 0.0)
+
+  test("greekField: 非空且非数字才是坏报文 —— 静默归零会让账户 delta 少算一块"):
+    val e = intercept[IllegalStateException](OkxClient.greekField("abc", "deltaBS", "ETH"))
+    assert(e.getMessage.contains("deltaBS") && e.getMessage.contains("ETH"), e.getMessage)
+
+  test("解析 REST /account/balance 的 details —— 全量钱包的唯一来源"):
+    // 净值与币种明细必须来自**同一个响应**: 分两次拉会拿到两个时刻的账户状态。
+    val json =
+      """{"code":"0","msg":"","data":[{"totalEq":"50000.5","details":[{"ccy":"ETH","cashBal":"2.5"},{"ccy":"USDT","cashBal":"10000"}]}]}"""
+    val d = readFromString[BalanceResp](json).data.head
+    assertEquals(d.totalEq.asDouble, 50000.5)
+    assertEquals(d.details.map(x => x.ccy -> x.cashBal.asDouble).toMap, Map("ETH" -> 2.5, "USDT" -> 10000.0))
+
   test("控制消息 / 错误事件经 OkxEnvelope 探测"):
     val sub = readFromString[OkxEnvelope]("""{"event":"subscribe","arg":{"channel":"bbo-tbt","instId":"BTC-USDT-SWAP"}}""")
     assertEquals(sub.event, "subscribe")

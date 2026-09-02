@@ -122,6 +122,7 @@ class EngineContractSpec extends munit.FunSuite:
       log.add(s"sync:$exch:${symbols.toVector.sorted.mkString(",")}")
       TradingGateway.AccountSnapshot(Vector.empty, Vector.empty)
     override protected def currentAccountInfo(): AccountInfo = AccountInfo(acct, exch, 10_000.0)
+    override protected def currentWallet(): Map[String, Double] = Map("USDT" -> 10_000.0)
 
   test("没有装行情插件 -> 拒绝启动, 而不是让策略订个空"):
     supervised:

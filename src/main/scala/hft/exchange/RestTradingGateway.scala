@@ -274,6 +274,13 @@ final class RestTradingGateway(
       case Right(info) => info.copy(account = account)
       case Left(e)     => throw IllegalStateException(s"$exchange 拉取账户信息失败: ${e.message}")
 
+  /** 完整钱包 —— 拉不到即抛: 缺它策略分不清"某币余额是 0"与"还没见过它",
+    * 而 delta 对冲要靠这个区分决定是否把现货算进敞口 (见 `TradingClient.fetchWallet`)。 */
+  override protected def currentWallet(): Map[String, Double] =
+    client.fetchWallet() match
+      case Right(balances) => balances
+      case Left(e)         => throw IllegalStateException(s"$exchange 拉取钱包失败: ${e.message}")
+
 object RestTradingGateway:
   /** 多久对一次账。时钟一秒一拍, 对账不必那么勤 —— 它抓的是持续存在的偏差 */
   val AuditIntervalMs: Long = 5_000

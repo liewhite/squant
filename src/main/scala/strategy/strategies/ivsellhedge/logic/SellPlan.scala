@@ -130,7 +130,7 @@ object SellPlan:
       _ <- Either.cond(gap > 0.0, (), Skip.AtTarget(target, shortHeld))
       // 权利金闸门排在点差之前: 权利金太薄与盘口质量无关, 是这笔交易本身不值得做
       _ <- Either.cond(quote.bid >= minPremium, (), Skip.PremiumTooLow(quote.bid, minPremium))
-      ratio = if quote.bid > 0 then quote.ask / quote.bid else Double.PositiveInfinity
+      ratio = quote.ask / quote.bid // bid > 0 由 Quote 的不变量保证
       _ <- Either.cond(ratio <= maxSpreadRatio, (), Skip.SpreadTooWide(ratio, maxSpreadRatio))
       qty <- OptionQty.alignDown(gap, inst.qtyStep, inst.minQty).toRight(Skip.BelowMinQty(gap, inst.minQty))
     yield SellLeg(inst.symbol, qty, quote.bid, target, shortHeld, iv)

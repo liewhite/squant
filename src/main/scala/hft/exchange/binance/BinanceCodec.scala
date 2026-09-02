@@ -132,8 +132,11 @@ private[binance] object BinanceCodec:
 
   final case class AccountResp(
       totalMarginBalance: String = "0",
+      /** 各资产余额 (`/fapi/v2/account` 的 assets)。钱包快照取它, 见 `TradingClient.fetchWallet`。 */
+      assets: List[AccountAsset] = Nil,
       positions: List[AccountPosition] = Nil,
   )
+  final case class AccountAsset(asset: String = "", walletBalance: String = "0")
   final case class AccountPosition(symbol: String = "", notional: String = "0")
 
   final case class PositionRisk(

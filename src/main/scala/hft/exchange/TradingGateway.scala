@@ -158,6 +158,7 @@ abstract class TradingGateway extends Actor:
       exchange,
       positions = snapshot.positions,
       accountInfo = currentAccountInfo(),
+      wallet = currentWallet(),
       pendingOrders = snapshot.pendingOrders,
     )
 
@@ -165,6 +166,12 @@ abstract class TradingGateway extends Actor:
 
   /** 建立私有连接、fork 常驻线程。此时 [[publish]] / [[fork]] 已可用 */
   protected def connect(): Unit
+
+  /** 账户当下的**完整**钱包 (币种 -> 余额)。对齐时发一次，见 [[TradingGateway.syncEvents]]。
+    *
+    * 返回全量: 未列出的币种余额就是 0。REST 的钱包接口本就一次返回整份 (两家的
+    * `fetchAccountInfo` 拿的就是同一个响应, 只是从前把币种明细丢掉了)。 */
+  protected def currentWallet(): Map[String, Double]
 
   /** 本所合约规格 —— 精度对齐与张数换算的依据。
     *
@@ -245,7 +252,7 @@ object TradingGateway:
 
   /** 把一次对齐的结果组装成事件序列 —— **真假柜台同一份**。
     *
-    * 顺序是它的全部意义: 持仓 -> 净值 -> 既有挂单 -> 完成应答。应答必须排在最后，
+    * 顺序是它的全部意义: 持仓 -> 净值 -> 钱包 -> 既有挂单 -> 完成应答。应答必须排在最后，
     * 引擎见到它就放行行情；排错了就等于"对齐没做完却已经开始交易"。
     *
     * 交易所没返回的标的**显式推零仓**：策略的状态机在收到初始值之前不该动作，
@@ -256,6 +263,7 @@ object TradingGateway:
       exchange: Exchange,
       positions: Vector[Position],
       accountInfo: AccountInfo,
+      wallet: Map[String, Double],
       pendingOrders: Vector[OrderUpdate],
   ): Vector[AnyEvent] =
     val account = request.account
@@ -265,7 +273,15 @@ object TradingGateway:
     }
     val orderEvents = pendingOrders.map(Event.local(Topics.OrderUpdate, _))
     val report = Event.local(AccountSynced, AccountSyncReport(account, exchange, request.requestId))
-    (positionEvents :+ Event.local(Topics.AccountInfo, accountInfo)) ++ orderEvents :+ report
+    // 钱包快照是对齐的一部分, 和持仓同理: 缺了它, 策略分不清"某币余额是 0"与"还没见过它",
+    // 而对 delta 对冲来说那两者的差别就是"要不要把现货算进敞口"。
+    //
+    // **这里是全量钱包的唯一来源**: 三家的私有钱包 WS 通道都只覆盖发生变动的币种
+    // (原文见 hft.domain.Wallet), Bybit 更是明确"订阅成功时不给 snapshot"
+    // ("There is no snapshot event given at the time when the subscription is successful") ——
+    // 一个不做现货的账户可能几天等不到一条。之后由逐币种的 Topics.Balance 维持。
+    val walletEvent = Event.local(Topics.Wallet, Wallet(account, exchange, wallet, nowMs))
+    (positionEvents :+ Event.local(Topics.AccountInfo, accountInfo) :+ walletEvent) ++ orderEvents :+ report
 
   /** "这张单确定没成立"的回报 —— 精度拒绝与交易所拒绝共用一种形态。
     *

@@ -42,6 +42,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
     override def fetchAllSymbolMetas() = Right(Vector(meta))
     override def fetchPendingOrders(symbol: Symbol) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 10_000.0))
+    override def fetchWallet() = Right(Map("USDT" -> 10_000.0))
     override def fetchPositions() = Right(Vector.empty)
 
   /** 收到首个 BBO 就挂一张买单 —— 同一份逻辑给两个账户各跑一份 */

@@ -267,13 +267,21 @@ final class BinanceClient private[binance] (
 
 
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] =
-    signedRequest[AccountResp](Method.GET, "/fapi/v2/account", Map.empty).map { account =>
+    accountSnapshot().map { account =>
       AccountInfo(
         account = AccountId.Live,
         exchange,
         equity = account.totalMarginBalance.asDouble,
       )
     }
+
+  /** 完整钱包: `/fapi/v2/account` 的 assets 一次返回整份资产余额。 */
+  override def fetchWallet(): Either[ExchangeError, Map[String, Double]] =
+    accountSnapshot().map(_.assets.map(a => a.asset -> a.walletBalance.asDouble).toMap)
+
+  /** 净值与资产明细来自同一个响应 —— 分两次拉会拿到两个时刻的账户状态。 */
+  private def accountSnapshot(): Either[ExchangeError, AccountResp] =
+    signedRequest[AccountResp](Method.GET, "/fapi/v2/account", Map.empty)
 
   /** REST 直查持仓 (positionRisk) */
   override def fetchPositions(): Either[ExchangeError, Vector[Position]] =

@@ -11,12 +11,14 @@ import ox.supervised
 import sttp.client4.DefaultSyncBackend
 
 /** 永续 delta 对冲实盘启动器 (OKX, 引擎集成版)。与 [[PerpHedgeEngineLauncher]] (Bybit) 同构, 仅交易所实现不同:
-  * BBO 走引擎的 [[OkxMarketFeed]] (不二次订阅), 永续持仓/订单回报走 [[OkxAccountFeed]], 期权净 greeks 由
-  * [[OptionGreeksFeed]] 经 [[OkxOptionsClient]] 注入同一条 事件总线; 对冲用引擎原生 [[MakerHedgeStrategy]]。
+  * BBO 走引擎的 [[OkxMarketFeed]] (不二次订阅), 永续持仓/订单回报/账户级 greeks/逐币种余额都走
+  * [[OkxAccountFeed]], 推上同一条事件总线; 对冲用引擎原生 [[MakerHedgeStrategy]]。
   *
-  * **OKX 特性**: [[OkxAccountFeed]] 已原生轮询账户级 greeks, 这里的 [[OptionGreeksFeed]] 主要保证
-  * **ccy 余额兜底** (否则 StateManager.greeks 恒为 None -> 静默不对冲 -> 期权裸敞口), 并以 [[OptionsExchange]]
-  * 抽象与 Bybit 路径保持一致; 二者 greeks 同源 (account/greeks), last-write-wins, 冗余轮询成本可忽略。
+  * **OKX 特性**: [[OkxAccountFeed]] 已原生轮询账户级 greeks, 因此这条路径上不需要
+  * [[OptionGreeksFeed]] —— 叠上去只会让 `Topics.Greeks` 有两个同源发布者 (last-write-wins)。
+  *
+  * 现货余额: WS 只推**发生变动的币种**, 那份"整份钱包"由启动对齐的一次 REST 查询给出
+  * (见 [[hft.domain.Wallet]]) —— 对 delta 对冲来说, 它决定了要不要把现货算进敞口。
   *
   * ATR/均线的历史预热由策略自己在 [[hft.strategy.Strategy.prepare]] 里做 (本启动器只注入取数通道)。**无 dry-run, 启动即真实对冲下单** —— 用小资金测试。
   * 护栏: 必须有 key+passphrase; `maxHedgeQty` 单笔对冲张数硬上限; greeks 缺失/陈旧暂停。
@@ -65,8 +67,16 @@ import sttp.client4.DefaultSyncBackend
     val perp = OkxClient.trading(backend, credentials.get, quote = conf.quote) // 永续 (SWAP) 下单/查仓
     val opt = OkxOptionsClient(backend, credentials, quote = conf.quote, optionCcy = Some(t.ccy), simulated = conf.simulated)
 
-    // 汇报面 = 期权 greeks 注入流 (先, 同步发 ccy 余额兜底) + OKX 永续账户流 (持仓/订单回报/账户)
-    val feed = CompositeAccountFeed(Exchange.Okx, Seq(OptionGreeksFeed(opt, Exchange.Okx, t.ccy, t.greeksPollMs), OkxAccountFeed(perp, backend)))
+    // 汇报面 = OKX 永续账户流 (持仓/订单回报/账户级 greeks/全量钱包)。
+    //
+    // **不再叠一个 OptionGreeksFeed**: OkxAccountFeed 已原生轮询 account/greeks, 两者同源
+    // (同一个 REST 接口、同一份口径), 装两个的结果是 Topics.Greeks 上有两个发布者、
+    // last-write-wins —— 一个 topic 两个真相来源, 而它们唯一可能的差别就是新旧。
+    // 它当初存在的真正理由是"注入一条假的 ccy 余额", 而那件事现在由启动对齐的 REST 钱包
+    // 快照如实给出 (Topics.Wallet, 见 hft.domain.Wallet)。
+    // greeks 轮询间隔从配置注入 —— 它同时决定发布节奏与下游的陈旧闸门 (下面的 maxGreeksStaleMs),
+    // 两处必须是同一个数: 闸门比真实轮询周期还紧的话, 对冲会永久判为"读数陈旧"而暂停。
+    val feed = OkxAccountFeed(perp, backend, greeksPollMs = t.greeksPollMs)
 
     // 柜台在前、行情在后: 柜台既接下单指令也推回报 (消费者), 行情源是纯生产者。
     val gateway = RestTradingGateway.load(perp, feed, AccountId.Live)

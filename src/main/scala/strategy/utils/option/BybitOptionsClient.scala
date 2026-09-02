@@ -63,7 +63,15 @@ final class BybitOptionsClient(
       case Some(c) =>
         signedGet[Envelope[PositionListResult]](c, "/v5/position/list", "category=option").flatMap { env =>
           env.asEither.map { r =>
-            (r.list.flatMap(_.delta.toDoubleOption).sum, r.list.flatMap(_.gamma.toDoubleOption).sum)
+            // 不可解析的行**不能丢**: 那会让账户 delta 少算一块, 而对冲正是按它下单。
+            def num(raw: String, field: String, sym: String): Double =
+              raw.toDoubleOption.getOrElse(
+                throw IllegalStateException(s"Bybit position 的 $field 不是数字: symbol=$sym 原始值='$raw'")
+              )
+            (
+              r.list.map(p => num(p.delta, "delta", p.symbol)).sum,
+              r.list.map(p => num(p.gamma, "gamma", p.symbol)).sum,
+            )
           }
         }
 
@@ -74,12 +82,15 @@ final class BybitOptionsClient(
         env.asEither.flatMap { r =>
           val insts = r.list.flatMap { i =>
             OptionContract.parseSymbol(i.symbol).flatMap { case (_, strike, right) =>
-              i.deliveryTime.toLongOption.filter(_ > 0).map { exp =>
+              i.deliveryTime.toLongOption.filter(_ > 0).flatMap { exp =>
                 // Bybit ETH/BTC 期权每张对应 1 单位标的 (数量本身就是币本位), 故 ctVal=1
-                OptionInstrument(i.symbol, exp, strike, right, ctVal = 1.0,
-                  minQty = i.lotSizeFilter.flatMap(_.minOrderQty.toDoubleOption).getOrElse(0.0),
-                  qtyStep = i.lotSizeFilter.flatMap(_.qtyStep.toDoubleOption).getOrElse(0.0),
-                  tickSize = i.priceFilter.flatMap(_.tickSize.toDoubleOption).getOrElse(0.0))
+                // 精度三件套缺一个就跳过整个合约: `getOrElse(0.0)` 会让 OptionQty.alignDown
+                // 跳过对齐、minQty=0 放过任何量 —— 一行坏报文换来下单量校验整体失效。
+                for
+                  minQty <- i.lotSizeFilter.flatMap(_.minOrderQty.toDoubleOption).filter(_ > 0)
+                  qtyStep <- i.lotSizeFilter.flatMap(_.qtyStep.toDoubleOption).filter(_ > 0)
+                  tickSize <- i.priceFilter.flatMap(_.tickSize.toDoubleOption).filter(_ > 0)
+                yield OptionInstrument(i.symbol, exp, strike, right, ctVal = 1.0, minQty, qtyStep, tickSize)
               }
             }
           }

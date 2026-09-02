@@ -24,8 +24,6 @@ final class MacdGridStrategy(
     symbol: Symbol,
     /** 满仓杠杆: maxUnits 份合计敞口 = leverage × 进场时权益 (默认 1× = 满仓)。 */
     leverage: Double = 1.0,
-    /** 权益兜底 (首个 AccountInfo 之前)。 */
-    referenceEquity: Double = 100_000.0,
     params: Params = Params(),
     barIntervalMs: Long = 3_600_000L, // 1h
     maPeriodBars: Int = 20,
@@ -82,9 +80,29 @@ final class MacdGridStrategy(
         val posCoin = ss.positionSize(exchange)
         val flat = posCoin.abs < minOrderQty
         if flat then
-          // 空仓: 按当时权益刷新"一份"大小 (持仓期冻结)
-          val equity = ctx.state.equity(exchange).filter(_ > 0.0).getOrElse(referenceEquity)
-          unitQty = math.max(minOrderQty.value, leverage * equity / params.maxUnits / price.value)
+          // 空仓: 按当时权益刷新"一份"大小 (持仓期冻结)。
+          //
+          // **拿不到净值就不下单**, 不用任何替代值: 一份的大小 = leverage × 权益 / maxUnits / 价,
+          // 从前净值缺失时退回 referenceEquity=100_000, 于是真实权益 5k 的账户首份仓位是
+          // **20 倍杠杆**, 而且没有任何报错。`.filter(_ > 0.0)` 更是把 0/负净值也悄悄换成 10 万。
+          //
+          // 两种失败要分开: 读不到净值是**接线坏了** (契约被破), 净值 <= 0 是**账户爆了** (市场结果)。
+          // 从前合成一条 `logger.error + return`: 前者被降级成一条每笔成交都刷一遍的日志、
+          // 引擎照跑; 后者则连既有挂单都不再对齐 (跳过了 placeGrid), 单子悬在簿上没人管。
+          ctx.state.equity(exchange) match
+            case None =>
+              // 对齐推 持仓->净值->钱包->挂单 之后才放行行情, 所以这里读不到只可能是柜台接线错了。
+              // 立即终止: 引擎会级联停机, 柜台的 onStop 撤掉既有挂单 —— 那才是"安全的不动作"。
+              throw IllegalStateException(
+                s"[$symbol] $exchange 读不到账户净值 —— 启动对齐本应先推净值再放行策略, 请查柜台接线"
+              )
+            case Some(equity) if equity <= 0.0 =>
+              // 净值归零/为负: 算不出"一份"多大, 因此**不开新仓**; 但下面的 placeGrid 照跑,
+              // 把既有挂单该撤的撤掉 (unitQty 保持 0 -> posUnits=0 -> 不期望任何加仓单)。
+              logger.error(f"!!! [$symbol] $exchange 净值 $equity%.2f <= 0 -> 停止开新仓, 撤掉既有挂单")
+              unitQty = 0.0
+            case Some(equity) =>
+              unitQty = math.max(minOrderQty.value, leverage * equity / params.maxUnits / price.value)
         // 真实持仓 (≥minOrderQty) 至少记为 ±1 份: 避免不足一份的残仓/dust 被四舍五入成 0,
         // 导致 DEA 反向时不平仓 (flatten 需 posUnits≠0)、也不挂止盈, 残仓长期挂账。
         val posUnits =
@@ -172,8 +190,6 @@ final class MacdGridStrategy(
     else None
 
 object MacdGridStrategy:
-  /** GTC 常驻挂单的"超时"值 (1 年, 等价于不被框架超时失效)。 */
-
   /** 限价单价相对偏移阈值: |resting价 − 期望价| / 期望价 超过即撤换重挂 (锚价移动后)。 */
   private val PriceDriftRel: Double = 1e-4
   /** 被动平仓追价节奏: 单侧挂单 (止盈单) 每隔该毫秒数撤单追着现价重挂一次。 */

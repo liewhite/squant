@@ -55,7 +55,9 @@ import sttp.client4.DefaultSyncBackend
     val perp = BybitClient.trading(backend, credentials.get) // 永续 (linear) 下单/查仓
     val opt = BybitOptionsClient(backend, credentials, testnet = conf.testnet)
 
-    // 一个汇报面 = 期权 greeks 注入流 (先, 同步发 ccy 余额兜底) + Bybit 永续账户流 (持仓/订单回报)
+    // 一个汇报面 = 期权 greeks 注入流 + Bybit 永续账户流 (持仓/订单回报/逐币种余额)。
+    // Bybit 的期权 greeks 与永续账户是两个不同的 REST 域, 故这里确实要两个源;
+    // OKX 侧同源, 已合并为单个 OkxAccountFeed (见 OkxPerpHedgeEngineLauncher)。
     val feed = CompositeAccountFeed(Exchange.Bybit, Seq(OptionGreeksFeed(opt, Exchange.Bybit, t.ccy, t.greeksPollMs), BybitAccountFeed(perp, backend)))
 
     // 柜台在前、行情在后: 柜台既接下单指令也推回报 (消费者), 行情源是纯生产者。

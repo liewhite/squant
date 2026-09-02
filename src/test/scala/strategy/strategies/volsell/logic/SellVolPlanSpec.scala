@@ -25,11 +25,11 @@ class SellVolPlanSpec extends munit.FunSuite:
   test("selectStrangle: 离目标到期最近的到期 + 贴近现价两侧的价外 call/put"):
     val d = 86_400_000L
     val chain = Vector(
-      OptionInstrument("ETH-A-3000-C", 10 * d, 3000, OptionRight.Call, ctVal = 1.0), // 错误到期
-      OptionInstrument("ETH-B-2900-P", 21 * d, 2900, OptionRight.Put, ctVal = 1.0),  // <spot 较远
-      OptionInstrument("ETH-B-3000-P", 21 * d, 3000, OptionRight.Put, ctVal = 1.0),  // <spot 最近 -> 选
-      OptionInstrument("ETH-B-3100-C", 21 * d, 3100, OptionRight.Call, ctVal = 1.0), // >spot 最近 -> 选
-      OptionInstrument("ETH-B-3200-C", 21 * d, 3200, OptionRight.Call, ctVal = 1.0), // >spot 较远
+      OptionInstrument("ETH-A-3000-C", 10 * d, 3000, OptionRight.Call, ctVal = 1.0, minQty = 1.0, qtyStep = 1.0, tickSize = 0.1), // 错误到期
+      OptionInstrument("ETH-B-2900-P", 21 * d, 2900, OptionRight.Put, ctVal = 1.0, minQty = 1.0, qtyStep = 1.0, tickSize = 0.1), // <spot 较远
+      OptionInstrument("ETH-B-3000-P", 21 * d, 3000, OptionRight.Put, ctVal = 1.0, minQty = 1.0, qtyStep = 1.0, tickSize = 0.1), // <spot 最近 -> 选
+      OptionInstrument("ETH-B-3100-C", 21 * d, 3100, OptionRight.Call, ctVal = 1.0, minQty = 1.0, qtyStep = 1.0, tickSize = 0.1), // >spot 最近 -> 选
+      OptionInstrument("ETH-B-3200-C", 21 * d, 3200, OptionRight.Call, ctVal = 1.0, minQty = 1.0, qtyStep = 1.0, tickSize = 0.1), // >spot 较远
     )
     val res = SellVolPlan.selectStrangle(chain, nowMs = 0, spot = 3060, targetExpiryMs = 21 * d)
     assertEquals(res.map((c, p) => (c.symbol, p.symbol)), Some(("ETH-B-3100-C", "ETH-B-3000-P")))
@@ -39,19 +39,51 @@ class SellVolPlanSpec extends munit.FunSuite:
     // 某侧无价外行权 -> 无宽跨
     assertEquals(SellVolPlan.selectStrangle(chain.filterNot(_.right == OptionRight.Put), 0, 3060, 21 * d), None)
 
-  test("sellQuote: 价差≤0.3 -> 对手价(买一) taker; >0.3 -> 中价-0.2 maker"):
-    assertEquals(SellVolPlan.sellQuote(Quote(bid = 49.9, ask = 50.0)), (49.9, false)) // 价差0.1
-    assertEquals(SellVolPlan.sellQuote(Quote(bid = 10.0, ask = 10.2)), (10.0, false)) // 价差0.2 -> taker
-    near(SellVolPlan.sellQuote(Quote(bid = 39.0, ask = 40.0))._1, 39.3)               // 价差1.0 -> 中价39.5-0.2
-    assertEquals(SellVolPlan.sellQuote(Quote(bid = 39.0, ask = 40.0))._2, true)        // maker
+  test("sellQuote: 相对价差 ≤ cutoffRatio -> 对手价 taker; 否则中价让价 maker 并对齐 tick"):
+    val tick = 0.1
+    // 相对价差 0.1/49.95 ≈ 0.2% < 0.75% -> taker
+    assertEquals(SellVolPlan.sellQuote(Quote(bid = 49.9, ask = 50.0), tick), (49.9, false))
+    // 相对价差 1.0/39.5 ≈ 2.5% > 0.75% -> maker: 39.5×(1-0.00375)=39.3519, 向上对齐到 0.1 -> 39.4
+    near(SellVolPlan.sellQuote(Quote(bid = 39.0, ask = 40.0), tick)._1, 39.4)
+
+  test("sellQuote: maker 价必须严格高于买一 —— 否则 postOnly 单被交易所拒"):
+    // 从前 cutoff=0.75%、offset=0.5% 破了 cutoff >= 2×offset: 相对价差落在 0.75%~1.0% 时
+    // maker 分支报出低于买一的价, 这一档价差下永远挂不上单, 而唯一症状是"没有挂单"。
+    val tick = 0.01
+    // 相对价差恰好 0.8% (在原来的破窗里): mid=100.4/2... 取 bid=100.0 ask=100.8 -> mid=100.4, spread=0.8
+    val inOldGap = Quote(bid = 100.0, ask = 100.8)
+    val (px, postOnly) = SellVolPlan.sellQuote(inOldGap, tick)
+    assert(postOnly, "0.8% > 0.75% -> maker")
+    assert(px > inOldGap.bid, s"maker 卖价 $px 必须高于买一 ${inOldGap.bid}")
+
+  test("sellQuote: cutoff < 2×offset 即拒 —— 那组参数注定造出必被拒的价"):
+    intercept[IllegalArgumentException] {
+      SellVolPlan.sellQuote(Quote(bid = 39.0, ask = 40.0), 0.1, cutoffRatio = 0.0075, offsetRatio = 0.005)
+    }
+
+  test("sellQuote: 判据是**相对**价差 —— 换报价货币不改变行为"):
+    // 从前 cutoff 是绝对值 0.3: OKX 币本位期权 px 以 ETH 计 (0.005~0.1), 价差恒 <= 0.3
+    // -> 永远走 taker; 而 maker 分支的 mid-0.2 还会是负数。比例形式在两家都成立。
+    val usdtLike = Quote(bid = 39.0, ask = 40.0)   // 相对价差 2.5%
+    val coinLike = Quote(bid = 0.039, ask = 0.040) // 同样是 2.5%
+    assertEquals(SellVolPlan.sellQuote(usdtLike, 0.1)._2, true, "宽价差 -> maker")
+    assertEquals(SellVolPlan.sellQuote(coinLike, 0.0001)._2, true, "同样的相对价差, 同样的结论")
+    assert(SellVolPlan.sellQuote(coinLike, 0.0001)._1 > 0.0, "让价后仍须为正 —— 绝对偏移会算成负数")
+
+  test("sellQuote: tick 非正即拒 (maker 单落在网格外会被交易所拒)"):
+    intercept[IllegalArgumentException](SellVolPlan.sellQuote(Quote(bid = 39.0, ask = 40.0), 0.0))
 
   test("quantizeQty: 向下取整到 step 并校验 minQty"):
     assertEquals(SellVolPlan.quantizeQty(1.0, 0.1, 0.1), Some(1.0))
     assertEquals(SellVolPlan.quantizeQty(2.0, 0.1, 0.1), Some(2.0))
     assertEquals(SellVolPlan.quantizeQty(0.05, 0.1, 0.1), None)        // < min
     assertEquals(SellVolPlan.quantizeQty(0.25, 0.1, 0.1).map(r => math.round(r * 100) / 100.0), Some(0.2)) // floor 到 step
-    assertEquals(SellVolPlan.quantizeQty(1.0, 0.0, 0.1), Some(1.0))    // 无 step
-    assertEquals(SellVolPlan.quantizeQty(0.05, 0.0, 0.1), None)
+
+  test("quantizeQty: 精度非正即拒 —— 校验不了下单量的合约不该可交易"):
+    // 从前 step<=0 时**跳过对齐**、minQty=0 放过任何量, 于是交易所报文里一个坏掉的精度字段
+    // 就能让下单量校验整体失效。两家期权客户端现在都拒绝精度非正的合约, 所以这里是前置条件。
+    intercept[IllegalArgumentException](SellVolPlan.quantizeQty(1.0, 0.0, 0.1))
+    intercept[IllegalArgumentException](SellVolPlan.quantizeQty(1.0, 0.1, 0.0))
 
   test("currentDecisionTime: 当下或之前最近的北京周五17:00, 且不晚于 now、距今<7天"):
     val zone = ZoneId.of("Asia/Shanghai")
