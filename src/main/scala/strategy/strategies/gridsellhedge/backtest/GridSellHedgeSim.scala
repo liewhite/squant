@@ -22,10 +22,15 @@ final case class GridConfig(
     slippagePct: Double = 0.0,         // 对冲腿额外滑点 (作为显式成本; maker 成交于限价, 默认 0)
     riskFreeRate: Double = 0.0,
     initialBalance: Double = 1_000_000.0,
-    minIv: Double = 1e-6,              // 卖出定价的 IV 下限 (RV=0 时退化到内在价值)
+    minIv: Double = 1e-6,              // 卖出定价的 IV 下限 (窗口内每根收益恰为 0 的静止市场)
     band: DynamicHedgeBand.Params = DynamicHedgeBand.Params(),
 ):
-  require(spacing > 0 && tenorDays > 0 && nodeContracts > 0 && rvWindowHours >= 2 && warmupHours >= 2 && pollIntervalMs > 0)
+  require(spacing > 0 && tenorDays > 0 && nodeContracts > 0 && pollIntervalMs > 0)
+  // n 个小时采样只给出 n-1 个对数收益, 年化波动至少要 2 个收益 -> 至少 3 个采样。
+  // 这条从前没写, 于是 warmupHours=2 的配置在建第一档网格时 RV 只有 1 个收益, 被静默当成 0。
+  require(rvWindowHours >= 3, s"rvWindowHours 至少为 3 (n 个采样只有 n-1 个收益), 实际 $rvWindowHours")
+  require(warmupHours >= 3, s"warmupHours 至少为 3 (预热要攒够 2 个对数收益), 实际 $warmupHours")
+  require(warmupHours <= rvWindowHours, s"warmupHours($warmupHours) 不能超过 rvWindowHours($rvWindowHours), 否则预热永不结束")
 
 object GridSellHedgeSim:
   /** 备兑腿: 建仓价与带符号数量 (>0 多标的=对冲短 call, <0 空标的=对冲短 put)。 */
@@ -108,7 +113,17 @@ final class GridSellHedgeSim(config: GridConfig):
   private def intrinsic(right: OptionRight, s: Double, k: Double): Double = right match
     case OptionRight.Call => math.max(s - k, 0.0)
     case OptionRight.Put  => math.max(k - s, 0.0)
-  private def currentRv: Double = RealizedVol.annualizedFromPrices(hourBuf, BlackScholes.HoursPerYear)
+  /** 窗口 RV。估不出即抛 —— 调用点都在 `warmupHours` 预热闸门之后, 拿不到值说明窗口配置有误,
+    * 而以 0 顶替会让 [[BlackScholes]] 把期权按内在价值定价、希腊值全归零。 */
+  private def currentRv: Double =
+    RealizedVol
+      .annualizedFromPrices(hourBuf, BlackScholes.HoursPerYear)
+      .getOrElse(
+        sys.error(
+          s"RV 窗口只有 ${hourBuf.size} 个小时采样, 估不出年化波动 " +
+            s"(warmupHours=${config.warmupHours}, rvWindowHours=${config.rvWindowHours})"
+        )
+      )
   private def netPos: Double = positions.iterator.flatMap(_.hedge).map(_.qty).sum
 
   /** 逐笔驱动: 更新价/RV/窗口高低, 每 pollIntervalMs 触发一次轮询决策。 */

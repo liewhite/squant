@@ -50,9 +50,14 @@ class BlackScholesSpec extends munit.FunSuite:
     near(otmPut.price, 0.0)
     near(otmPut.delta, 0.0)
 
-  test("非法波动率/价格退化为内在价值，不抛异常或除零"):
-    val g = BlackScholes.greeks(Call, s = 100, k = 100, tYears = 1.0, sigma = 0.0, r = 0.0)
-    assert(g.gamma == 0.0 && g.vega == 0.0)
+  test("非法波动率/标的价/行权价 -> 抛错, 不退化成'已到期'"):
+    // 到期是合法市场状态; sigma/s/k 非正只能来自上游取数失败。共用一条退化分支的代价是:
+    // 一条 markVol=0 的期权腿被按内在价值定价、希腊值全归零, 对冲把它从敞口里悄悄剔掉。
+    val badVol = intercept[IllegalArgumentException](BlackScholes.greeks(Call, s = 100, k = 100, tYears = 1.0, sigma = 0.0, r = 0.0))
+    assert(badVol.getMessage.contains("隐含波动率必须为正"), badVol.getMessage)
+    intercept[IllegalArgumentException](BlackScholes.greeks(Call, s = 0.0, k = 100, tYears = 1.0, sigma = 0.2, r = 0.0))
+    intercept[IllegalArgumentException](BlackScholes.greeks(Call, s = 100, k = 0.0, tYears = 1.0, sigma = 0.2, r = 0.0))
+    intercept[IllegalArgumentException](BlackScholes.greeks(Call, s = Double.NaN, k = 100, tYears = 1.0, sigma = 0.2, r = 0.0))
 
   // 希腊字母必须是价格的导数 (而非恰好命中某参考点)：用中心差分逐一核对。
   // 这能抓住"某点对、但导数公式错"的 bug (delta/gamma/vega/theta 任一系数/符号错都会暴露)。

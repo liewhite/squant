@@ -40,10 +40,15 @@ object VolSell:
       strangle <- SellVolPlan.selectStrangle(chain, nowMs, spot, targetMs).toRight("未找到 ~目标到期 价外宽跨 (spot 超出行权范围?)")
       (call, put) = strangle
       candidateStrikes = chain.iterator.filter(_.expiryMs == call.expiryMs).map(_.strike).distinct.toVector.sorted
-      (mult, rvPrev, rvThis) = SellVolPlan.decideMultiplier(closes, cfg.gridHigh, cfg.gridLow)
-      callLeg <- leg(ex, call, cfg.baseQty * mult, cfg.maxQty, anchor)
-      putLeg <- leg(ex, put, cfg.baseQty * mult, cfg.maxQty, anchor)
-    yield Decision(mult, rvPrev, rvThis, spot, call.expiryMs, call.strike, put.strike, candidateStrikes, Seq(callLeg, putLeg))
+      sizing <- SellVolPlan
+        .decideMultiplier(closes, cfg.gridHigh, cfg.gridLow)
+        .toRight(s"收盘价 ${closes.size} 根估不出两周 RV, 无法定仓位倍数")
+      callLeg <- leg(ex, call, cfg.baseQty * sizing.mult, cfg.maxQty, anchor)
+      putLeg <- leg(ex, put, cfg.baseQty * sizing.mult, cfg.maxQty, anchor)
+    yield Decision(
+      sizing.mult, sizing.rvPrev, sizing.rvThis, spot,
+      call.expiryMs, call.strike, put.strike, candidateStrikes, Seq(callLeg, putLeg),
+    )
 
   private def leg(ex: OptionsExchange, inst: OptionInstrument, rawQty: Double, maxQty: Double, periodMs: Long): Either[String, Leg] =
     for

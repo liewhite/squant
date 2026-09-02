@@ -12,19 +12,24 @@ object SellVolPlan:
   /** 5 分钟 bar 的年化基准: 365×24×12 */
   val BarsPerYear5m: Double = BlackScholes.HoursPerYear * 12.0
 
-  /** 由 5 分钟收盘价序列 (最旧->最新) 算年化实现波动 (复用 hft RealizedVol 公式, SSOT) */
-  def annualizedRv(closes: Seq[Double]): Double = RealizedVol.annualizedFromPrices(closes, BarsPerYear5m)
+  /** 由 5 分钟收盘价序列 (最旧->最新) 算年化实现波动 (复用 hft RealizedVol 公式, SSOT)。
+    * 样本不足估不出 -> None (见 [[RealizedVol.annualizedFromPrices]])。 */
+  def annualizedRv(closes: Seq[Double]): Option[Double] = RealizedVol.annualizedFromPrices(closes, BarsPerYear5m)
+
+  /** 仓位定量结果：倍数与它依据的两周 RV。 */
+  final case class SizeDecision(mult: Double, rvPrev: Double, rvThis: Double)
 
   /** 仓位倍数: 把最近 2 周 5min 收盘价对半分 (前半=上周, 后半=本周), 本周 RV **较上周上升**→[[gridHigh]] (卖更多),
-    * 下降/持平→[[gridLow]]。返回 (倍数, 上周RV, 本周RV)。 */
-  def decideMultiplier(closes2w: Seq[Double], gridHigh: Double, gridLow: Double): (Double, Double, Double) =
-    if closes2w.sizeIs < 4 then (gridLow, 0.0, 0.0)
-    else
-      val mid = closes2w.size / 2
-      val rvPrev = annualizedRv(closes2w.take(mid))   // 上周
-      val rvThis = annualizedRv(closes2w.drop(mid))   // 本周
-      val mult = if rvThis > rvPrev then gridHigh else gridLow
-      (mult, rvPrev, rvThis)
+    * 下降/持平→[[gridLow]]。
+    *
+    * 任一半估不出 RV 就返回 `None`：样本不足时曾经直接返回 `gridLow`，那是把"不知道波动是升是降"
+    * 说成了"波动在降"——一个凭空得出的方向判断，而它决定卖出多少份。 */
+  def decideMultiplier(closes2w: Seq[Double], gridHigh: Double, gridLow: Double): Option[SizeDecision] =
+    val mid = closes2w.size / 2
+    for
+      rvPrev <- annualizedRv(closes2w.take(mid))  // 上周
+      rvThis <- annualizedRv(closes2w.drop(mid))  // 本周
+    yield SizeDecision(if rvThis > rvPrev then gridHigh else gridLow, rvPrev, rvThis)
 
   /** 一天的毫秒数 (到期/锚点计算) */
   val DayMs: Long = 86_400_000L

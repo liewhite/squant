@@ -40,14 +40,25 @@ final case class BsGreeksConfig(
   * **期权腿 P&L** = 当前跨式价值 − 进场权利金 (单只持仓，[[optionPnl]] 供 demo 取完整期权腿损益)。
   * 单位约定同 Greeks 通道 (theta 每日、vega 对 1%)。
   */
-final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig) extends MarketDataSource:
+final class BsGreeksSource(underlying: MarketDataSource, account: AccountId, config: BsGreeksConfig) extends MarketDataSource:
   import BlackScholes.DaysPerYear // theta 每年->每日 / tenor 钳制的天数基准 (框架 SSOT)
 
-  private var strike = 0.0     // ATM 参考 (首笔成交价)
-  private var callStrike = 0.0 // call 行权 (跨式=strike; 宽跨=strike·(1+w))
-  private var putStrike = 0.0  // put  行权 (跨式=strike; 宽跨=strike·(1−w))
-  private var entryPremium = 0.0
-  private var inited = false
+  /** 建仓后才存在的仓位事实：三个行权价与进场权利金。
+    *
+    * 从前它们是四个初值 0 的 var 加一个 `inited` 布尔，而 [[optionPnl]]/[[enteredPremium]]/
+    * [[strikePrice]] 是公开的、不看 `inited`。于是一段没有任何成交的数据窗 (symbol 拼错、
+    * 日期区间空) 会让 run 后的查询读到 strike=0、premium=0，报表里落下一行整洁的 0 而不是报错。
+    * 收成一个 Option 之后，"还没建仓"在类型上就无法被当成"仓位值为 0"。 */
+  private final case class OpenPosition(strike: Double, callStrike: Double, putStrike: Double, entryPremium: Double)
+
+  private var position: Option[OpenPosition] = None
+
+  private def opened: OpenPosition = position.getOrElse(
+    sys.error(
+      s"BsGreeksSource 尚未建仓: 上游 ${config.underlyingSymbol} 一笔成交都没有 —— " +
+        "检查回测区间与数据源, 不要把空窗口当成零盈亏"
+    )
+  )
 
   override def events(): Iterator[AnyEvent] =
     var lastEmit: Timestamp = Long.MinValue
@@ -58,12 +69,12 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
         case Some(t) =>
           val now = ev.exchangeTs
           val s = t.price
-          if !inited then
-            strike = s.value // ATM = 首笔成交价
-            callStrike = s.value * (1.0 + config.strangleWidthPct)
-            putStrike = s.value * (1.0 - config.strangleWidthPct)
-            entryPremium = straddleValue(s.value, now)
-            inited = true
+          if position.isEmpty then
+            // ATM = 首笔成交价；宽跨则按 strangleWidthPct 向两侧展开
+            val callStrike = s.value * (1.0 + config.strangleWidthPct)
+            val putStrike = s.value * (1.0 - config.strangleWidthPct)
+            val premium = straddleValueAt(s.value, callStrike, putStrike, now)
+            position = Some(OpenPosition(s.value, callStrike, putStrike, premium))
 
           if shouldEmit(now, lastEmit) then
             lastEmit = now
@@ -73,7 +84,7 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
               balanceEmitted = true
               val balanceEv = Event.stamped(
                 Topics.Balance,
-                Balance(AccountId.Live, config.exchange, config.ccy, config.spotHolding, now),
+                Balance(account, config.exchange, config.ccy, config.spotHolding, now),
                 ev.exchangeTs,
                 ev.localTs,
               )
@@ -89,15 +100,16 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
   private def tYears(now: Timestamp): Double =
     math.max((config.expiry - now) / BlackScholes.MillisPerYear, config.minTenorDays / DaysPerYear)
 
-  /** 期权结构 (跨式/宽跨) 在 (s, now) 的理论价值 (框架级 [[Straddle]] 复用) */
-  private def straddleValue(s: Double, now: Timestamp): Double =
+  /** 期权结构 (跨式/宽跨) 在给定行权价与 (s, now) 的理论价值 (框架级 [[Straddle]] 复用) */
+  private def straddleValueAt(s: Double, callStrike: Double, putStrike: Double, now: Timestamp): Double =
     Straddle.value(config.straddles, s, callStrike, putStrike, tYears(now), config.impliedVol, config.riskFreeRate)
 
   /** 期权结构聚合为账户级 Greeks (单位: theta 每日、vega 对 1%，与通道约定一致) */
   private def greeksAt(s: Double, now: Timestamp): Greeks =
-    val g = Straddle.greeks(config.straddles, s, callStrike, putStrike, tYears(now), config.impliedVol, config.riskFreeRate)
+    val p = opened
+    val g = Straddle.greeks(config.straddles, s, p.callStrike, p.putStrike, tYears(now), config.impliedVol, config.riskFreeRate)
     Greeks(
-      account = AccountId.Live,
+      account = account,
       exchange = config.exchange,
       ccy = config.ccy,
       delta = g.delta,
@@ -107,12 +119,15 @@ final class BsGreeksSource(underlying: MarketDataSource, config: BsGreeksConfig)
       timestamp = now,
     )
 
-  /** 期权腿 P&L = 当前跨式价值 − 进场权利金 (单只持仓，供 demo 在 run 后查询) */
-  def optionPnl(s: Double, now: Timestamp): Double = straddleValue(s, now) - entryPremium
+  /** 期权腿 P&L = 当前跨式价值 − 进场权利金 (单只持仓，供回测在 run 后查询)。
+    * 未建仓即抛 —— 见 [[OpenPosition]] 的说明。 */
+  def optionPnl(s: Double, now: Timestamp): Double =
+    val p = opened
+    straddleValueAt(s, p.callStrike, p.putStrike, now) - p.entryPremium
 
   /** 进场权利金 (首笔成交时按期初 ATM/IV/tenor 定价的跨式价值)，作为占比基准的单一数据源——
     * 与 [[optionPnl]] 同源，避免消费侧重算定价口径不一致 (run 后可查)。 */
-  def enteredPremium: Double = entryPremium
+  def enteredPremium: Double = opened.entryPremium
 
   /** ATM 行权价 (首笔成交价) */
-  def strikePrice: Double = strike
+  def strikePrice: Double = opened.strike

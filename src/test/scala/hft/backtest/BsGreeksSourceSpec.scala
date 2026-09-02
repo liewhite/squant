@@ -29,7 +29,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
   private def near(a: Double, b: Double, eps: Double = 1e-6): Unit = assert(math.abs(a - b) < eps, s"$a vs $b")
 
   test("聚合: 账户级 delta/gamma = 份数 × (call+put) 单份 BS, ATM=首笔成交价"):
-    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), config(straddles = 10.0, spot = 0.0))
+    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), AccountId.Live, config(straddles = 10.0, spot = 0.0))
     val g = src.events().flatMap(_.as(Topics.Greeks)).toVector
     assertEquals(g.size, 1)
     val tY = 30.0 / 365.0
@@ -43,6 +43,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
   test("发射间隔门控: ts 0/500/1000, interval=1000 -> 仅 0 与 1000"):
     val src = BsGreeksSource(
       FixedSource(Vector(trade(100.0, 0), trade(100.0, 500), trade(100.0, 1000))),
+      AccountId.Live,
       config(straddles = 1.0, spot = 0.0),
     )
     val ts = src.events().filter(_.is(Topics.Greeks)).map(_.exchangeTs).toVector
@@ -51,6 +52,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
   test("cashBal (Balance) 仅首次发布一次"):
     val src = BsGreeksSource(
       FixedSource(Vector(trade(100.0, 0), trade(100.0, 1000), trade(100.0, 2000))),
+      AccountId.Live,
       config(straddles = 1.0, spot = 3.0),
     )
     val bals = src.events().flatMap(_.as(Topics.Balance)).toVector
@@ -59,7 +61,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
     assertEquals(bals.head.available, 3.0)
 
   test("经 StateManager: greeks().delta = 原始 delta + cashBal"):
-    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), config(straddles = 10.0, spot = 2.0))
+    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), AccountId.Live, config(straddles = 10.0, spot = 2.0))
     val sm = StateManager(Iterable(sym), orderTimeoutMs = 0L)
     src.events().foreach(sm.apply)
     val corrected = sm.greeks(ex, ccy)
@@ -70,13 +72,13 @@ class BsGreeksSourceSpec extends munit.FunSuite:
     near(corrected.get.delta, raw + 2.0)
 
   test("期权腿: 刚开仓现价=ATM -> P&L≈0; ATM 为首笔成交价; 不滚动"):
-    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), config(straddles = 1.0, spot = 0.0))
+    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), AccountId.Live, config(straddles = 1.0, spot = 0.0))
     src.events().toVector // 驱动初始化
     near(src.optionPnl(100.0, 0), 0.0) // 现价值 - 进场权利金
     assertEquals(src.strikePrice, 100.0)
 
   test("期权腿: 价格大涨 -> 长跨式 P&L 转正且量级合理 (接近内在价值增量)"):
-    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), config(straddles = 1.0, spot = 0.0))
+    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), AccountId.Live, config(straddles = 1.0, spot = 0.0))
     src.events().toVector
     val pnl = src.optionPnl(130.0, day)
     assert(pnl > 0, s"pnl=$pnl")
@@ -85,7 +87,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
 
   test("临近到期 gamma 钳制到 minTenorDays 下限 (不发散)"):
     // expiry=30d, minTenorDays 默认 1 天；首笔在 expiry 前 1 分钟 -> 剩余 << 1 天, 应被钳制到 1 天
-    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 30 * day - 60_000L))), config(straddles = 1.0, spot = 0.0))
+    val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 30 * day - 60_000L))), AccountId.Live, config(straddles = 1.0, spot = 0.0))
     val g = src.events().flatMap(_.as(Topics.Greeks)).toVector.head
     val tFloor = 1.0 / 365.0 // 钳制下限 = 1 天
     val expected = BlackScholes.greeks(OptionRight.Call, 100.0, 100.0, tFloor, 0.2, 0.0).gamma +

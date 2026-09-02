@@ -9,14 +9,18 @@ class SellVolPlanSpec extends munit.FunSuite:
   test("annualizedRv: 恒定对数收益 r -> |r|·sqrt(barsPerYear5m)"):
     val r = 0.001
     val closes = (0 until 50).map(i => 1000.0 * math.exp(r * i))
-    near(SellVolPlan.annualizedRv(closes), r * math.sqrt(SellVolPlan.BarsPerYear5m), 1e-6)
+    near(SellVolPlan.annualizedRv(closes).get, r * math.sqrt(SellVolPlan.BarsPerYear5m), 1e-6)
 
   test("decideMultiplier: 本周(后半)波动升 -> gridHigh; 降 -> gridLow"):
     val flat = Vector.fill(10)(100.0)
     val choppy = (0 until 10).map(i => if i % 2 == 0 then 100.0 else 103.0).toVector
-    assertEquals(SellVolPlan.decideMultiplier(flat ++ choppy, 2.0, 1.0)._1, 2.0) // 后半更波动 -> 2x
-    assertEquals(SellVolPlan.decideMultiplier(choppy ++ flat, 2.0, 1.0)._1, 1.0) // 后半更平 -> 1x
-    assertEquals(SellVolPlan.decideMultiplier(Vector(100.0), 2.0, 1.0)._1, 1.0)  // 样本不足 -> 1x
+    assertEquals(SellVolPlan.decideMultiplier(flat ++ choppy, 2.0, 1.0).get.mult, 2.0) // 后半更波动 -> 2x
+    assertEquals(SellVolPlan.decideMultiplier(choppy ++ flat, 2.0, 1.0).get.mult, 1.0) // 后半更平 -> 1x
+
+  test("decideMultiplier: 样本不足 -> None, 不凭空给出方向判断"):
+    // 从前返回 gridLow, 等于把"不知道波动是升是降"说成"在降", 而它决定卖出多少份
+    assertEquals(SellVolPlan.decideMultiplier(Vector(100.0), 2.0, 1.0), None)
+    assertEquals(SellVolPlan.decideMultiplier(Vector(100.0, 101.0, 102.0), 2.0, 1.0), None)
 
   test("selectStrangle: 离目标到期最近的到期 + 贴近现价两侧的价外 call/put"):
     val d = 86_400_000L

@@ -56,15 +56,32 @@ object BlackScholes:
 
   /** 计算单份期权的希腊字母。
     *
-    * @param s        标的价 (>0)
-    * @param k        行权价 (>0)
-    * @param tYears   年化剩余期限；<=0 视为已到期，返回内在价值与零阶以上希腊字母
-    * @param sigma    年化隐含波动率 (>0)
+    * ## 「已到期」与「参数非法」是两件事
+    *
+    * `tYears <= 0` 是**合法的市场状态**：期权到期了，价值就是内在价值、导数全为 0。
+    * 而 `s`/`k`/`sigma` 非正不是任何市场状态 —— 标的价为 0、行权价为 0、波动率为 0 都只能来自
+    * 上游取数失败或未初始化。两者曾经共用一条退化分支，代价是：一条 `markVol` 解析成 0 的期权腿
+    * 被当成「已到期」定价，delta 变 0/±1、gamma 变 0，对冲把一条活着的腿从敞口里悄悄剔掉，
+    * 全程没有任何症状。
+    *
+    * 因此非法参数一律在此抛出并带上实际值：**波动率算不出应当在取数处报错，不能以 0 传进定价**。
+    *
+    * @param s        标的价，必须 > 0
+    * @param k        行权价，必须 > 0
+    * @param tYears   年化剩余期限；<=0 表示已到期，返回内在价值与零阶以上希腊字母
+    * @param sigma    年化隐含波动率，必须 > 0
     * @param r        无风险年化利率
     */
   def greeks(right: OptionRight, s: Double, k: Double, tYears: Double, sigma: Double, r: Double): BsGreeks =
-    // 边界：到期 / 非法波动率或价格 -> 退化为内在价值，导数为 0 (避免除零)
-    if tYears <= 0.0 || sigma <= 0.0 || s <= 0.0 || k <= 0.0 then
+    require(s > 0.0 && !s.isNaN, s"BS 标的价必须为正: s=$s (right=$right k=$k tYears=$tYears sigma=$sigma)")
+    require(k > 0.0 && !k.isNaN, s"BS 行权价必须为正: k=$k (right=$right s=$s tYears=$tYears sigma=$sigma)")
+    require(
+      sigma > 0.0 && !sigma.isNaN,
+      s"BS 隐含波动率必须为正: sigma=$sigma (right=$right s=$s k=$k tYears=$tYears) —— " +
+        "波动率算不出时应在取数处报错, 不要以 0 顶替",
+    )
+    // 已到期：内在价值，导数为 0
+    if tYears <= 0.0 then
       val intrinsic = right match
         case OptionRight.Call => math.max(s - k, 0.0)
         case OptionRight.Put  => math.max(k - s, 0.0)

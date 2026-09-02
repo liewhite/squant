@@ -39,6 +39,29 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   *      EDGE_TENOR_DAYS(默认7) / EDGE_MAKER_OFFSET(默认0.0001) / EDGE_REQUOTE_MS(默认5000) /
   *      EDGE_MAKER_FEE / EDGE_TAKER_FEE / EDGE_DELAY_MS / EDGE_MAX_TRANCHES / EDGE_*_CSV / EDGE_PAR / DATA_CACHE
   */
+/** 对冲执行方式。 */
+enum HedgeExec(val envValue: String):
+  case Maker extends HedgeExec("maker")
+  case Take extends HedgeExec("take")
+
+/** 对冲带形态。 */
+enum BandMode(val envValue: String):
+  case Ma extends BandMode("ma")
+  case Symmetric extends BandMode("sym")
+
+/** 卖出 IV 的取数口径。 */
+enum IvMode(val envValue: String):
+  case LaggedRv extends IvMode("lag")
+  case WindowRv extends IvMode("rv")
+
+/** 读一个**枚举型**环境变量。
+  *
+  * 不认识的取值一律报错并列出合法选项：`EDGE_HEDGE_EXEC=taker` (少了个 r) 从前会静默落进
+  * else 分支跑成 maker，于是一份实验数据被归到了另一个配置名下 —— 这种错在结果里看不出来。 */
+private def envChoice[A](name: String, default: String, choices: Map[String, A]): A =
+  val raw = sys.env.getOrElse(name, default)
+  choices.getOrElse(raw, sys.error(s"$name=$raw 不是合法取值, 可选: ${choices.keys.toVector.sorted.mkString("|")}"))
+
 @main def WeeklySellVolBacktest(args: String*): Unit =
   System.setProperty("org.slf4j.simpleLogger.defaultLogLevel", "warn")
 
@@ -55,12 +78,12 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   val makerFee = sys.env.get("EDGE_MAKER_FEE").map(_.toDouble).getOrElse(0.0)
   val delayMs = sys.env.get("EDGE_DELAY_MS").map(_.toLong).getOrElse(0L)
   // 对冲执行: maker(BBO 外被动 PostOnly, 5s 重挂) | take(市价 at-touch 立即成交, 理想离散对冲基准)
-  val hedgeExec = sys.env.getOrElse("EDGE_HEDGE_EXEC", "maker")
+  val hedgeExec = envChoice("EDGE_HEDGE_EXEC", "maker", HedgeExec.values.map(v => v.envValue -> v).toMap)
   val makerOffset = sys.env.get("EDGE_MAKER_OFFSET").map(_.toDouble).getOrElse(0.0001) // BBO 外 0.01%
   val requoteMs = sys.env.get("EDGE_REQUOTE_MS").map(_.toLong).getOrElse(5000L)
   val maxTranches = sys.env.get("EDGE_MAX_TRANCHES").map(_.toInt).getOrElse(Int.MaxValue)
   // IV 口径: lag=上周已实现 RV (滞后, 可交易) | rv=期权存续期实际 RV (iv=rv, 完美预知, **不可交易**, 仅检验对冲腿 edge)
-  val ivMode = sys.env.getOrElse("EDGE_IV_MODE", "lag")
+  val ivMode = envChoice("EDGE_IV_MODE", "lag", IvMode.values.map(v => v.envValue -> v).toMap)
   val initialBalance = 1_000_000.0
   val weeklyCsv = sys.env.getOrElse("EDGE_WEEKLY_CSV", "/tmp/sellvol_tranches.csv")
   val curveCsv = sys.env.getOrElse("EDGE_CURVE_CSV", "/tmp/sellvol_curve.csv")
@@ -72,19 +95,25 @@ import scala.concurrent.{Await, ExecutionContext, Future}
   // 仓位: 波动下降(iv<ivPrev)→gridLow, 上升→gridHigh; StepGrid(up=低,down=高)
   val sizePolicy = WeeklyIvGrid.StepGrid(up = gridLow, down = gridHigh)
   // 对冲带: ma=MA20 不对称(顺势紧逆势松) | sym=对称(上下均 tightAtr×ATR, 无方向, iv=rv 应盈亏平衡的基准)
-  val bandMode = sys.env.getOrElse("EDGE_BAND_MODE", "ma")
-  val band =
-    if bandMode == "sym" then AsymHedgeBand.symmetric(tightAtr)                          // 纯 1ATR delta 对冲基准
-    else AsymHedgeBand.byMa(trendSideMult = tightAtr, counterTrendMult = looseAtr)        // MA20: 价在上→上带紧
+  val bandMode = envChoice("EDGE_BAND_MODE", "ma", BandMode.values.map(v => v.envValue -> v).toMap)
+  val band = bandMode match
+    case BandMode.Symmetric => AsymHedgeBand.symmetric(tightAtr)                             // 纯 1ATR delta 对冲基准
+    case BandMode.Ma        => AsymHedgeBand.byMa(trendSideMult = tightAtr, counterTrendMult = looseAtr) // MA20: 价在上→上带紧
 
   val weeks = WeeklyIvGrid.weekWindows(weekDates(cacheDir, symbol))
   if weeks.sizeIs < tenorWeeks + 2 then sys.error(s"缓存周数不足 (${weeks.size}, 需 >= ${tenorWeeks + 2})")
 
-  val ivDesc = if ivMode == "rv" then "iv=rv(存续期实际RV, 完美预知/不可交易)" else "iv=上周RV(滞后/可交易)"
+  val ivDesc = ivMode match
+    case IvMode.WindowRv => "iv=rv(存续期实际RV, 完美预知/不可交易)"
+    case IvMode.LaggedRv => "iv=上周RV(滞后/可交易)"
   println("==================== 卖方 short-vol 周度滚动回测 ====================")
   println(f"symbol=$symbol  周数=${weeks.size}  tenor=${tenorDays}d(${tenorWeeks}周)  基准卖=${baseStraddles}份  IV口径: $ivDesc")
-  val execDesc = if hedgeExec == "take" then f"take(市价at-touch, takerFee=${takerFee * 100}%.3f%%)" else f"maker(BBO外${makerOffset * 100}%.3f%%, ${requoteMs}ms重挂, makerFee=${makerFee * 100}%.3f%%)"
-  val bandDesc = if bandMode == "sym" then f"对称${tightAtr}%.1fATR(无方向, 基准)" else f"MA20上 上${tightAtr}%.1fATR/下${looseAtr}%.1fATR, MA20下反之"
+  val execDesc = hedgeExec match
+    case HedgeExec.Take  => f"take(市价at-touch, takerFee=${takerFee * 100}%.3f%%)"
+    case HedgeExec.Maker => f"maker(BBO外${makerOffset * 100}%.3f%%, ${requoteMs}ms重挂, makerFee=${makerFee * 100}%.3f%%)"
+  val bandDesc = bandMode match
+    case BandMode.Symmetric => f"对称${tightAtr}%.1fATR(无方向, 基准)"
+    case BandMode.Ma        => f"MA20上 上${tightAtr}%.1fATR/下${looseAtr}%.1fATR, MA20下反之"
   println(f"仓位: 波动↑卖${gridHigh}×/↓卖${gridLow}×   对冲带: $bandDesc   执行=$execDesc  delay=${delayMs}ms")
 
   def tradeSource(backend: sttp.client4.SyncBackend, s: LocalDate, e: LocalDate) =
@@ -99,7 +128,10 @@ import scala.concurrent.{Await, ExecutionContext, Future}
         it.next().as(Topics.Trade).foreach { t =>
           if t.timestamp - lastTs >= 3_600_000L then { lastTs = t.timestamp; samples += t.price.value }
         }
-      RealizedVol.annualizedFromPrices(samples.toVector, BlackScholes.HoursPerYear)
+      // 估不出即抛: 这一周的 RV 是后面所有 tranche 的 IV 来源, 以 0 顶替会让 BS 把期权定价成内在价值
+      RealizedVol
+        .annualizedFromPrices(samples.toVector, BlackScholes.HoursPerYear)
+        .getOrElse(sys.error(s"$s..$e 只采到 ${samples.size} 个小时采样, 估不出周 RV (数据缺口?)"))
     finally backend.close()
 
   /** 单 tranche: 卖空头跨式(负 straddles) + MaAsym 对冲, 持有到 21 天到期 */
@@ -112,12 +144,12 @@ import scala.concurrent.{Await, ExecutionContext, Future}
         straddles = straddles, impliedVol = iv, expiry = expiryMs,
         riskFreeRate = 0.0, spotHolding = 0.0, emitIntervalMs = 1000, minTenorDays = 1.0,
       )
-      val withGreeks = BsGreeksSource(tradeSource(backend, start, end), cfg)
+      val withGreeks = BsGreeksSource(tradeSource(backend, start, end), AccountId.Live, cfg)
       // 对冲策略订阅盘口, 而该区间币安无 bookTicker 历史 -> 显式合成零价差盘口 (低估点差成本)
       val source = SyntheticBboSource(withGreeks)
-      val hedgeStrat =
-        if hedgeExec == "take" then BandHedgeStrategy(Exchange.Binance, symbol, ccy, band) // 市价 at-touch
-        else MakerHedgeStrategy(Exchange.Binance, symbol, ccy, band, offsetPct = makerOffset, requoteMs = requoteMs)
+      val hedgeStrat = hedgeExec match
+        case HedgeExec.Take  => BandHedgeStrategy(Exchange.Binance, symbol, ccy, band) // 市价 at-touch
+        case HedgeExec.Maker => MakerHedgeStrategy(Exchange.Binance, symbol, ccy, band, offsetPct = makerOffset, requoteMs = requoteMs)
       val runner = StrategyRunner.backtest(hedgeStrat)
       var lastMid = 0.0; var lastTs = 0L; var curveLastTs = 0L
       val curve = ArrayBuffer.empty[(Long, Double, Double)]
@@ -138,6 +170,8 @@ import scala.concurrent.{Await, ExecutionContext, Future}
     observers = Seq(obs),
       )
       val result = engine.run()
+      // 期权腿要按"最后见到的中间价"结算; 一条盘口都没见过就没有结算价, 以 0 结算会凭空造出一份损益
+      if lastTs == 0L then sys.error(s"$start..$end 全程没有盘口事件, 无法给期权腿定收盘价")
       val optionPnl = withGreeks.optionPnl(lastMid, lastTs)
       val hedgePnl = result.finalEquity - result.initialBalance
       WeekResult(optionPnl, hedgePnl, optionPnl + hedgePnl, withGreeks.enteredPremium, result.fills, withGreeks.strikePrice, lastMid, curve.toVector, fillRecs.toVector)
@@ -155,9 +189,9 @@ import scala.concurrent.{Await, ExecutionContext, Future}
     // iv=rv: 卖出 IV = 期权存续期实际 RV (完美预知, 不可交易) -> 用 windowRvRms 作可观测 IV 喂 planObservedIv
     def windowRv(j: Int): Double = WeeklyIvGrid.windowRvRms(j, tenorWeeks, rvByWeek)
     val plans = trancheIdx.map { i =>
-      val p =
-        if ivMode == "rv" then WeeklyIvGrid.planObservedIv(i, windowRv, sizePolicy)
-        else WeeklyIvGrid.planWeek(i, 0.55, j => rvByWeek(j), sizePolicy)
+      val p = ivMode match
+        case IvMode.WindowRv => WeeklyIvGrid.planObservedIv(i, windowRv, sizePolicy)
+        case IvMode.LaggedRv => WeeklyIvGrid.planWeek(i, 0.55, j => rvByWeek(j), sizePolicy)
       val start = weeks(i)._1
       val end = weeks(i + tenorWeeks - 1)._2
       WeekPlan(i, start, end, rvByWeek(i), p.iv, p.ivPrev, p.mult, -baseStraddles * p.mult) // 负=做空
@@ -196,18 +230,20 @@ private def writeSellCurve(path: String, recs: Seq[WeekRec]): Unit =
 
 /** 卖方汇总：稳定性指标 (胜率/最差/回撤/均值) 优先 */
 private def summarizeSell(recs: Seq[WeekRec]): Unit =
+  // 空集没有胜率、没有最差 tranche, 也没有均值。打一行 0 出来等于报告了一个没做过的测量。
+  require(recs.nonEmpty, "没有任何 tranche 结果可汇总 (区间/EDGE_MAX_TRANCHES 是否为空?)")
   val n = recs.size
   val tot = recs.map(_.r.total).sum
   val premAbs = recs.map(rc => math.abs(rc.r.premium)).sum
   val wins = recs.count(_.r.total > 0)
-  val worst = recs.minByOption(_.r.total).map(_.r.total).getOrElse(0.0)
-  val best = recs.maxByOption(_.r.total).map(_.r.total).getOrElse(0.0)
-  val avg = if n > 0 then tot / n else 0.0
+  val worst = recs.map(_.r.total).min
+  val best = recs.map(_.r.total).max
+  val avg = tot / n
   // 按到期日累计, 最大回撤
   var cum = 0.0; var peak = 0.0; var maxDD = 0.0
   recs.sortBy(_.plan.end).foreach { rc => cum += rc.r.total; peak = math.max(peak, cum); maxDD = math.max(maxDD, peak - cum) }
   println("\n==================== 汇总 (卖方稳定性优先) ====================")
-  println(f"tranche 数=$n  胜率=${wins}/$n (${if n > 0 then wins * 100.0 / n else 0.0}%.0f%%)")
+  println(f"tranche 数=$n  胜率=${wins}/$n (${wins * 100.0 / n}%.0f%%)")
   println(f"Σ总盈亏=$tot%+.1f  Σ权利金(收)=$premAbs%.1f  占比=${pct(tot, premAbs)}%+.2f%%  均值/笔=$avg%+.1f")
   println(f"最好 tranche=$best%+.1f   最差 tranche=$worst%+.1f   最大回撤=$maxDD%.1f")
   println("注: 收益形态应高胜率+小幅为主; 最差 tranche/回撤反映负 gamma 尾部风险 (越小越稳)。")
@@ -215,14 +251,14 @@ private def summarizeSell(recs: Seq[WeekRec]): Unit =
 /** 缓存中该 symbol 有 trades 文件的日期集合 */
 private def weekDates(cacheDir: String, symbol: Symbol): Set[LocalDate] =
   val dir = Path.of(cacheDir, "futures", "um", "daily", "trades", symbol)
-  if !Files.isDirectory(dir) then Set.empty
-  else
-    import scala.jdk.CollectionConverters.*
-    val stream = Files.list(dir)
-    try
-      stream.iterator.asScala
-        .map(_.getFileName.toString)
-        .flatMap(f => raw"(\d{4}-\d{2}-\d{2})".r.findFirstIn(f))
-        .map(LocalDate.parse)
-        .toSet
-    finally stream.close()
+  // 目录不存在是配置错误 (DATA_CACHE 指错 / 还没下载), 报出路径; 返回空集会让它伪装成"缓存周数不足"
+  if !Files.isDirectory(dir) then sys.error(s"逐笔缓存目录不存在: ${dir.toAbsolutePath} (DATA_CACHE 是否指对?)")
+  import scala.jdk.CollectionConverters.*
+  val stream = Files.list(dir)
+  try
+    stream.iterator.asScala
+      .map(_.getFileName.toString)
+      .flatMap(f => raw"(\d{4}-\d{2}-\d{2})".r.findFirstIn(f))
+      .map(LocalDate.parse)
+      .toSet
+  finally stream.close()

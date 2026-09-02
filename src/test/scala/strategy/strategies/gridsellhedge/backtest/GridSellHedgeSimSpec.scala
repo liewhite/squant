@@ -5,21 +5,21 @@ import strategy.strategies.gridsellhedge.logic.DynamicHedgeBand
 
 /** GridSellHedgeSim 集成单测 (3s 轮询 + maker 对冲, 越过行权价即开 / 回落超过阈值即平)。
   *
-  * 预热 2 小时 (恒 2000), 之后首个 ≥3s 的轮询种下 call@2100/put@1900。
+  * 预热 3 小时 (恒 2000, 攒够 2 个对数收益), 之后首个 ≥3s 的轮询种下 call@2100/put@1900。
   * maker 成交: 上一轮挂的买单在窗口最低 ≤ 限价时成交、卖单在窗口最高 ≥ 限价时成交, 成交于限价。 */
 class GridSellHedgeSimSpec extends munit.FunSuite:
   private val hr = 3_600_000L
-  private val base = 2 * hr
+  private val base = 3 * hr
 
   private def cfg(band: DynamicHedgeBand.Params = DynamicHedgeBand.Params(), slip: Double = 0.0) = GridConfig(
     spacing = 100.0, tenorDays = 30.0, nodeContracts = 1.0,
-    rvWindowHours = 2, warmupHours = 2, pollIntervalMs = 3000,
+    rvWindowHours = 3, warmupHours = 3, pollIntervalMs = 3000,
     makerOffsetPct = 0.0001, optFeeRate = 0.0, perpFeeRate = 0.0, slippagePct = slip,
   )
 
   private def run(c: GridConfig, path: Seq[(Double, Long)]): GridSellHedgeSim =
     val sim = GridSellHedgeSim(c)
-    sim.onPrice(2000.0, 0); sim.onPrice(2000.0, hr); sim.onPrice(2000.0, base)
+    sim.onPrice(2000.0, 0); sim.onPrice(2000.0, hr); sim.onPrice(2000.0, 2 * hr); sim.onPrice(2000.0, base)
     path.foreach { case (px, off) => sim.onPrice(px, base + off) }
     sim
 
@@ -56,7 +56,7 @@ class GridSellHedgeSimSpec extends munit.FunSuite:
   test("到期结算: OTM 期权到期作废收满权利金≈0, 档位释放后同轮补卖"):
     val c = cfg().copy(tenorDays = 0.05) // ~1.2h 到期
     val sim = GridSellHedgeSim(c)
-    sim.onPrice(2000.0, 0); sim.onPrice(2000.0, hr); sim.onPrice(2000.0, base)
+    sim.onPrice(2000.0, 0); sim.onPrice(2000.0, hr); sim.onPrice(2000.0, 2 * hr); sim.onPrice(2000.0, base)
     for k <- 1 to 90 do sim.onPrice(2000.0, base + k * 60_000L)
     val st = sim.stats
     assertEquals(st.expired, 2, "首批 call@2100/put@1900 到期")
