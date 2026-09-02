@@ -98,32 +98,61 @@ final class BybitMarketFeed(
     )
     publish(Event.at(Topics.Bbo, bbo, ts))
 
+  /** 各标的最近一次见到的 `nextFundingTime`。
+    *
+    * ## 为什么必须存这一份状态
+    *
+    * Bybit 的 tickers 是 **snapshot + delta**：delta 帧只带发生变化的字段。预测资金费率
+    * (`fundingRate`) 频繁变动，而 `nextFundingTime` 每 8 小时才变一次 —— 于是**绝大多数**
+    * delta 帧带着 fundingRate 却不带 nextFundingTime。
+    *
+    * 从前这里写 `nextFundingTime.toLongOption.getOrElse(0L)`，把"这一帧没带"当成了"结算时刻是 0"。
+    * 下游 [[FundingRate.dailyRate]] 见 `currentTime >= 0` 直接返回 0.0 —— 资金费信号被静默归零，
+    * 没有任何症状。delta 协议要求接收方保存上一帧的状态，用默认值替代状态就是替上游的协议买单。
+    *
+    * 只由公共流的接收线程读写 (单条连接、单线程解析)，无需同步。
+    */
+  private var lastFundingTime: Map[Symbol, Timestamp] = Map.empty
+
   /** tickers 一帧 (snapshot 或 delta) 携带 mark/index/funding，仅发布本帧实际出现 (非空) 的字段 */
   private def publishTicker(sym: Symbol, d: TickerData, ts: Long): Unit =
     if d.markPrice.nonEmpty then
       publish(Event.at(Topics.MarkPrice, MarkPrice(Exchange.Bybit, sym, d.markPrice.asPrice, ts), ts))
     if d.indexPrice.nonEmpty then
       publish(Event.at(Topics.IndexPrice, IndexPrice(Exchange.Bybit, sym, d.indexPrice.asPrice, ts), ts))
-    if d.fundingRate.nonEmpty then
-      val fr = FundingRate(
-        exchange = Exchange.Bybit,
-        symbol = sym,
-        rate = d.fundingRate.asDouble,
-        nextSettleTime = d.nextFundingTime.toLongOption.getOrElse(0L),
-        timestamp = ts,
+    // 本帧带了结算时刻就更新状态；不可解析则是坏报文, 抛出而不是当成"没带"
+    if d.nextFundingTime.nonEmpty then
+      val settle = d.nextFundingTime.toLongOption.getOrElse(
+        throw IllegalStateException(s"Bybit tickers nextFundingTime 不是时间戳: '${d.nextFundingTime}' ($sym)")
       )
-      publish(Event.at(Topics.FundingRate, fr, ts))
+      lastFundingTime = lastFundingTime.updated(sym, settle)
+    if d.fundingRate.nonEmpty then
+      // 没有结算时刻就发不出一条有意义的资金费 —— snapshot 之前不发布, 而不是发一条 0。
+      lastFundingTime.get(sym) match
+        case Some(settle) =>
+          val fr = FundingRate(
+            exchange = Exchange.Bybit,
+            symbol = sym,
+            rate = d.fundingRate.asDouble,
+            nextSettleTime = settle,
+            timestamp = ts,
+          )
+          publish(Event.at(Topics.FundingRate, fr, ts))
+        case None =>
+          logger.warn(s"Bybit $sym 收到 fundingRate 但还没见过 nextFundingTime (snapshot 之前), 本帧不发布")
 
   private def publishTrade(sym: Symbol, d: PublicTradeData): Unit =
     // Bybit S = taker 方向: S=Sell -> 买方是挂单方 (isBuyerMaker=true)
     val trade = MarketTrade(Exchange.Bybit, sym, d.p.asPrice, Coin(d.v.asDouble), isBuyerMaker = d.S == "Sell", d.T)
     publish(Event.at(Topics.Trade, trade, d.T))
 
-  /** 心跳发送线程：定期入队 ping 帧，维持连接 (服务端回 pong 同时刷新 WsLoop 空闲计时) */
+  /** 心跳发送任务：定期入队 ping 帧，维持连接 (服务端回 pong 同时刷新 WsLoop 空闲计时)。
+    *
+    * 用 [[MarketFeed.sleepUnlessStopped]] 而非裸 `Thread.sleep` —— 后者只能靠中断打断，
+    * 于是每次停机都多一次"能不能按时退出"的不确定，超时就会让组件被隔离。 */
   private def startHeartbeat(out: Channel[WebSocketFrame]): Unit =
     fork {
-      while true do
-        Thread.sleep(BybitMarketFeed.HeartbeatIntervalMs)
+      while !sleepUnlessStopped(BybitMarketFeed.HeartbeatIntervalMs) do
         out.send(WebSocketFrame.text("""{"op":"ping"}"""))
     }
     ()

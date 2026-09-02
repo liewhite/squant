@@ -6,7 +6,7 @@ import hft.event.Commands.*
 import hft.event.{Event, EventBus, Interest, MarketTopic, Subscription, Topics}
 import hft.strategy.Strategy
 import org.slf4j.LoggerFactory
-import ox.Ox
+import ox.{Ox, uninterruptible, unsupervised}
 
 /** 引擎：装配插件、校验契约、管理生命周期。**不持有任何交易所侧的实现。**
   *
@@ -173,27 +173,70 @@ object Engine:
   /** 启动对齐的等待上限。柜台在自己的 actor 线程上同步跑完对齐，正常情况是几次 REST 往返 */
   val SyncTimeoutMs: Long = 60_000
 
-  /** 启动引擎：装配总线与生命周期树，装上时钟与调用方给的插件。
+  /** 组件隔离导致进程终结时的退出码 (EX_SOFTWARE)，便于外层拉起逻辑区分它与普通失败。 */
+  val QuarantineExitCode: Int = 70
+
+  /** 在一个引擎里跑一段代码 —— **这是拿到 Engine 的唯一入口，也是它的生命周期边界**。
+    *
+    * ## 为什么是 `run(...)(body)` 而不是返回一个 Engine
+    *
+    * 引擎持有的每一条线程 (事件循环、生命周期钩子、受管任务、定时器) 都是本方法内部那个
+    * `unsupervised` 作用域里的一条 ox fork：离开这个块，它们必然被中断并 join，没有任何
+    * 线程能活过引擎。这是结构给的保证，不依赖谁记得收尾。
+    *
+    * 而"有序停机"必须发生在**作用域回收线程之前** —— `onStop` 要在总线与柜台都还活着时
+    * 发出撤单。所以停机写在本方法的 `finally` 里，不是留给调用方的一行代码：
+    * 从前 `start` 返回 Engine、由启动器最后调 `awaitShutdown`，于是从 `start` 到
+    * `awaitShutdown` 之间任何一次抛出 (租约冲突、对齐超时、`watchMarket` 校验失败) 都会
+    * 跳过整个停机流程，已连上交易所的柜台不跑 `onStop`，挂单原样留在交易所无人跟踪。
+    *
+    * ## 装配
     *
     * 时钟与插件作为一批启动事务：先快照声明、校验、接线并完成 `onPrepare`，再按依赖拓扑
     * 运行 `onStart`。启动钩子的总线输出先缓冲；整批成功后才原子激活处理能力、冲刷输出并
-    * 打开事件循环。
-    * 插件给定顺序不承担消息安全或停机正确性；硬依赖必须用 `Requirement` 声明，停机由依赖图
-    * 与所有权树共同排序。
+    * 打开事件循环。插件给定顺序不承担消息安全或停机正确性；硬依赖必须用 `Requirement`
+    * 声明，停机由依赖图与所有权树共同排序。
     *
     * @param plugins          行情源、柜台、观察者
     * @param clockIntervalMs  时钟节拍间隔 (驱动订单超时检测等)
+    * @param body             拿到引擎后要做的事；通常以 [[Engine.awaitShutdown]] 结尾
     */
-  def start(plugins: Seq[Actor] = Vector.empty, clockIntervalMs: Long = 1000)(using Ox): Engine =
-    val bus = EventBus()
-    val system = ActorSystem(bus)
-    val engine = Engine(bus, system)
-    // 时钟与插件作为一批装配：prepare 原子回滚；start 失败则按依赖拓扑补偿停止。
-    try system.spawnAll(Clock(clockIntervalMs) +: plugins.toVector)
-    catch
-      case startupFailure: Throwable =>
-        try system.stopAll()
-        catch case cleanupFailure: Throwable => startupFailure.addSuppressed(cleanupFailure)
-        throw startupFailure
-    logger.info(s"Engine started with ${plugins.size} plugins")
-    engine
+  def run[T](plugins: Seq[Actor] = Vector.empty, clockIntervalMs: Long = 1000)(body: Engine => T)(using Ox): T =
+    unsupervised {
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+      val engine = Engine(bus, system)
+      try
+        // 时钟与插件作为一批装配：prepare 原子回滚；start 失败则按依赖拓扑补偿停止。
+        system.spawnAll(Clock(clockIntervalMs) +: plugins.toVector)
+        logger.info(s"Engine started with ${plugins.size} plugins")
+        val result = body(engine)
+        // 正常路径: 停机失败要抛给调用方, 不能吞。
+        uninterruptible(system.close())
+        // 隔离检查必须在**两条路径**上都做: 停机期间发生的隔离可能不产生任何抛出
+        // (它若是系统的第一个失败, stopAll 会把它从 stopFailure 里滤掉), 于是 run 正常返回、
+        // 离开作用域、永久挂在 join 上 —— 既没停下来也没死掉。
+        if system.isQuarantined then haltQuarantined(IllegalStateException(s"组件被隔离 (${plugins.size} 个插件)"))
+        result
+      catch
+        case failure: Throwable =>
+          // 停机在中断中也要跑完 —— 否则 Ctrl+C 与组件失败都会漏掉撤单。
+          try uninterruptible(system.close())
+          catch case cleanup: Throwable => if cleanup ne failure then failure.addSuppressed(cleanup)
+          if system.isQuarantined then haltQuarantined(failure)
+          throw failure
+    }
+
+  /** 有组件被隔离时**终结进程**，不再往外抛。
+    *
+    * 隔离的含义是"有一条线程 Java 杀不掉、它可能仍在访问尚未释放的资源"。此时不能靠
+    * 抛异常离开并发作用域：结构化并发保证离开作用域前 join 掉每一条 fork，而那条卡死的
+    * fork 永远不会退出 —— 进程会挂在 join 上，既没停下来也没死掉，比直接死掉更糟。
+    *
+    * 用 `halt` 而不是 `exit`：`exit` 要跑 JVM 关闭钩子，而钩子会去等那次已经不可能完成的
+    * 停机。诊断 (组件状态、邮箱积压、in-flight 时长、线程栈) 在隔离那一刻就已经打进日志。
+    */
+  private def haltQuarantined(cause: Throwable): Nothing =
+    logger.error(s"组件被隔离且无法停止, 进程立即终结 (诊断见上): ${cause.getMessage}", cause)
+    Runtime.getRuntime.halt(Engine.QuarantineExitCode)
+    throw cause // 不可达; 只为让编译器知道这里不返回

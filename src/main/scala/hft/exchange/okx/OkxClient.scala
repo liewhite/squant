@@ -2,7 +2,7 @@ package hft.exchange.okx
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{ExchangeClient, TradingClient}
+import hft.exchange.{ExchangeClient, RestTransport, TradingClient}
 import sttp.client4.*
 import sttp.model.{Method, Uri}
 
@@ -65,11 +65,18 @@ object OkxClient:
       "Content-Type" -> "application/json",
     )
 
-  /** 下单数量/价格格式化 (定点, 去尾零, 避免科学计数法被交易所拒)。出站数字格式的单一数据源。 */
-  def fmt(d: Double): String = BigDecimal(d).underlying.stripTrailingZeros.toPlainString
+  /** 下单数量/价格格式化。出站数字格式的单一数据源现在是
+    * [[hft.exchange.RestTransport.fmt]] (三家交易所同一份)，这里只做转发，供期权客户端复用。 */
+  def fmt(d: Double): String = RestTransport.fmt(d)
 
   /** 撤单时表示"订单不存在/已撤/已完成"的 OKX sCode，归一为 ExchangeError.OrderNotFound */
   private val OrderNotFoundCodes: Set[String] = Set("51400", "51401", "51402")
+
+  /** OKX **顶层** code 的限频码。依据 v5 文档: 50011 = "Rate limit reached. Please refer to
+    * API documentation and throttle requests accordingly."
+    *
+    * 只出现在请求级 (`code`)，不出现在逐单结果 (`sCode`) 里 —— 逐单 sCode 说的是这一单被拒。 */
+  private[okx] val RateLimitCode: String = "50011"
 
 /** OKX 永续合约 REST 客户端。所有请求经 sttp 同步 backend 阻塞执行 (运行在虚拟线程上)。
   *
@@ -90,7 +97,8 @@ class OkxPublicClient protected[okx] (
   // ==================== ExchangeClient ====================
 
   override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
-    publicGet[InstrumentsResp]("/api/v5/public/instruments?instType=SWAP").flatMap { resp =>
+    // 合约清单响应大, 与下单路径的时限无关
+    publicGet[InstrumentsResp]("/api/v5/public/instruments?instType=SWAP", RestTransport.QueryTimeout).flatMap { resp =>
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator
           // 只取配置 quote 的**已上市**永续 —— quote 判定收在 fromOkx 里 (见它的说明);
@@ -122,8 +130,11 @@ class OkxPublicClient protected[okx] (
 
   // ==================== 请求基础设施 ====================
 
-  protected def publicGet[T: JsonValueCodec](path: String): Either[ExchangeError, T] =
-    send(Method.GET, s"$restBase$path", Map.empty, None).flatMap(parse[T])
+  protected def publicGet[T: JsonValueCodec](
+      path: String,
+      timeout: scala.concurrent.duration.FiniteDuration = RestTransport.ReadTimeout,
+  ): Either[ExchangeError, T] =
+    send(Method.GET, s"$restBase$path", Map.empty, None, timeout).flatMap(parse[T])
 
 
   protected def send(
@@ -131,47 +142,27 @@ class OkxPublicClient protected[okx] (
       url: String,
       headers: Map[String, String],
       body: Option[String],
+      timeout: scala.concurrent.duration.FiniteDuration = RestTransport.ReadTimeout,
   ): Either[ExchangeError, String] =
-    try
-      val base = basicRequest
-        .method(method, Uri.unsafeParse(url))
-        // 显式短超时: 必须小于策略的 orderTimeoutMs，让"超时"与"请求丢失"语义对齐
-        .readTimeout(3.seconds)
-        .response(asStringAlways)
-      val withHeaders = headers.foldLeft(base)((r, kv) => r.header(kv._1, kv._2))
-      val req = body.fold(withHeaders)(withHeaders.body)
-      val response = req.send(backend)
-      if response.code.isSuccess then Right(response.body)
-      else Left(ExchangeError.Http(response.code.code, response.body))
-    catch
-      case e: Exception if isInterrupt(e) => throw e
-      case e: Exception                   => Left(ExchangeError.Network(s"$method $url: ${e.getMessage}"))
+    RestTransport.send(backend, method, url, headers, body, timeout)
 
-  /** 异常 cause 链中是否包含线程中断 (ox 作用域取消的信号)，是则重抛而非误判为网络错误 */
+  protected def parse[T: JsonValueCodec](body: String): Either[ExchangeError, T] = RestTransport.parse[T](body)
 
-
-  /** 异常 cause 链中是否包含线程中断 (ox 作用域取消的信号)，是则重抛而非误判为网络错误 */
-  protected def isInterrupt(t: Throwable): Boolean =
-    Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(10).exists {
-      case _: InterruptedException | _: java.io.InterruptedIOException => true
-      case _                                                           => false
-    }
-
-
-  protected def parse[T: JsonValueCodec](body: String): Either[ExchangeError, T] =
-    try Right(readFromString[T](body))
-    catch case e: Exception => Left(ExchangeError.Parse(s"${e.getMessage}; body=$body"))
-
-  /** OKX 顶层 code 校验: "0" 为成功，否则映射为类型化错误 */
-
-
-  /** OKX 顶层 code 校验: "0" 为成功，否则映射为类型化错误 */
+  /** OKX **顶层** code 校验: "0" 为成功。
+    *
+    * 顶层 code 说的是"这次请求"的结果，不是"这一单"的结果 —— 后者在 `data[i].sCode`
+    * (见 [[placeOrder]])。限频 50011 出现在顶层，因此在这里归类。
+    * 依据 OKX v5 文档: 50011 = "Rate limit reached. Please refer to API documentation and
+    * throttle requests accordingly."
+    */
   protected def ensureOk(code: String, msg: String): Either[ExchangeError, Unit] =
     if code == "0" then Right(())
+    else if code == OkxClient.RateLimitCode then
+      Left(ExchangeError.RateLimited(s"OKX rate limit: code=$code msg=$msg"))
     else Left(ExchangeError.Other(s"OKX API error: code=$code msg=$msg"))
 
 
-  protected def fmt(d: Double): String = OkxClient.fmt(d)
+  protected def fmt(d: Double): String = RestTransport.fmt(d)
 
 
   protected def sideParam(side: Side): String = side match
@@ -220,10 +211,12 @@ final class OkxClient private[okx] (
       s"""{"instId":"$instId","tdMode":"cross","side":"${sideParam(order.side)}","ordType":"$ordType","sz":"${fmt(order.quantity.value)}"$pxField$reduceField$clOrdField}"""
     signedRequest[PlaceOrderResp](Method.POST, "/api/v5/trade/order", body).flatMap { resp =>
       resp.data.headOption match
-        case Some(d) if d.sCode != "0" =>
-          Left(ExchangeError.Other(s"OKX order rejected: code=${d.sCode} msg=${d.sMsg}"))
-        case Some(d) => Right(d.ordId)
-        case None    => ensureOk(resp.code, resp.msg).flatMap(_ => Left(ExchangeError.Other("OKX no order data in response")))
+        // 逐单结果: sCode 非 0 表示**这一单**没进撮合 —— 交易所明确拒绝, 订单确定未成立。
+        // 这是 OKX 表达业务拒单的形状 (HTTP 200 + data[0].sCode)，共享层只认语义、不认数字。
+        case Some(d) if d.sCode != "0" => Left(ExchangeError.Rejected(d.sCode, d.sMsg))
+        case Some(d)                   => Right(d.ordId)
+        // 连逐单结果都没有: 请求级失败 (含限频)，订单是否成立不确定，交给 ensureOk 分流
+        case None => ensureOk(resp.code, resp.msg).flatMap(_ => Left(ExchangeError.Other("OKX no order data in response")))
     }
 
 
@@ -238,7 +231,8 @@ final class OkxClient private[okx] (
           // OKX 51400/51401/51402: 订单不存在/已撤/已完成——归一为类型化错误，不外泄魔法码
           if OkxClient.OrderNotFoundCodes.contains(d.sCode) then
             Left(ExchangeError.OrderNotFound(s"OKX ${d.sCode}: ${ref.raw}"))
-          else Left(ExchangeError.Other(s"OKX cancel failed: code=${d.sCode} msg=${d.sMsg}"))
+          // 逐单 sCode 非 0 = 交易所明确拒绝了这次撤单 (不是"结果不确定")
+          else Left(ExchangeError.Rejected(d.sCode, s"OKX cancel failed: ${d.sMsg}"))
         case Some(_) => Right(())
         case None    => ensureOk(resp.code, resp.msg)
     }
@@ -254,7 +248,9 @@ final class OkxClient private[okx] (
             OrderUpdate(
               account = AccountId.Live,
               orderId = d.ordId,
-              clientOrderId = Some(if d.clOrdId.nonEmpty then d.clOrdId else d.ordId),
+              // 没有 clOrdId 的单 (手工下的) 就是没有 —— 拿 ordId 冒充会在策略的 pending
+              // 索引里凭空造出一个不存在的键, 而 WS 路径给的是 None (同一事实两个答案)。
+              clientOrderId = Option.when(d.clOrdId.nonEmpty)(d.clOrdId),
               exchange = Exchange.Okx,
               symbol = sym,
               side = sideFromOkx(d.side),
@@ -262,20 +258,16 @@ final class OkxClient private[okx] (
               price = Price(d.px.asDoubleOrZero),
               quantity = metaOf(sym).toCoin(Contracts(d.sz.asDouble)),
               filledQuantity = filled,
-              timestamp = nowMs,
+              // 交易所侧的更新时刻。用本地钟会让延迟基准恒为零 (柜台把它当 exchangeTs 用)。
+              timestamp = d.uTime.toLongOption.getOrElse(
+                throw IllegalStateException(s"OKX orders-pending 缺 uTime: ordId=${d.ordId} 原始值='${d.uTime}'")
+              ),
             )
           }
         }.toVector
       }
     }
 
-
-  override def setLeverage(symbol: Symbol, leverage: Int): Either[ExchangeError, Unit] =
-    val body = s"""{"instId":"${toOkx(symbol, quote)}","lever":"$leverage","mgnMode":"cross"}"""
-    signedRequest[SimpleResp](Method.POST, "/api/v5/account/set-leverage", body)
-      .flatMap(r => ensureOk(r.code, r.msg))
-
-  /** OKX 净值走 REST (totalEq)；名义价值由私有 WS account 频道推送，此处置 0 */
 
 
   /** OKX 净值走 REST (totalEq)；名义价值由私有 WS account 频道推送，此处置 0 */

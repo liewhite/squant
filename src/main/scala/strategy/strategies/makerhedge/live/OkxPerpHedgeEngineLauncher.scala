@@ -70,23 +70,24 @@ import sttp.client4.DefaultSyncBackend
 
     // 柜台在前、行情在后: 柜台既接下单指令也推回报 (消费者), 行情源是纯生产者。
     val gateway = RestTradingGateway.load(perp, feed, AccountId.Live)
-    val engine = Engine.start(plugins = Vector(gateway, OkxMarketFeed(perp, backend))) // 实盘
+    Engine.run(plugins = Vector(gateway, OkxMarketFeed(perp, backend))) { engine => // 实盘
 
-    // greeks 陈旧阈值 = 4× 轮询间隔 (连续几次拉取失败即暂停对冲, 不按过期 delta 乱挂)
-    val strategy = MakerHedgeStrategy(Exchange.Okx, t.symbol, t.ccy, AsymHedgeBand.byMa(t.tightAtr, t.looseAtr),
-      offsetPct = t.offset, requoteMs = t.requoteMs, gammaAdjust = true, maxGreeksStaleMs = t.greeksPollMs * 4, maxHedgeQty = Coin(t.maxHedgeQty),
-      // K 线粒度只配一处 (klineBar), 序列与预热都从它来 —— 从前策略这边用的是默认 1h,
-      // 与配置无关, 配成别的粒度就会把预热数据按 1h 打时间戳喂进去。
-      barIntervalMs = t.klineBarMs,
-      // 预热取数。**根数听策略的** —— 要多少根取决于 ATR/RV 的窗口, 那是策略的知识;
-      // 从前这里写死 64 根, 而序列容量按 max(atrPeriodBars*4, rvLongWindowBars+8, 64) 算,
-      // 长窗口的 RV 一直没喂满。粒度对不上就报错, 别让它静默按错的粒度喂。
-      history = (barMs, bars) =>
-        if barMs != t.klineBarMs then
-          Left(s"策略要 ${barMs}ms 的 K 线, 而配置的粒度是 ${t.klineBar} (${t.klineBarMs}ms)")
-        else opt.linearKlines(t.symbol, t.klineBar, bars))
-    engine.addStrategy(strategy, AccountId.Live) // 真实盘
+      // greeks 陈旧阈值 = 4× 轮询间隔 (连续几次拉取失败即暂停对冲, 不按过期 delta 乱挂)
+      val strategy = MakerHedgeStrategy(Exchange.Okx, t.symbol, t.ccy, AsymHedgeBand.byMa(t.tightAtr, t.looseAtr),
+        offsetPct = t.offset, requoteMs = t.requoteMs, gammaAdjust = true, maxGreeksStaleMs = t.greeksPollMs * 4, maxHedgeQty = Coin(t.maxHedgeQty),
+        // K 线粒度只配一处 (klineBar), 序列与预热都从它来 —— 从前策略这边用的是默认 1h,
+        // 与配置无关, 配成别的粒度就会把预热数据按 1h 打时间戳喂进去。
+        barIntervalMs = t.klineBarMs,
+        // 预热取数。**根数听策略的** —— 要多少根取决于 ATR/RV 的窗口, 那是策略的知识;
+        // 从前这里写死 64 根, 而序列容量按 max(atrPeriodBars*4, rvLongWindowBars+8, 64) 算,
+        // 长窗口的 RV 一直没喂满。粒度对不上就报错, 别让它静默按错的粒度喂。
+        history = (barMs, bars) =>
+          if barMs != t.klineBarMs then
+            Left(s"策略要 ${barMs}ms 的 K 线, 而配置的粒度是 ${t.klineBar} (${t.klineBarMs}ms)")
+          else opt.linearKlines(t.symbol, t.klineBar, bars))
+      engine.addStrategy(strategy, AccountId.Live) // 真实盘
 
-    logger.warn("对冲腿运行中 (BBO 复用引擎行情流, 期权 greeks 每 %dms 注入). Ctrl+C 退出".format(t.greeksPollMs))
-    // 阻塞到停机: 中断信号或组件失败都会唤醒它, 停完全部组件 (onStop 逐个跑到) 核心最后退出
-    engine.awaitShutdown()
+      logger.warn("对冲腿运行中 (BBO 复用引擎行情流, 期权 greeks 每 %dms 注入). Ctrl+C 退出".format(t.greeksPollMs))
+      // 阻塞到停机: 中断信号或组件失败都会唤醒它, 停完全部组件 (onStop 逐个跑到) 核心最后退出
+      engine.awaitShutdown()
+    }

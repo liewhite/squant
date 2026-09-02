@@ -93,6 +93,8 @@ object WsLoop:
                 fragments.clear()
           case WebSocketFrame.Ping(payload)       => outgoing.send(WebSocketFrame.Pong(payload))
           case _: WebSocketFrame.Pong             => ()
-          case _: WebSocketFrame.Binary           => ()
+          // 四家端点都是文本协议: 出现 Binary 帧说明协议变了。私有流上静默丢一帧 = 丢一笔成交。
+          case b: WebSocketFrame.Binary =>
+            throw IllegalStateException(s"[$name] 收到意外的二进制帧 (${b.payload.length} 字节), 本连接应为文本协议")
           case WebSocketFrame.Close(code, reason) =>
             throw WsServerClosedException(s"[$name] server closed: code=$code reason=$reason")

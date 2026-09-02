@@ -4,24 +4,13 @@ import hft.event.{AnyEvent, CommandHandler, EventBus, Interest}
 import hft.kernel.CapabilityProvider
 
 import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
-import java.util.concurrent.{ConcurrentLinkedQueue, CopyOnWriteArrayList, CountDownLatch, ScheduledFuture, TimeUnit}
+import java.util.concurrent.{ConcurrentLinkedQueue, CopyOnWriteArrayList, CountDownLatch, TimeUnit}
 
 /** 组件生命周期状态。状态可从 [[ActorHandle.state]] 读取，故失败不再只存在于日志里。 */
 enum ActorState:
   case Wired, Preparing, Prepared, Starting, Running, Stopping, Stopped, Failed, Quarantined
 
   def isTerminal: Boolean = this == Stopped || this == Failed || this == Quarantined
-
-/** 组件作用域内的一条受管任务。取消与等待由 [[ActorSystem.stop]] 统一执行。 */
-final class ManagedTask private[actor] (private val thread: Thread):
-  def isAlive: Boolean = thread.isAlive
-  private[actor] def cancel(): Unit = thread.interrupt()
-  private[actor] def await(timeoutMs: Long): Boolean =
-    thread.join(timeoutMs)
-    !thread.isAlive
-  private[actor] def diagnostic(owner: String, timeoutMs: Long): String =
-    s"组件 $owner 的子任务 ${thread.getName} 未在 ${timeoutMs}ms 内停止\n" +
-      thread.getStackTrace.mkString("    at ", "\n    at ", "")
 
 private[actor] final class TreeStopAttempt:
   val failure = AtomicReference[Throwable](null)
@@ -47,7 +36,7 @@ final class ActorHandle private[actor] (
 ):
   private[actor] val children = CopyOnWriteArrayList[ActorHandle]()
   private[actor] val tasks = CopyOnWriteArrayList[ManagedTask]()
-  private[actor] val schedules = CopyOnWriteArrayList[ScheduledFuture[?]]()
+  private[actor] val schedules = CopyOnWriteArrayList[DelayTimer#Entry]()
   private[actor] val cleanups = CopyOnWriteArrayList[() => Unit]()
   private[actor] val taskCleanupFailures = CopyOnWriteArrayList[Throwable]()
   private[actor] val pendingPublications = ConcurrentLinkedQueue[AnyEvent]()
@@ -56,12 +45,14 @@ final class ActorHandle private[actor] (
   private[actor] val startEntered = AtomicBoolean(false)
   private[actor] val loopStarted = AtomicBoolean(false)
   private[actor] val stopHookRun = AtomicBoolean(false)
+  /** 正在跑 `onStop` —— **收尾窗口**。见 [[ActorSystem.publishOutputFrom]]。 */
+  private[actor] val finishing = AtomicBoolean(false)
   private[actor] val stopStarted = AtomicBoolean(false)
   private[actor] val treeStopAttempt = AtomicReference[TreeStopAttempt](null)
   private[actor] val mailboxClosed = AtomicBoolean(false)
-  private[actor] val startThread = AtomicReference[Thread](null)
-  private[actor] val prepareThread = AtomicReference[Thread](null)
-  private[actor] val loopThread = AtomicReference[Thread](null)
+  private[actor] val startTask = AtomicReference[ManagedTask](null)
+  private[actor] val prepareTask = AtomicReference[ManagedTask](null)
+  private[actor] val loopTask = AtomicReference[ManagedTask](null)
   private[actor] val lastMailboxWarningNanos = AtomicLong(0L)
   private[actor] val runGate = CountDownLatch(1)
   private[actor] val loopCommitted = AtomicBoolean(false)
@@ -86,7 +77,20 @@ final class ActorContext private[actor] (
   /** 同步记录组件终态并触发全系统有序停机。幂等；调用后当前控制流必须立即结束。 */
   def reportFailure(cause: Throwable): Unit = system.reportManagedFailure(handle, cause)
   def manage[A](resource: A)(release: A => Unit): A = system.manage(handle, resource)(release)
-  def scheduleEvent(ms: Long, event: AnyEvent): Unit =
-    system.schedule(handle, ms) { system.publishFrom(handle, event) }
+  /** 排一条**归属本组件**的延迟事件。
+    *
+    * 契约：
+    *   - `ms <= 0` 立即发布 (与 [[publish]] 同路径)。
+    *   - 组件进入终态后调用即抛 —— 与 [[publish]]/[[fork]]/[[manage]] 一致，不静默丢弃。
+    *   - **停止会丢弃尚未到点的延迟事件**：组件即将被摘除，那条事件已无处可发。丢弃是
+    *     可见的 —— [[ActorSystem]] 会以 WARN 报出被丢弃的条数，不做静默处理。
+    *     因此需要保证送达的收尾输出应放在 [[Actor.onStop]] 的返回值里，不要靠延迟。
+    */
+  def scheduleEvent(ms: Long, event: AnyEvent): Unit = system.scheduleEvent(handle, ms, event)
+
+  /** 把一条事件直接放进**本组件自己**的邮箱 (自投递)。
+    *
+    * 邮箱在停止时会被关闭并排空，此后 offer 的输入不再被处理 —— 与延迟事件同一个道理：
+    * 组件正在被摘除。需要保证处理的输入不能靠自投递。 */
   def tell(event: AnyEvent): Unit = handle.mailbox.offer(event)
   def sleepUnlessStopped(ms: Long): Boolean = handle.stopRequested.await(ms, TimeUnit.MILLISECONDS)

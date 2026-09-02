@@ -1,12 +1,11 @@
 package hft.exchange.hyperliquid
 
 import hft.domain.{Exchange, ExchangeError, Symbol}
+import hft.exchange.RestTransport
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import sttp.client4.*
-import sttp.model.{Method, Uri}
-
-import scala.concurrent.duration.*
+import sttp.model.Method
 
 import HyperliquidCodec.*
 import HyperliquidCodec.given
@@ -43,28 +42,18 @@ final class HyperliquidClient(
     }
 
   private def post[T: JsonValueCodec](body: String): Either[ExchangeError, T] =
-    try
-      val response = basicRequest
-        .method(Method.POST, Uri.unsafeParse(s"$restBase/info"))
-        .header("Content-Type", "application/json")
-        .body(body)
-        .readTimeout(10.seconds)
-        .response(asStringAlways)
-        .send(backend)
-      if !response.code.isSuccess then Left(ExchangeError.Http(response.code.code, response.body))
-      else
-        try Right(readFromString[T](response.body))
-        catch case e: Exception => Left(ExchangeError.Parse(s"${e.getMessage}; body=${response.body}"))
-    catch
-      case e: Exception if isInterrupt(e) => throw e
-      case e: Exception                   => Left(ExchangeError.Network(s"POST $restBase/info: ${e.getMessage}"))
+    RestTransport
+      .send(
+        backend,
+        Method.POST,
+        s"$restBase/info",
+        headers = Map("Content-Type" -> "application/json"),
+        body = Some(body),
+        // 资产清单响应大, 与下单路径的时限无关 (本客户端目前不下单)
+        timeout = RestTransport.QueryTimeout,
+      )
+      .flatMap(RestTransport.parse[T])
 
-  /** 异常 cause 链中是否包含线程中断 (ox 作用域取消的信号)，是则重抛而非误判为网络错误 */
-  private def isInterrupt(t: Throwable): Boolean =
-    Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(10).exists {
-      case _: InterruptedException | _: java.io.InterruptedIOException => true
-      case _                                                           => false
-    }
 
 object HyperliquidClient:
   val RestBaseUrl = "https://api.hyperliquid.xyz"

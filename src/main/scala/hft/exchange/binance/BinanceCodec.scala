@@ -1,6 +1,6 @@
 package hft.exchange.binance
 
-import hft.domain.Price
+import hft.domain.{Price, Side}
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import com.github.plokhotnyuk.jsoniter_scala.macros.*
@@ -15,7 +15,23 @@ private[binance] object BinanceCodec:
   // ===== WebSocket: 公共流 =====
 
   /** 消息类型探测: 只看 "e" 字段；订阅 ack 等无 e 字段的消息得到空串 */
-  final case class WsEnvelope(e: String = "")
+  /** 公共流帧的探测包络：数据帧带事件类型 `e`，请求应答不带 —— 成功是 `result:null`、
+    * 失败是 `error:{code,msg}`。两者都必须能被区分出来，见 [[BinanceMarketFeed]]。 */
+  final case class WsEnvelope(e: String = "", id: Long = 0L, error: Option[WsError] = None)
+
+  final case class WsError(code: Int, msg: String)
+
+  /** `/fapi/v1/positionSide/dual`: true = 双向持仓(hedge)，false = 单向持仓。 */
+  final case class PositionSideDual(dualSidePosition: Boolean = true)
+
+  /** Binance 方向 -> 统一方向。穷举 BUY/SELL，其余抛。
+    *
+    * 从前是 `if side == "BUY" then Long else Short`：任何非 "BUY" 的值 (含 codec 默认的空串)
+    * 都变成 Short —— **方向静默取反**。Bybit/OKX 侧对未知方向都是抛的，这里也必须一致。 */
+  def sideFromBinance(side: String): Side = side match
+    case "BUY"  => Side.Long
+    case "SELL" => Side.Short
+    case other  => throw IllegalStateException(s"未知的 Binance 方向: '$other'")
 
   final case class BookTickerMsg(
       s: String = "",  // symbol
@@ -125,6 +141,7 @@ private[binance] object BinanceCodec:
 
   final case class ListenKeyResp(listenKey: String = "")
 
+  given JsonValueCodec[PositionSideDual] = JsonCodecMaker.make
   given JsonValueCodec[WsEnvelope] = JsonCodecMaker.make
   given JsonValueCodec[BookTickerMsg] = JsonCodecMaker.make
   given JsonValueCodec[MarkPriceMsg] = JsonCodecMaker.make

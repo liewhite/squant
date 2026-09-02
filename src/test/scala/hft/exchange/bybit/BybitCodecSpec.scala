@@ -23,7 +23,19 @@ class BybitCodecSpec extends munit.FunSuite:
     assertEquals(mapOrderStatus("PartiallyFilledCanceled", Coin(0.0)), OrderStatus.Cancelled)
     assertEquals(mapOrderStatus("Deactivated", Coin(0.0)), OrderStatus.Cancelled)
     assert(mapOrderStatus("Rejected", Coin(0.0)).isInstanceOf[OrderStatus.Rejected])
-    assert(mapOrderStatus("whatever", Coin(0.0)).isInstanceOf[OrderStatus.Rejected])
+
+  test("条件单状态 Untriggered/Triggered 是文档内的合法状态, 且不是终态"):
+    // 本框架只下普通限价/市价单, 所以它们只出现在别人的单上 (手工止损、交易所 TP/SL)。
+    // 私有 order 频道推整个账户的订单, /v5/order/realtime 在启动对齐时也会返回它们 ——
+    // 把它们当"未知"抛出的结果是: 账户里只要有一张条件单, 进程立刻死、甚至启动即崩。
+    assertEquals(mapOrderStatus("Untriggered", Coin(0.0)), OrderStatus.Pending)
+    // Triggered = "conditional order from Untriggered to New", 是刚活过来, 不是结束
+    assertEquals(mapOrderStatus("Triggered", Coin(0.0)), OrderStatus.Pending)
+
+  test("文档之外的订单状态 -> 抛错, 不归成终态"):
+    // 归成 Rejected 是终态: 会触发 markTerminal 并清掉 pending —— 一张还活着的单被本地宣告死亡。
+    val e = intercept[IllegalStateException](mapOrderStatus("SomethingNew", Coin(0.0)))
+    assert(e.getMessage.contains("文档之外的 Bybit 订单状态"), e.getMessage)
 
   test("方向映射 (统一<->Bybit) 与 TimeInForce 映射"):
     assertEquals(sideToParam(Side.Long), "Buy")

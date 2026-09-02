@@ -2,7 +2,7 @@ package hft.exchange.bybit
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{ExchangeClient, TradingClient}
+import hft.exchange.{ExchangeClient, RestTransport, TradingClient}
 import sttp.client4.*
 import sttp.model.{Method, Uri}
 
@@ -30,6 +30,34 @@ object BybitClient:
   /** 交易客户端（带凭证）：拿到它即意味着凭证已具备，无需再问 `hasCredentials`。 */
   def trading(backend: SyncBackend, credentials: BybitCredentials, accountType: String = "UNIFIED"): BybitClient =
     new BybitClient(backend, credentials, accountType, BybitClient.RestBaseUrl)
+  /** 限频类 retCode。依据 Bybit v5 错误码文档 (docs/v5/error)：
+    *   - 10006 Too many visits. Exceeded the API Rate Limit.
+    *   - 10018 Exceeded the IP Rate Limit.
+    *   - 20003 Too frequent requests under the same session
+    *   - 429 / 10429 系统级频率保护
+    * 它们不能按拒单回流 —— 那会变成"拒单 -> 重挂 -> 更多请求"的重试风暴。 */
+  private[bybit] val RateLimitRetCodes: Set[Int] = Set(429, 10006, 10018, 10429, 20003)
+
+  /** 一次 Bybit 请求的失败结果 —— **保留结构化的 retCode**。
+    *
+    * 从前 `ensureOk` 把 retCode 格式化进错误消息，`classifyWriteError` 再用正则从消息里捞回来:
+    * 语义信息在同一个模块内先被丢进字符串再解析出来，两处必须同步改。根因是
+    * `Either[ExchangeError, Unit]` 承载不了"交易所原始错误码"这个事实，于是拿消息文本当传输
+    * 通道。收成一个类型之后，翻译只发生在 [[classify]] 一处。 */
+  private[bybit] final case class Fault(retCode: Int, retMsg: String):
+    def describe(what: String): String = s"Bybit $what 失败: retCode=$retCode retMsg=$retMsg"
+
+  /** 把一次 Bybit 失败翻译成框架语义。
+    *
+    * @param write true = 写单路径 (下单/撤单/改杠杆)。Bybit 用 HTTP 200 + 顶层 retCode 表达
+    *              业务结果，因此写单路径必须在这里分流，否则「保证金不足」会被共享层判成
+    *              "结果不确定"而终止整个进程。读接口没有这个区分的必要，一律 `Other`。
+    */
+  private[bybit] def classify(fault: Fault, what: String, write: Boolean): ExchangeError =
+    if RateLimitRetCodes.contains(fault.retCode) then ExchangeError.RateLimited(fault.describe(what))
+    else if write then ExchangeError.Rejected(fault.retCode.toString, fault.describe(what))
+    else ExchangeError.Other(fault.describe(what))
+
   val RestBaseUrl = "https://api.bybit.com"
   val WsPublicLinearUrl = "wss://stream.bybit.com/v5/public/linear"
   val WsPrivateUrl = "wss://stream.bybit.com/v5/private"
@@ -76,7 +104,8 @@ class BybitPublicClient protected[bybit] (
       val query =
         s"category=linear&limit=${BybitClient.InstrumentsPageLimit}" +
           cursor.map(c => s"&cursor=${URLEncoder.encode(c, UTF_8)}").getOrElse("")
-      publicGet[InstrumentsResp]("/v5/market/instruments-info", query).flatMap { resp =>
+      // 合约清单响应大, 与下单路径的时限无关
+      publicGet[InstrumentsResp]("/v5/market/instruments-info", query, RestTransport.QueryTimeout).flatMap { resp =>
         ensureOk(resp.retCode, resp.retMsg).flatMap { _ =>
           val metas = resp.result.list.iterator.flatMap { d =>
             fromBybit(d.symbol).map { sym =>
@@ -99,9 +128,13 @@ class BybitPublicClient protected[bybit] (
 
   // ==================== 请求基础设施 ====================
 
-  protected def publicGet[T: JsonValueCodec](path: String, query: String): Either[ExchangeError, T] =
+  protected def publicGet[T: JsonValueCodec](
+      path: String,
+      query: String,
+      timeout: scala.concurrent.duration.FiniteDuration = RestTransport.ReadTimeout,
+  ): Either[ExchangeError, T] =
     val url = if query.nonEmpty then s"$restBase$path?$query" else s"$restBase$path"
-    send(Method.GET, url, Map.empty, None).flatMap(parse[T])
+    send(Method.GET, url, Map.empty, None, timeout).flatMap(parse[T])
 
 
   protected def send(
@@ -109,48 +142,23 @@ class BybitPublicClient protected[bybit] (
       url: String,
       headers: Map[String, String],
       body: Option[String],
+      timeout: scala.concurrent.duration.FiniteDuration = RestTransport.ReadTimeout,
   ): Either[ExchangeError, String] =
-    try
-      val base = basicRequest
-        .method(method, Uri.unsafeParse(url))
-        // 显式短超时: 必须小于策略的 orderTimeoutMs，让"超时"与"请求丢失"语义对齐
-        .readTimeout(3.seconds)
-        .response(asStringAlways)
-      val withHeaders = headers.foldLeft(base)((r, kv) => r.header(kv._1, kv._2))
-      val req = body.fold(withHeaders)(withHeaders.body)
-      val response = req.send(backend)
-      if response.code.isSuccess then Right(response.body)
-      else Left(ExchangeError.Http(response.code.code, response.body))
-    catch
-      case e: Exception if isInterrupt(e) => throw e
-      case e: Exception                   => Left(ExchangeError.Network(s"$method $url: ${e.getMessage}"))
+    RestTransport.send(backend, method, url, headers, body, timeout)
 
-  /** 异常 cause 链中是否包含线程中断 (ox 作用域取消的信号)，是则重抛而非误判为网络错误 */
+  protected def parse[T: JsonValueCodec](body: String): Either[ExchangeError, T] = RestTransport.parse[T](body)
 
-
-  /** 异常 cause 链中是否包含线程中断 (ox 作用域取消的信号)，是则重抛而非误判为网络错误 */
-  protected def isInterrupt(t: Throwable): Boolean =
-    Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(10).exists {
-      case _: InterruptedException | _: java.io.InterruptedIOException => true
-      case _                                                           => false
-    }
-
-
-  protected def parse[T: JsonValueCodec](body: String): Either[ExchangeError, T] =
-    try Right(readFromString[T](body))
-    catch case e: Exception => Left(ExchangeError.Parse(s"${e.getMessage}; body=$body"))
-
-  /** Bybit 顶层 retCode 校验: 0 为成功，否则映射为类型化错误 */
-
-
-  /** Bybit 顶层 retCode 校验: 0 为成功，否则映射为类型化错误 */
-  protected def ensureOk(retCode: Int, retMsg: String): Either[ExchangeError, Unit] =
+  /** 读接口的顶层 retCode 校验: 0 为成功，非 0 是一次失败的查询。限频仍单独归类。 */
+  protected def ensureOk(retCode: Int, retMsg: String, what: String = "API"): Either[ExchangeError, Unit] =
     if retCode == 0 then Right(())
-    else Left(ExchangeError.Other(s"Bybit API error: retCode=$retCode retMsg=$retMsg"))
+    else Left(BybitClient.classify(BybitClient.Fault(retCode, retMsg), what, write = false))
 
+  /** 写单路径 (下单/撤单/改杠杆) 的顶层 retCode 校验 —— 非 0 归 `Rejected`/`RateLimited`。 */
+  protected def ensureWriteOk(retCode: Int, retMsg: String, what: String): Either[ExchangeError, Unit] =
+    if retCode == 0 then Right(())
+    else Left(BybitClient.classify(BybitClient.Fault(retCode, retMsg), what, write = true))
 
-  protected def fmt(d: Double): String =
-    BigDecimal(d).underlying.stripTrailingZeros.toPlainString
+  protected def fmt(d: Double): String = RestTransport.fmt(d)
 
 /** Bybit v5 linear 永续的**交易** REST 客户端。凭证是构造参数而非 `Option`，签名路径因此没有
   * "万一没配密钥"的分支，`ExchangeError.Auth` 回归它本来的含义：交易所真的拒绝了鉴权。 */
@@ -181,7 +189,7 @@ final class BybitClient private[bybit] (
     val body =
       s"""{"category":"linear","symbol":"${order.symbol}","side":"${sideToParam(order.side)}","orderType":"$ordType","qty":"${fmt(order.quantity.value)}"$pxField$reduceField$linkField}"""
     signedPost[OrderCreateResp]("/v5/order/create", body).flatMap { resp =>
-      ensureOk(resp.retCode, resp.retMsg).flatMap { _ =>
+      ensureWriteOk(resp.retCode, resp.retMsg, "下单").flatMap { _ =>
         if resp.result.orderId.nonEmpty then Right(resp.result.orderId)
         else Left(ExchangeError.Other("Bybit no orderId in response"))
       }
@@ -198,46 +206,48 @@ final class BybitClient private[bybit] (
       // 110001/170213: 订单不存在/已撤/已完成——归一为类型化错误，不外泄魔法码
       else if BybitClient.OrderNotFoundCodes.contains(resp.retCode) then
         Left(ExchangeError.OrderNotFound(s"Bybit ${resp.retCode}: ${ref.raw}"))
-      else Left(ExchangeError.Other(s"Bybit cancel failed: retCode=${resp.retCode} retMsg=${resp.retMsg}"))
+      else Left(BybitClient.classify(BybitClient.Fault(resp.retCode, resp.retMsg), "撤单", write = true))
     }
 
 
+  /** 当前挂单。**必须翻页** —— `/v5/order/realtime` 默认每页 20 条并给出 `nextPageCursor`。
+    *
+    * 不翻页的后果不是"少看几张单": 对齐时 [[PositionBook.align]] 会漏掉部分成交单的记账进度,
+    * 于是下一条推送把已经含在仓位里的成交**再记一遍**。同文件的 fetchAllSymbolMetas 本就跟着
+    * cursor 走, 这里漏了。 */
   override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] =
-    signedGet[OpenOrdersResp]("/v5/order/realtime", s"category=linear&symbol=$symbol").flatMap { resp =>
-      ensureOk(resp.retCode, resp.retMsg).map { _ =>
-        resp.result.list.iterator.flatMap { d =>
-          fromBybit(d.symbol).map { sym =>
-            val filled = Coin(d.cumExecQty.asDouble)
-            OrderUpdate(
-              account = AccountId.Live,
-              orderId = d.orderId,
-              clientOrderId = Some(if d.orderLinkId.nonEmpty then d.orderLinkId else d.orderId),
-              exchange = Exchange.Bybit,
-              symbol = sym,
-              side = sideFromBybit(d.side),
-              status = mapOrderStatus(d.orderStatus, filled),
-              price = Price(d.price.asDoubleOrZero),
-              quantity = Coin(d.qty.asDouble),
-              filledQuantity = filled,
-              timestamp = nowMs,
-            )
-          }
-        }.toVector
+    def loop(cursor: Option[String], acc: Vector[OrderUpdate]): Either[ExchangeError, Vector[OrderUpdate]] =
+      val query = s"category=linear&symbol=$symbol" + cursor.fold("")(c => s"&cursor=$c")
+      signedGet[OpenOrdersResp]("/v5/order/realtime", query).flatMap { resp =>
+        ensureOk(resp.retCode, resp.retMsg).flatMap { _ =>
+          val page = resp.result.list.iterator.flatMap { d =>
+            fromBybit(d.symbol).map { sym =>
+              val filled = Coin(d.cumExecQty.asDouble)
+              OrderUpdate(
+                account = AccountId.Live,
+                orderId = d.orderId,
+                // 没有 orderLinkId 的单 (手工下的) 就是没有 —— 拿 orderId 冒充会在策略的
+                // pending 索引里凭空造出一个不存在的键, 而 WS 路径给的是 None。
+                clientOrderId = Option.when(d.orderLinkId.nonEmpty)(d.orderLinkId),
+                exchange = Exchange.Bybit,
+                symbol = sym,
+                side = sideFromBybit(d.side),
+                status = mapOrderStatus(d.orderStatus, filled),
+                price = Price(d.price.asDoubleOrZero), // 市价单的委托价为空, 只用于回显
+                quantity = Coin(d.qty.asDouble),
+                filledQuantity = filled,
+                timestamp = d.updatedTime.toLongOption.getOrElse(
+                  throw IllegalStateException(s"Bybit order updatedTime 不是时间戳: '${d.updatedTime}' (${d.orderId})")
+                ),
+              )
+            }
+          }.toVector
+          val next = resp.result.nextPageCursor
+          if next.nonEmpty then loop(Some(next), acc ++ page) else Right(acc ++ page)
+        }
       }
-    }
+    loop(None, Vector.empty)
 
-
-  override def setLeverage(symbol: Symbol, leverage: Int): Either[ExchangeError, Unit] =
-    // 单向持仓模式下 buy/sell 杠杆须一致
-    val body = s"""{"category":"linear","symbol":"$symbol","buyLeverage":"$leverage","sellLeverage":"$leverage"}"""
-    signedPost[SimpleResp]("/v5/position/set-leverage", body).flatMap { resp =>
-      if resp.retCode == 0 || resp.retCode == BybitClient.LeverageNotModifiedCode then Right(())
-      else Left(ExchangeError.Other(s"Bybit set-leverage failed: retCode=${resp.retCode} retMsg=${resp.retMsg}"))
-    }
-
-  /** 净值取 wallet 的 totalEquity；notional (持仓名义价值) Bybit wallet 不直供，置 0
-    * (与 OKX REST 路径一致，需精确杠杆率时由持仓聚合计算)
-    */
 
 
   /** 净值取 wallet 的 totalEquity；notional (持仓名义价值) Bybit wallet 不直供，置 0
@@ -263,10 +273,15 @@ final class BybitClient private[bybit] (
             fromBybit(d.symbol).map { sym =>
               // Bybit linear 的原生数量就是币本位 (contractSize = 1)，与 WS 路径一致
               val absSize = Coin(d.size.asDouble)
+              // 穷举: 未知方向从前归零, 而 size 非零时那等于把一笔真实持仓丢掉。
+              // WS 路径对同一件事的答案是"记成多头" —— 同一事实两个答案, 一并收口。
               val signedSize = d.side match
-                case "Buy"  => absSize
-                case "Sell" => -absSize
-                case _      => Coin.Zero // 空仓 side=""
+                case "Buy"                                      => absSize
+                case "Sell"                                     => -absSize
+                // 空仓: side 为空串 (docs/v5/position)。非空 size 配空 side 是矛盾, 落到下面抛。
+                case "" if absSize.value == 0.0                 => Coin.Zero
+                case other =>
+                  throw IllegalStateException(s"未知的 Bybit 持仓方向: '$other' (symbol=${d.symbol} size=${d.size})")
               Position(
                 account = AccountId.Live,
                 exchange = Exchange.Bybit,

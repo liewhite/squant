@@ -3,7 +3,7 @@ package hft.actor
 import hft.domain.*
 import hft.event.{AnyEvent, CommandHandler, CommandTopic, Event, EventBus, Interest, Topics}
 import hft.kernel.{Capability, CapabilityProvider, Cardinality}
-import ox.supervised
+import ox.{forkUnsupervised, supervised}
 
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.{ConcurrentLinkedQueue, CountDownLatch, TimeUnit}
@@ -59,17 +59,18 @@ class ActorSystemSpec extends munit.FunSuite:
       assertEquals(system.alive, 0)
 
   test("stop 返回时 onStop 已跑完, 且其产出的事件送达了下游"):
-    // 收尾意图 (撤单/平仓) 必须在退订之前发出, 那时下游还活着 —— 顺序反了就是漏发指令
     supervised:
-      val bus = EventBus()
-      val system = ActorSystem(bus)
-      val seen = ConcurrentLinkedQueue[String]()
-      val downstream = bus.subscribe(Set(Interest.All(Topics.Fill)))
-      val h = system.spawn(Recorder("a", seen, emitOnStop = Some("BTCUSDT")))
+      // 收尾意图 (撤单/平仓) 必须在退订之前发出, 那时下游还活着 —— 顺序反了就是漏发指令
+      supervised:
+        val bus = EventBus()
+        val system = ActorSystem(bus)
+        val seen = ConcurrentLinkedQueue[String]()
+        val downstream = bus.subscribe(Set(Interest.All(Topics.Fill)))
+        val h = system.spawn(Recorder("a", seen, emitOnStop = Some("BTCUSDT")))
 
-      system.stop(h)
-      assert(seen.asScala.toVector.contains("a:stopped"), "stop 返回时 onStop 必须已跑完")
-      assertEquals(downstream.events.receive().as(Topics.Fill).map(_.symbol), Some("BTCUSDT"))
+        system.stop(h)
+        assert(seen.asScala.toVector.contains("a:stopped"), "stop 返回时 onStop 必须已跑完")
+        assertEquals(downstream.events.receive().as(Topics.Fill).map(_.symbol), Some("BTCUSDT"))
 
   test("树形停机: 先停子孙、自下而上, 父的 stop 返回时整棵子树已收尾"):
     supervised:
@@ -96,194 +97,200 @@ class ActorSystemSpec extends munit.FunSuite:
       assertEquals(system.alive, 0, "整棵子树都被摘除")
 
   test("并发重复 stop(parent) 共享同一棵树停止事务, 不会越过子组件"):
-    val system = ActorSystem(EventBus())
-    val childStopping = CountDownLatch(1)
-    val releaseChild = CountDownLatch(1)
-    val returned = CountDownLatch(2)
-    val order = ConcurrentLinkedQueue[String]()
+    supervised:
+      val system = ActorSystem(EventBus())
+      val childStopping = CountDownLatch(1)
+      val releaseChild = CountDownLatch(1)
+      val returned = CountDownLatch(2)
+      val order = ConcurrentLinkedQueue[String]()
 
-    class Child extends Actor:
-      override def name = "blocking-child"
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        childStopping.countDown()
-        releaseChild.await()
-        order.add(name)
-        Vector.empty
+      class Child extends Actor:
+        override def name = "blocking-child"
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          childStopping.countDown()
+          releaseChild.await()
+          order.add(name)
+          Vector.empty
 
-    class Parent extends Actor:
-      override def name = "parent"
-      override def onPrepare(ctx: ActorContext): Unit = ctx.spawn(Child()): Unit
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        order.add(name)
-        Vector.empty
+      class Parent extends Actor:
+        override def name = "parent"
+        override def onPrepare(ctx: ActorContext): Unit = ctx.spawn(Child()): Unit
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          order.add(name)
+          Vector.empty
 
-    val parent = system.spawn(Parent())
-    val first = Thread.ofVirtual().start { () =>
-      try system.stop(parent)
-      finally returned.countDown()
-    }
-    assert(childStopping.await(2, TimeUnit.SECONDS))
-    val second = Thread.ofVirtual().start { () =>
-      try system.stop(parent)
-      finally returned.countDown()
-    }
-    Thread.sleep(50)
-    assertEquals(returned.getCount, 2L, "重复调用必须等待整棵树完成")
-    assert(order.isEmpty, "父组件不能越过仍在收尾的子组件")
-    releaseChild.countDown()
-    first.join(); second.join()
-    assertEquals(order.asScala.toVector, Vector("blocking-child", "parent"))
+      val parent = system.spawn(Parent())
+      val first = forkUnsupervised {
+        try system.stop(parent)
+        finally returned.countDown()
+      }
+      assert(childStopping.await(2, TimeUnit.SECONDS))
+      val second = forkUnsupervised {
+        try system.stop(parent)
+        finally returned.countDown()
+      }
+      Thread.sleep(50)
+      assertEquals(returned.getCount, 2L, "重复调用必须等待整棵树完成")
+      assert(order.isEmpty, "父组件不能越过仍在收尾的子组件")
+      releaseChild.countDown()
+      first.join(); second.join()
+      assertEquals(order.asScala.toVector, Vector("blocking-child", "parent"))
 
   test("慢消费者的邮箱积压、高水位与处理耗时由核心统一观测"):
-    val bus = EventBus()
-    val system = ActorSystem(bus)
-    val entered = CountDownLatch(1)
-    val release = CountDownLatch(1)
-    val processed = CountDownLatch(3)
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+      val entered = CountDownLatch(1)
+      val release = CountDownLatch(1)
+      val processed = CountDownLatch(3)
 
-    class Slow extends Actor:
-      override def name = "slow-consumer"
-      override def interests = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
-      override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-        entered.countDown()
-        release.await()
-        processed.countDown()
-        Vector.empty
+      class Slow extends Actor:
+        override def name = "slow-consumer"
+        override def interests = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
+        override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+          entered.countDown()
+          release.await()
+          processed.countDown()
+          Vector.empty
 
-    val handle = system.spawn(Slow())
-    bus.publish(Event.at(Topics.Bbo, bbo(100), t0))
-    assert(entered.await(2, TimeUnit.SECONDS))
-    bus.publish(Event.at(Topics.Bbo, bbo(101), t0))
-    bus.publish(Event.at(Topics.Bbo, bbo(102), t0))
+      val handle = system.spawn(Slow())
+      bus.publish(Event.at(Topics.Bbo, bbo(100), t0))
+      assert(entered.await(2, TimeUnit.SECONDS))
+      bus.publish(Event.at(Topics.Bbo, bbo(101), t0))
+      bus.publish(Event.at(Topics.Bbo, bbo(102), t0))
 
-    val lagging = handle.mailboxHealth
-    assertEquals(lagging.queued, 2L)
-    assert(lagging.highWaterMark >= 2L)
-    release.countDown()
-    assert(processed.await(2, TimeUnit.SECONDS))
-    val recovered = handle.mailboxHealth
-    assertEquals(recovered.queued, 0L)
-    assertEquals(recovered.processed, 3L)
-    assert(recovered.maxProcessingNanos > 0L)
-    system.stop(handle)
-    system.close()
+      val lagging = handle.mailboxHealth
+      assertEquals(lagging.queued, 2L)
+      assert(lagging.highWaterMark >= 2L)
+      release.countDown()
+      assert(processed.await(2, TimeUnit.SECONDS))
+      val recovered = handle.mailboxHealth
+      assertEquals(recovered.queued, 0L)
+      assertEquals(recovered.processed, 3L)
+      assert(recovered.maxProcessingNanos > 0L)
+      system.stop(handle)
+      system.close()
 
   test("事件处理超时后隔离组件: 保留资源且恢复线程不能发布迟到命令"):
-    val bus = EventBus()
-    val system = ActorSystem(bus, componentStopTimeoutMs = 100)
-    val entered = CountDownLatch(1)
-    val release = CountDownLatch(1)
-    val resourceReleased = CountDownLatch(1)
-    val lateCommand = CountDownLatch(1)
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus, componentStopTimeoutMs = 100)
+      val entered = CountDownLatch(1)
+      val release = CountDownLatch(1)
+      val resourceReleased = CountDownLatch(1)
+      val lateCommand = CountDownLatch(1)
 
-    class Sink extends Actor:
-      override def name = "command-sink"
-      override def commandHandlers = Set(CommandHandler.command(TestCommand, "k"))
-      override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-        event.as(TestCommand).foreach(_ => lateCommand.countDown())
-        Vector.empty
+      class Sink extends Actor:
+        override def name = "command-sink"
+        override def commandHandlers = Set(CommandHandler.command(TestCommand, "k"))
+        override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+          event.as(TestCommand).foreach(_ => lateCommand.countDown())
+          Vector.empty
 
-    class Stuck extends Actor:
-      override def name = "stuck-consumer"
-      override def interests = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
-      override def onStart(ctx: ActorContext): Unit =
-        ctx.manage("owned-resource")(_ => resourceReleased.countDown())
-      override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-        entered.countDown()
-        while release.getCount > 0 do
-          try release.await()
-          catch case _: InterruptedException => ()
-        Vector(Event.local(TestCommand, "k"))
+      class Stuck extends Actor:
+        override def name = "stuck-consumer"
+        override def interests = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
+        override def onStart(ctx: ActorContext): Unit =
+          ctx.manage("owned-resource")(_ => resourceReleased.countDown())
+        override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+          entered.countDown()
+          while release.getCount > 0 do
+            try release.await()
+            catch case _: InterruptedException => ()
+          Vector(Event.local(TestCommand, "k"))
 
-    system.spawn(Sink())
-    val handle = system.spawn(Stuck())
-    bus.publish(Event.at(Topics.Bbo, bbo(), t0))
-    assert(entered.await(2, TimeUnit.SECONDS))
-    Thread.sleep(10)
-    assert(handle.mailboxHealth.inFlightAgeMs > 0L, "单条正在处理的消息也必须暴露卡住时长")
-    val started = System.nanoTime()
-    val failure = intercept[IllegalStateException](system.stop(handle))
-    val elapsedMs = (System.nanoTime() - started) / 1_000_000L
-    assert(elapsedMs < 2_000L, s"stop 不得永久挂起, 实际 ${elapsedMs}ms")
-    assert(failure.getMessage.contains("stuck-consumer"), failure.getMessage)
-    assert(failure.getMessage.contains("thread=actor-stuck-consumer-loop"), failure.getMessage)
-    assertEquals(handle.state, ActorState.Quarantined)
-    assertEquals(resourceReleased.getCount, 1L, "线程未退出时不能释放它仍可能访问的资源")
-    assertEquals(handle.managedResources, 1)
+      system.spawn(Sink())
+      val handle = system.spawn(Stuck())
+      bus.publish(Event.at(Topics.Bbo, bbo(), t0))
+      assert(entered.await(2, TimeUnit.SECONDS))
+      Thread.sleep(10)
+      assert(handle.mailboxHealth.inFlightAgeMs > 0L, "单条正在处理的消息也必须暴露卡住时长")
+      val started = System.nanoTime()
+      val failure = intercept[IllegalStateException](system.stop(handle))
+      val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+      assert(elapsedMs < 2_000L, s"stop 不得永久挂起, 实际 ${elapsedMs}ms")
+      assert(failure.getMessage.contains("stuck-consumer"), failure.getMessage)
+      assert(failure.getMessage.contains("task=stuck-consumer-loop"), failure.getMessage)
+      assertEquals(handle.state, ActorState.Quarantined)
+      assertEquals(resourceReleased.getCount, 1L, "线程未退出时不能释放它仍可能访问的资源")
+      assertEquals(handle.managedResources, 1)
 
-    release.countDown()
-    assert(!lateCommand.await(300, TimeUnit.MILLISECONDS), "隔离组件恢复后不得发布迟到命令")
-    assertEquals(handle.state, ActorState.Quarantined)
-    assertEquals(system.alive, 2, "隔离句柄与其依赖都保留到进程退出，不能伪装成已回收")
+      release.countDown()
+      assert(!lateCommand.await(300, TimeUnit.MILLISECONDS), "隔离组件恢复后不得发布迟到命令")
+      assertEquals(handle.state, ActorState.Quarantined)
+      assertEquals(system.alive, 2, "隔离句柄与其依赖都保留到进程退出，不能伪装成已回收")
 
   test("资源释放超时后不并发执行更早登记的 cleanup"):
-    val system = ActorSystem(EventBus(), componentStopTimeoutMs = 100)
-    val releaseNewest = CountDownLatch(1)
-    val olderCleanup = CountDownLatch(1)
+    supervised:
+      val system = ActorSystem(EventBus(), componentStopTimeoutMs = 100)
+      val releaseNewest = CountDownLatch(1)
+      val olderCleanup = CountDownLatch(1)
 
-    class ResourceOwner extends Actor:
-      override def name = "stuck-cleanup"
-      override def onStart(ctx: ActorContext): Unit =
-        ctx.manage("older")(_ => olderCleanup.countDown())
-        ctx.manage("newer") { _ =>
-          while releaseNewest.getCount > 0 do
-            try releaseNewest.await()
-            catch case _: InterruptedException => ()
-        }
+      class ResourceOwner extends Actor:
+        override def name = "stuck-cleanup"
+        override def onStart(ctx: ActorContext): Unit =
+          ctx.manage("older")(_ => olderCleanup.countDown())
+          ctx.manage("newer") { _ =>
+            while releaseNewest.getCount > 0 do
+              try releaseNewest.await()
+              catch case _: InterruptedException => ()
+          }
 
-    val handle = system.spawn(ResourceOwner())
-    intercept[IllegalStateException](system.stop(handle))
-    assertEquals(handle.state, ActorState.Quarantined)
-    assertEquals(olderCleanup.getCount, 1L, "后登记资源没释放完时不能越过它释放底层资源")
-    assertEquals(handle.managedResources, 2)
-    releaseNewest.countDown()
+      val handle = system.spawn(ResourceOwner())
+      intercept[IllegalStateException](system.stop(handle))
+      assertEquals(handle.state, ActorState.Quarantined)
+      assertEquals(olderCleanup.getCount, 1L, "后登记资源没释放完时不能越过它释放底层资源")
+      assertEquals(handle.managedResources, 2)
+      releaseNewest.countDown()
 
   test("受管任务忽略中断时进入隔离, 不摘除仍有活线程的句柄"):
-    val system = ActorSystem(EventBus(), componentStopTimeoutMs = 100)
-    val taskStarted = CountDownLatch(1)
-    val releaseTask = CountDownLatch(1)
+    supervised:
+      val system = ActorSystem(EventBus(), componentStopTimeoutMs = 100)
+      val taskStarted = CountDownLatch(1)
+      val releaseTask = CountDownLatch(1)
 
-    class TaskOwner extends Actor:
-      override def name = "stuck-task"
-      override def onStart(ctx: ActorContext): Unit =
-        ctx.fork {
-          taskStarted.countDown()
-          while releaseTask.getCount > 0 do
-            try releaseTask.await()
-            catch case _: InterruptedException => ()
-        }
+      class TaskOwner extends Actor:
+        override def name = "stuck-task"
+        override def onStart(ctx: ActorContext): Unit =
+          ctx.fork {
+            taskStarted.countDown()
+            while releaseTask.getCount > 0 do
+              try releaseTask.await()
+              catch case _: InterruptedException => ()
+          }
 
-    val handle = system.spawn(TaskOwner())
-    assert(taskStarted.await(2, TimeUnit.SECONDS))
-    intercept[IllegalStateException](system.stop(handle))
-    assertEquals(handle.state, ActorState.Quarantined)
-    assertEquals(handle.managedTasks, 1)
-    assertEquals(system.alive, 1)
-    releaseTask.countDown()
+      val handle = system.spawn(TaskOwner())
+      assert(taskStarted.await(2, TimeUnit.SECONDS))
+      intercept[IllegalStateException](system.stop(handle))
+      assertEquals(handle.state, ActorState.Quarantined)
+      assertEquals(handle.managedTasks, 1)
+      assertEquals(system.alive, 1)
+      releaseTask.countDown()
 
   test("onStart 卡死会限时隔离, 不再永久占住装配与停机"):
-    val system = ActorSystem(EventBus(), componentStopTimeoutMs = 100)
-    val entered = CountDownLatch(1)
-    val releaseStart = CountDownLatch(1)
+    supervised:
+      val system = ActorSystem(EventBus(), componentStopTimeoutMs = 100)
+      val entered = CountDownLatch(1)
+      val releaseStart = CountDownLatch(1)
 
-    class StuckStart extends Actor:
-      override def name = "stuck-start"
-      override def onStart(ctx: ActorContext): Unit =
-        entered.countDown()
-        while releaseStart.getCount > 0 do
-          try releaseStart.await()
-          catch case _: InterruptedException => ()
+      class StuckStart extends Actor:
+        override def name = "stuck-start"
+        override def onStart(ctx: ActorContext): Unit =
+          entered.countDown()
+          while releaseStart.getCount > 0 do
+            try releaseStart.await()
+            catch case _: InterruptedException => ()
 
-    val started = System.nanoTime()
-    val failure = intercept[IllegalStateException](system.spawn(StuckStart()))
-    val elapsedMs = (System.nanoTime() - started) / 1_000_000L
-    assert(entered.getCount == 0)
-    assert(elapsedMs < 2_000L, s"onStart 超时必须解除装配等待, 实际 ${elapsedMs}ms")
-    assert(failure.getMessage.contains("onStart"), failure.getMessage)
-    val shutdown = intercept[IllegalStateException](system.awaitShutdown())
-    assert(shutdown.getMessage.contains("onStart"), shutdown.getMessage)
-    assertEquals(system.alive, 1, "隔离启动线程仍可能运行，句柄不能伪装成已回收")
-    releaseStart.countDown()
+      val started = System.nanoTime()
+      val failure = intercept[IllegalStateException](system.spawn(StuckStart()))
+      val elapsedMs = (System.nanoTime() - started) / 1_000_000L
+      assert(entered.getCount == 0)
+      assert(elapsedMs < 2_000L, s"onStart 超时必须解除装配等待, 实际 ${elapsedMs}ms")
+      assert(failure.getMessage.contains("onStart"), failure.getMessage)
+      val shutdown = intercept[IllegalStateException](system.awaitShutdown())
+      assert(shutdown.getMessage.contains("onStart"), shutdown.getMessage)
+      assertEquals(system.alive, 1, "隔离启动线程仍可能运行，句柄不能伪装成已回收")
+      releaseStart.countDown()
 
   test("onPrepare 只允许同步装配子组件, 异步任务不能逃出启动事务"):
     supervised:
@@ -311,31 +318,32 @@ class ActorSystemSpec extends munit.FunSuite:
       system.stop(handle)
 
   test("停机排空邮箱: 积压事件必须处理完才退出"):
-    // 早先用 select(停止信号, 事件流) 的写法在这里会丢事件 —— 两路同时就绪时选谁不确定。
-    // 丢掉的若是成交回报, 本地仓位就与交易所发散了。
     supervised:
-      val bus = EventBus()
-      val system = ActorSystem(bus)
-      val gate = CountDownLatch(1)
-      val processed = ConcurrentLinkedQueue[Double]()
+      // 早先用 select(停止信号, 事件流) 的写法在这里会丢事件 —— 两路同时就绪时选谁不确定。
+      // 丢掉的若是成交回报, 本地仓位就与交易所发散了。
+      supervised:
+        val bus = EventBus()
+        val system = ActorSystem(bus)
+        val gate = CountDownLatch(1)
+        val processed = ConcurrentLinkedQueue[Double]()
 
-      class Slow extends Actor:
-        override def name = "slow"
-        override def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
-        override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-          gate.await() // 第一条卡住, 后续几条在邮箱里积压
-          event.as(Topics.Bbo).foreach(b => processed.add(b.bidPrice.value))
-          Vector.empty
+        class Slow extends Actor:
+          override def name = "slow"
+          override def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
+          override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+            gate.await() // 第一条卡住, 后续几条在邮箱里积压
+            event.as(Topics.Bbo).foreach(b => processed.add(b.bidPrice.value))
+            Vector.empty
 
-      val h = system.spawn(Slow())
-      Vector(1.0, 2.0, 3.0).foreach(px => bus.publish(Event.at(Topics.Bbo, bbo(px), t0)))
+        val h = system.spawn(Slow())
+        Vector(1.0, 2.0, 3.0).foreach(px => bus.publish(Event.at(Topics.Bbo, bbo(px), t0)))
 
-      val stopping = ox.fork(system.stop(h))
-      Thread.sleep(50) // 让 stop 先走到关闭邮箱那一步
-      gate.countDown()
-      stopping.join()
+        val stopping = ox.fork(system.stop(h))
+        Thread.sleep(50) // 让 stop 先走到关闭邮箱那一步
+        gate.countDown()
+        stopping.join()
 
-      assertEquals(processed.asScala.toVector, Vector(1.0, 2.0, 3.0), "积压的事件一条都不能丢")
+        assertEquals(processed.asScala.toVector, Vector(1.0, 2.0, 3.0), "积压的事件一条都不能丢")
 
   test("停机后向该 actor 投递不抛 —— 退订与投递重叠是正常竞态"):
     supervised:
@@ -427,26 +435,27 @@ class ActorSystemSpec extends munit.FunSuite:
       assertEquals(handle.state, ActorState.Failed)
 
   test("受管任务在正常运行期收到非框架中断会触发全系统失败"):
-    val system = ActorSystem(EventBus())
-    val taskStarted = CountDownLatch(1)
-    val throwUnexpectedInterrupt = CountDownLatch(1)
+    supervised:
+      val system = ActorSystem(EventBus())
+      val taskStarted = CountDownLatch(1)
+      val throwUnexpectedInterrupt = CountDownLatch(1)
 
-    class UnexpectedInterrupt extends Actor:
-      override def name = "unexpected-task-interrupt"
-      override def onStart(ctx: ActorContext): Unit = ctx.fork {
-        taskStarted.countDown()
-        throwUnexpectedInterrupt.await()
-        throw InterruptedException("task interrupted outside shutdown")
-      }
+      class UnexpectedInterrupt extends Actor:
+        override def name = "unexpected-task-interrupt"
+        override def onStart(ctx: ActorContext): Unit = ctx.fork {
+          taskStarted.countDown()
+          throwUnexpectedInterrupt.await()
+          throw InterruptedException("task interrupted outside shutdown")
+        }
 
-    val handle = system.spawn(UnexpectedInterrupt())
-    assert(taskStarted.await(2, TimeUnit.SECONDS))
-    throwUnexpectedInterrupt.countDown()
-    val failure = intercept[IllegalStateException](system.awaitShutdown())
-    assert(failure.getMessage.contains("受管任务意外中断"), failure.getMessage)
-    assertEquals(failure.getCause.getMessage, "task interrupted outside shutdown")
-    assertEquals(handle.state, ActorState.Failed)
-    assertEquals(system.alive, 0)
+      val handle = system.spawn(UnexpectedInterrupt())
+      assert(taskStarted.await(2, TimeUnit.SECONDS))
+      throwUnexpectedInterrupt.countDown()
+      val failure = intercept[IllegalStateException](system.awaitShutdown())
+      assert(failure.getMessage.contains("受管任务意外中断"), failure.getMessage)
+      assertEquals(failure.getCause.getMessage, "task interrupted outside shutdown")
+      assertEquals(handle.state, ActorState.Failed)
+      assertEquals(system.alive, 0)
 
   test("受管资源: onStop 后按逆序释放, 单项失败不跳过其余且状态可见"):
     supervised:
@@ -476,29 +485,30 @@ class ActorSystemSpec extends munit.FunSuite:
       assertEquals(system.alive, 0)
 
   test("资源 release 抛 InterruptedException 仍可见且继续逆序清理"):
-    val system = ActorSystem(EventBus())
-    val trace = ConcurrentLinkedQueue[String]()
+    supervised:
+      val system = ActorSystem(EventBus())
+      val trace = ConcurrentLinkedQueue[String]()
 
-    class InterruptedRelease extends Actor:
-      override def name = "interrupted-release"
-      override def onStart(ctx: ActorContext): Unit =
-        ctx.manage("first")(_ => trace.add("release:first"))
-        ctx.manage("second") { _ =>
-          trace.add("release:second")
-          throw InterruptedException("release interrupted")
-        }
+      class InterruptedRelease extends Actor:
+        override def name = "interrupted-release"
+        override def onStart(ctx: ActorContext): Unit =
+          ctx.manage("first")(_ => trace.add("release:first"))
+          ctx.manage("second") { _ =>
+            trace.add("release:second")
+            throw InterruptedException("release interrupted")
+          }
 
-    val handle = system.spawn(InterruptedRelease())
-    val failure = intercept[IllegalStateException](system.stop(handle))
-    assert(
-      failure.getSuppressed.exists(_.getCause.isInstanceOf[InterruptedException]),
-      failure.toString,
-    )
-    assertEquals(trace.asScala.toVector, Vector("release:second", "release:first"))
-    assertEquals(handle.managedResources, 0)
-    assertEquals(handle.state, ActorState.Failed)
-    assertEquals(system.alive, 0)
-    system.close()
+      val handle = system.spawn(InterruptedRelease())
+      val failure = intercept[IllegalStateException](system.stop(handle))
+      assert(
+        failure.getSuppressed.exists(_.getCause.isInstanceOf[InterruptedException]),
+        failure.toString,
+      )
+      assertEquals(trace.asScala.toVector, Vector("release:second", "release:first"))
+      assertEquals(handle.managedResources, 0)
+      assertEquals(handle.state, ActorState.Failed)
+      assertEquals(system.alive, 0)
+      system.close()
 
   test("批量启动事务: 后一个 onStart 失败 -> 已接线组件逆序回滚, 不留订阅"):
     supervised:
@@ -522,125 +532,130 @@ class ActorSystemSpec extends munit.FunSuite:
       assertEquals(bus.subscriberCount(Topics.Bbo, btc), 0, "回滚必须撤销全部接线")
 
   test("前序 onStart 失败时, 仅 prepare 的后续组件不执行 onStop 但仍释放资源"):
-    val system = ActorSystem(EventBus())
-    val trace = ConcurrentLinkedQueue[String]()
+    supervised:
+      val system = ActorSystem(EventBus())
+      val trace = ConcurrentLinkedQueue[String]()
 
-    class FailsFirst extends Actor:
-      override def name = "fails-first"
-      override def onStart(ctx: ActorContext): Unit = sys.error("first start failed")
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        trace.add("stop:first")
-        Vector.empty
+      class FailsFirst extends Actor:
+        override def name = "fails-first"
+        override def onStart(ctx: ActorContext): Unit = sys.error("first start failed")
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          trace.add("stop:first")
+          Vector.empty
 
-    class PreparedOnly extends Actor:
-      override def name = "prepared-only"
-      override def onPrepare(ctx: ActorContext): Unit =
-        ctx.manage("prepared-resource")(_ => trace.add("release:prepared"))
-      override def onStart(ctx: ActorContext): Unit = trace.add("start:prepared")
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        trace.add("stop:prepared")
-        Vector.empty
+      class PreparedOnly extends Actor:
+        override def name = "prepared-only"
+        override def onPrepare(ctx: ActorContext): Unit =
+          ctx.manage("prepared-resource")(_ => trace.add("release:prepared"))
+        override def onStart(ctx: ActorContext): Unit = trace.add("start:prepared")
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          trace.add("stop:prepared")
+          Vector.empty
 
-    intercept[RuntimeException](system.spawnAll(Vector(FailsFirst(), PreparedOnly())))
-    assertEquals(
-      trace.asScala.toVector,
-      Vector("release:prepared", "stop:first"),
-      "未进入 onStart 的组件不能执行依赖启动态的补偿钩子",
-    )
-    assertEquals(system.alive, 0)
-    system.close()
+      intercept[RuntimeException](system.spawnAll(Vector(FailsFirst(), PreparedOnly())))
+      assertEquals(
+        trace.asScala.toVector,
+        Vector("release:prepared", "stop:first"),
+        "未进入 onStart 的组件不能执行依赖启动态的补偿钩子",
+      )
+      assertEquals(system.alive, 0)
+      system.close()
 
   test("onStart 启动的受管任务若立即失败, 启动事务不得提交 Running"):
-    val root = RuntimeException("start task failed")
-    val failureReported = CountDownLatch(1)
-    val laterStartEntered = new java.util.concurrent.atomic.AtomicBoolean(false)
-    val system = ActorSystem(EventBus(), failureSink = _ => failureReported.countDown())
+    supervised:
+      val root = RuntimeException("start task failed")
+      val failureReported = CountDownLatch(1)
+      val laterStartEntered = new java.util.concurrent.atomic.AtomicBoolean(false)
+      val system = ActorSystem(EventBus(), failureSink = _ => failureReported.countDown())
 
-    class FailsBeforeCommit extends Actor:
-      override def name = "fails-before-commit"
-      override def onStart(ctx: ActorContext): Unit =
-        ctx.fork(throw root)
-        assert(failureReported.await(2, TimeUnit.SECONDS), "测试前提: 后台失败必须发生在 onStart 返回前")
+      class FailsBeforeCommit extends Actor:
+        override def name = "fails-before-commit"
+        override def onStart(ctx: ActorContext): Unit =
+          ctx.fork(throw root)
+          assert(failureReported.await(2, TimeUnit.SECONDS), "测试前提: 后台失败必须发生在 onStart 返回前")
 
-    class MustNotStart extends Actor:
-      override def name = "must-not-start"
-      override def onStart(ctx: ActorContext): Unit = laterStartEntered.set(true)
+      class MustNotStart extends Actor:
+        override def name = "must-not-start"
+        override def onStart(ctx: ActorContext): Unit = laterStartEntered.set(true)
 
-    val startup = intercept[RuntimeException](system.spawnAll(Vector(FailsBeforeCommit(), MustNotStart())))
-    assert(startup eq root, s"启动调用必须保留原始失败对象: $startup")
-    assert(!laterStartEntered.get, "事务已知失败后不能继续扩大后续 onStart 外部副作用")
-    val shutdown = intercept[RuntimeException](system.awaitShutdown())
-    assert(shutdown eq root, s"系统停机必须保留同一个根因: $shutdown")
-    assertEquals(system.alive, 0)
+      val startup = intercept[RuntimeException](system.spawnAll(Vector(FailsBeforeCommit(), MustNotStart())))
+      assert(startup eq root, s"启动调用必须保留原始失败对象: $startup")
+      assert(!laterStartEntered.get, "事务已知失败后不能继续扩大后续 onStart 外部副作用")
+      val shutdown = intercept[RuntimeException](system.awaitShutdown())
+      assert(shutdown eq root, s"系统停机必须保留同一个根因: $shutdown")
+      assertEquals(system.alive, 0)
 
   test("onStart 抛 InterruptedException 仍完整回滚订阅与资源"):
-    val bus = EventBus()
-    val system = ActorSystem(bus)
-    val trace = ConcurrentLinkedQueue[String]()
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+      val trace = ConcurrentLinkedQueue[String]()
 
-    class InterruptedStart extends Actor:
-      override def name = "interrupted-start"
-      override def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
-      override def onStart(ctx: ActorContext): Unit =
-        ctx.manage("resource")(_ => trace.add("release"))
-        throw InterruptedException("start interrupted")
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        trace.add("stop")
-        Vector.empty
+      class InterruptedStart extends Actor:
+        override def name = "interrupted-start"
+        override def interests: Set[Interest] = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
+        override def onStart(ctx: ActorContext): Unit =
+          ctx.manage("resource")(_ => trace.add("release"))
+          throw InterruptedException("start interrupted")
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          trace.add("stop")
+          Vector.empty
 
-    val failure = intercept[IllegalStateException](system.spawn(InterruptedStart()))
-    assert(failure.getMessage.contains("onStart意外中断"), failure.getMessage)
-    assertEquals(failure.getCause.getMessage, "start interrupted")
-    assertEquals(trace.asScala.toVector, Vector("stop", "release"))
-    assertEquals(bus.subscriberCount(Topics.Bbo, btc), 0)
-    assertEquals(system.alive, 0)
-    system.close()
+      val failure = intercept[IllegalStateException](system.spawn(InterruptedStart()))
+      assert(failure.getMessage.contains("onStart意外中断"), failure.getMessage)
+      assertEquals(failure.getCause.getMessage, "start interrupted")
+      assertEquals(trace.asScala.toVector, Vector("stop", "release"))
+      assertEquals(bus.subscriberCount(Topics.Bbo, btc), 0)
+      assertEquals(system.alive, 0)
+      system.close()
 
   test("onStop 抛 InterruptedException 会传播且重复 stop 仍返回同一失败"):
-    val system = ActorSystem(EventBus())
+    supervised:
+      val system = ActorSystem(EventBus())
 
-    class InterruptedStop extends Actor:
-      override def name = "interrupted-stop"
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        throw InterruptedException("stop interrupted")
+      class InterruptedStop extends Actor:
+        override def name = "interrupted-stop"
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          throw InterruptedException("stop interrupted")
 
-    val handle = system.spawn(InterruptedStop())
-    val first = intercept[IllegalStateException](system.stop(handle))
-    val repeated = intercept[IllegalStateException](system.stop(handle))
-    assert(first.getMessage.contains("onStop意外中断"), first.getMessage)
-    assertEquals(first.getCause.getMessage, "stop interrupted")
-    assert(repeated eq first, "重复 stop 必须观察同一个终止根因")
-    assertEquals(handle.state, ActorState.Failed)
-    assertEquals(system.alive, 0)
+      val handle = system.spawn(InterruptedStop())
+      val first = intercept[IllegalStateException](system.stop(handle))
+      val repeated = intercept[IllegalStateException](system.stop(handle))
+      assert(first.getMessage.contains("onStop意外中断"), first.getMessage)
+      assertEquals(first.getCause.getMessage, "stop interrupted")
+      assert(repeated eq first, "重复 stop 必须观察同一个终止根因")
+      assertEquals(handle.state, ActorState.Failed)
+      assertEquals(system.alive, 0)
 
   test("启动事务提交前命令处理能力不可见"):
-    val bus = EventBus()
-    val system = ActorSystem(bus)
-    val entered = CountDownLatch(1)
-    val proceed = CountDownLatch(1)
-    val handles = ConcurrentLinkedQueue[ActorHandle]()
-    val failures = ConcurrentLinkedQueue[Throwable]()
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+      val entered = CountDownLatch(1)
+      val proceed = CountDownLatch(1)
+      val handles = ConcurrentLinkedQueue[ActorHandle]()
+      val failures = ConcurrentLinkedQueue[Throwable]()
 
-    class SlowProvider extends Actor:
-      override def name = "slow-provider"
-      override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
-      override def onPrepare(ctx: ActorContext): Unit =
-        entered.countDown()
-        proceed.await()
+      class SlowProvider extends Actor:
+        override def name = "slow-provider"
+        override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
+        override def onPrepare(ctx: ActorContext): Unit =
+          entered.countDown()
+          proceed.await()
 
-    val starter = Thread.ofVirtual().start { () =>
-      try handles.add(system.spawn(SlowProvider()))
-      catch case e: Throwable => failures.add(e)
-    }
-    assert(entered.await(2, TimeUnit.SECONDS))
-    val notCommitted = intercept[IllegalStateException](bus.publish(Event.local(TestCommand, "k")))
-    assert(notCommitted.getMessage.contains("实际 0 个"), notCommitted.getMessage)
-    proceed.countDown()
-    starter.join()
+      val starter = forkUnsupervised {
+        try handles.add(system.spawn(SlowProvider()))
+        catch case e: Throwable => failures.add(e)
+      }
+      assert(entered.await(2, TimeUnit.SECONDS))
+      val notCommitted = intercept[IllegalStateException](bus.publish(Event.local(TestCommand, "k")))
+      assert(notCommitted.getMessage.contains("实际 0 个"), notCommitted.getMessage)
+      proceed.countDown()
+      starter.join()
 
-    assert(failures.isEmpty, failures.asScala.mkString("; "))
-    assertEquals(bus.handlerCount(TestCommand, "k"), 1)
-    system.stop(handles.remove())
+      assert(failures.isEmpty, failures.asScala.mkString("; "))
+      assertEquals(bus.handlerCount(TestCommand, "k"), 1)
+      system.stop(handles.remove())
 
   test("prepare 禁止命令副作用, start 输出在整批提交后投递"):
     supervised:
@@ -669,58 +684,60 @@ class ActorSystemSpec extends munit.FunSuite:
       system.stop(handle)
 
   test("慢 onStart 期间外部命令明确失败, 后续启动回滚不会静默丢命令"):
-    val bus = EventBus()
-    val system = ActorSystem(bus)
-    val entered = CountDownLatch(1)
-    val proceed = CountDownLatch(1)
-    val startupFailures = ConcurrentLinkedQueue[Throwable]()
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+      val entered = CountDownLatch(1)
+      val proceed = CountDownLatch(1)
+      val startupFailures = ConcurrentLinkedQueue[Throwable]()
 
-    class SlowProvider extends Actor:
-      override def name = "slow-start-provider"
-      override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
-      override def onStart(ctx: ActorContext): Unit =
-        entered.countDown()
-        proceed.await()
+      class SlowProvider extends Actor:
+        override def name = "slow-start-provider"
+        override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
+        override def onStart(ctx: ActorContext): Unit =
+          entered.countDown()
+          proceed.await()
 
-    class FailingSibling extends Actor:
-      override def name = "later-start-failure"
-      override def onStart(ctx: ActorContext): Unit = sys.error("later start failed")
+      class FailingSibling extends Actor:
+        override def name = "later-start-failure"
+        override def onStart(ctx: ActorContext): Unit = sys.error("later start failed")
 
-    val starter = Thread.ofVirtual().start { () =>
-      try system.spawnAll(Vector(SlowProvider(), FailingSibling()))
-      catch case e: Throwable => startupFailures.add(e)
-    }
-    assert(entered.await(2, TimeUnit.SECONDS), "测试前提: 第一组件仍停在 onStart")
-    val command = intercept[IllegalStateException](bus.publish(Event.local(TestCommand, "k")))
-    assert(command.getMessage.contains("实际 0 个"), command.getMessage)
-    proceed.countDown()
-    starter.join()
+      val starter = forkUnsupervised {
+        try system.spawnAll(Vector(SlowProvider(), FailingSibling()))
+        catch case e: Throwable => startupFailures.add(e)
+      }
+      assert(entered.await(2, TimeUnit.SECONDS), "测试前提: 第一组件仍停在 onStart")
+      val command = intercept[IllegalStateException](bus.publish(Event.local(TestCommand, "k")))
+      assert(command.getMessage.contains("实际 0 个"), command.getMessage)
+      proceed.countDown()
+      starter.join()
 
-    assert(startupFailures.asScala.exists(_.getMessage.contains("later start failed")))
-    assertEquals(bus.handlerCount(TestCommand, "k"), 0)
-    assertEquals(system.alive, 0)
+      assert(startupFailures.asScala.exists(_.getMessage.contains("later start failed")))
+      assertEquals(bus.handlerCount(TestCommand, "k"), 0)
+      assertEquals(system.alive, 0)
 
   test("启动缓冲含无处理者命令时提交零副作用: 不激活能力也不泄露较早事件"):
-    val bus = EventBus()
-    val system = ActorSystem(bus)
-    val observations = bus.subscribe(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+      val observations = bus.subscribe(Set(Interest.Keyed(Topics.Bbo, Set(btc))))
 
-    class InvalidStartupOutput extends Actor:
-      override def name = "invalid-startup-output"
-      override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
-      override def onStart(ctx: ActorContext): Unit =
-        ctx.publish(Event.at(Topics.Bbo, bbo(), t0))
-        ctx.publish(Event.local(TestCommand, "missing"))
+      class InvalidStartupOutput extends Actor:
+        override def name = "invalid-startup-output"
+        override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
+        override def onStart(ctx: ActorContext): Unit =
+          ctx.publish(Event.at(Topics.Bbo, bbo(), t0))
+          ctx.publish(Event.local(TestCommand, "missing"))
 
-    val failure = intercept[IllegalStateException](system.spawn(InvalidStartupOutput()))
-    assert(failure.getMessage.contains("提交后将有 0 个"), failure.getMessage)
-    assertEquals(bus.handlerCount(TestCommand, "k"), 0, "失败提交不能短暂或永久暴露处理能力")
-    assertEquals(observations.health.queued, 0L, "命令预检失败前不能泄露更早的普通事件")
-    val external = intercept[IllegalStateException](bus.publish(Event.local(TestCommand, "k")))
-    assert(external.getMessage.contains("实际 0 个"), external.getMessage)
-    assertEquals(system.alive, 0)
-    observations.close()
-    system.close()
+      val failure = intercept[IllegalStateException](system.spawn(InvalidStartupOutput()))
+      assert(failure.getMessage.contains("提交后将有 0 个"), failure.getMessage)
+      assertEquals(bus.handlerCount(TestCommand, "k"), 0, "失败提交不能短暂或永久暴露处理能力")
+      assertEquals(observations.health.queued, 0L, "命令预检失败前不能泄露更早的普通事件")
+      val external = intercept[IllegalStateException](bus.publish(Event.local(TestCommand, "k")))
+      assert(external.getMessage.contains("实际 0 个"), external.getMessage)
+      assertEquals(system.alive, 0)
+      observations.close()
+      system.close()
 
   test("组件声明在装配入口只求值一次, 验证与接线共享同一快照"):
     supervised:
@@ -912,61 +929,63 @@ class ActorSystemSpec extends munit.FunSuite:
       system.stop(provider)
 
   test("全系统停机按硬依赖拓扑执行, 不依赖组件装配顺序"):
-    val bus = EventBus()
-    val system = ActorSystem(bus)
-    val trace = ConcurrentLinkedQueue[String]()
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+      val trace = ConcurrentLinkedQueue[String]()
 
-    class Consumer extends Actor:
-      override def name = "consumer"
-      override def requirements: Set[Requirement] = Set(Requirement.command(TestCommand, "k"))
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        trace.add(name)
-        Vector(Event.local(TestCommand, "k"))
+      class Consumer extends Actor:
+        override def name = "consumer"
+        override def requirements: Set[Requirement] = Set(Requirement.command(TestCommand, "k"))
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          trace.add(name)
+          Vector(Event.local(TestCommand, "k"))
 
-    class Provider extends Actor:
-      override def name = "provider"
-      override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
-      override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-        trace.add("handled")
-        Vector.empty
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        trace.add(name)
-        Vector.empty
+      class Provider extends Actor:
+        override def name = "provider"
+        override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
+        override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+          trace.add("handled")
+          Vector.empty
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          trace.add(name)
+          Vector.empty
 
-    system.spawnAll(Vector(Consumer(), Provider())) // 故意把 provider 后装，逆装配序会停错
-    system.stopAll()
-    assertEquals(trace.asScala.toVector, Vector("consumer", "handled", "provider"))
+      system.spawnAll(Vector(Consumer(), Provider())) // 故意把 provider 后装，逆装配序会停错
+      system.stopAll()
+      assertEquals(trace.asScala.toVector, Vector("consumer", "handled", "provider"))
 
   test("依赖方 onStop 尚未完成时, 并发停止提供者必须被拒绝"):
-    val system = ActorSystem(EventBus())
-    val enteredStop = CountDownLatch(1)
-    val finishStop = CountDownLatch(1)
-    val stopFailures = ConcurrentLinkedQueue[Throwable]()
+    supervised:
+      val system = ActorSystem(EventBus())
+      val enteredStop = CountDownLatch(1)
+      val finishStop = CountDownLatch(1)
+      val stopFailures = ConcurrentLinkedQueue[Throwable]()
 
-    class Provider extends Actor:
-      override def name = "provider"
-      override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
+      class Provider extends Actor:
+        override def name = "provider"
+        override def commandHandlers: Set[CommandHandler] = Set(CommandHandler.command(TestCommand, "k"))
 
-    class Consumer extends Actor:
-      override def name = "consumer"
-      override def requirements: Set[Requirement] = Set(Requirement.command(TestCommand, "k"))
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        enteredStop.countDown()
-        finishStop.await()
-        Vector.empty
+      class Consumer extends Actor:
+        override def name = "consumer"
+        override def requirements: Set[Requirement] = Set(Requirement.command(TestCommand, "k"))
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          enteredStop.countDown()
+          finishStop.await()
+          Vector.empty
 
-    val handles = system.spawnAll(Vector(Provider(), Consumer()))
-    val stoppingConsumer = Thread.ofVirtual().start { () =>
-      try system.stop(handles.last)
-      catch case e: Throwable => stopFailures.add(e)
-    }
-    assert(enteredStop.await(2, TimeUnit.SECONDS))
-    val rejected = intercept[IllegalStateException](system.stop(handles.head))
-    assert(rejected.getMessage.contains("丢失硬依赖"), rejected.getMessage)
-    finishStop.countDown()
-    stoppingConsumer.join()
-    assert(stopFailures.isEmpty, stopFailures.asScala.mkString("; "))
-    system.stop(handles.head)
+      val handles = system.spawnAll(Vector(Provider(), Consumer()))
+      val stoppingConsumer = forkUnsupervised {
+        try system.stop(handles.last)
+        catch case e: Throwable => stopFailures.add(e)
+      }
+      assert(enteredStop.await(2, TimeUnit.SECONDS))
+      val rejected = intercept[IllegalStateException](system.stop(handles.head))
+      assert(rejected.getMessage.contains("丢失硬依赖"), rejected.getMessage)
+      finishStop.countDown()
+      stoppingConsumer.join()
+      assert(stopFailures.isEmpty, stopFailures.asScala.mkString("; "))
+      system.stop(handles.head)
 
   test("命令观察者不是能力提供者, 同组件观察并处理也只收到一次"):
     supervised:
@@ -1053,108 +1072,113 @@ class ActorSystemSpec extends munit.FunSuite:
       assertEquals(system.alive, 0, "不能留下脱离父树的子组件")
 
   test("fail-fast: actor 处理事件时抛异常 -> 级联终止整个作用域"):
-    intercept[RuntimeException] {
-      supervised:
-        val bus = EventBus()
-        val system = ActorSystem(bus)
-        class Exploding extends Actor:
-          override def name = "boom"
-          override def interests: Set[Interest] = Set(Interest.All(Topics.Bbo))
-          override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-            sys.error("boom")
-        system.spawn(Exploding())
-        bus.publish(Event.at(Topics.Bbo, bbo(), t0))
-        system.awaitShutdown()
-    }
+    supervised:
+      intercept[RuntimeException] {
+        supervised:
+          val bus = EventBus()
+          val system = ActorSystem(bus)
+          class Exploding extends Actor:
+            override def name = "boom"
+            override def interests: Set[Interest] = Set(Interest.All(Topics.Bbo))
+            override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+              sys.error("boom")
+          system.spawn(Exploding())
+          bus.publish(Event.at(Topics.Bbo, bbo(), t0))
+          system.awaitShutdown()
+      }
 
   test("failureSink 抛 InterruptedException 不能截断核心停机"):
-    val bus = EventBus()
-    val callbackFailure = InterruptedException("failure sink interrupted")
-    val system = ActorSystem(bus, failureSink = _ => throw callbackFailure)
+    supervised:
+      val bus = EventBus()
+      val callbackFailure = InterruptedException("failure sink interrupted")
+      val system = ActorSystem(bus, failureSink = _ => throw callbackFailure)
 
-    class ExplodingWithBrokenSink extends Actor:
-      override def name = "boom-with-broken-sink"
-      override def interests: Set[Interest] = Set(Interest.All(Topics.Bbo))
-      override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-        throw RuntimeException("component failed")
+      class ExplodingWithBrokenSink extends Actor:
+        override def name = "boom-with-broken-sink"
+        override def interests: Set[Interest] = Set(Interest.All(Topics.Bbo))
+        override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+          throw RuntimeException("component failed")
 
-    val handle = system.spawn(ExplodingWithBrokenSink())
-    bus.publish(Event.at(Topics.Bbo, bbo(), t0))
-    val root = intercept[RuntimeException](system.awaitShutdown())
-    assertEquals(root.getMessage, "component failed")
-    assert(root.getSuppressed.exists(_ eq callbackFailure), root.toString)
-    assertEquals(handle.state, ActorState.Failed)
-    assertEquals(system.alive, 0)
+      val handle = system.spawn(ExplodingWithBrokenSink())
+      bus.publish(Event.at(Topics.Bbo, bbo(), t0))
+      val root = intercept[RuntimeException](system.awaitShutdown())
+      assertEquals(root.getMessage, "component failed")
+      assert(root.getSuppressed.exists(_ eq callbackFailure), root.toString)
+      assertEquals(handle.state, ActorState.Failed)
+      assertEquals(system.alive, 0)
 
   test("私有子系统失败沿所有权上报主系统, 不会静默停更"):
-    val failNow = CountDownLatch(1)
-    val system = ActorSystem(EventBus())
+    supervised:
+      val failNow = CountDownLatch(1)
+      val system = ActorSystem(EventBus())
 
-    class FailingChild extends Actor:
-      override def name = "failing-child"
-      override def onStart(ctx: ActorContext): Unit = ctx.fork {
-        failNow.await()
-        sys.error("child system failed")
-      }
+      class FailingChild extends Actor:
+        override def name = "failing-child"
+        override def onStart(ctx: ActorContext): Unit = ctx.fork {
+          failNow.await()
+          sys.error("child system failed")
+        }
 
-    class Parent extends Actor:
-      override def name = "parent-with-private-bus"
-      override def onStart(ctx: ActorContext): Unit =
-        ctx.childSystem(EventBus()).spawn(FailingChild())
+      class Parent extends Actor:
+        override def name = "parent-with-private-bus"
+        override def onStart(ctx: ActorContext): Unit =
+          ctx.childSystem(EventBus()).spawn(FailingChild())
 
-    system.spawn(Parent())
-    failNow.countDown()
-    val failure = intercept[RuntimeException](system.awaitShutdown())
-    assert(failure.getMessage.contains("child system failed"), failure.getMessage)
-    assertEquals(system.alive, 0)
+      system.spawn(Parent())
+      failNow.countDown()
+      val failure = intercept[RuntimeException](system.awaitShutdown())
+      assert(failure.getMessage.contains("child system failed"), failure.getMessage)
+      assertEquals(system.alive, 0)
 
   test("子任务失败 -> 全体有序停机, 每个 onStop 都跑到, 收尾完了才抛"):
-    // 交易所插件自管的 WS 断了这类"子任务失败", 从前直接炸穿 ox 作用域: 所有 fork 被中断、
-    // onStop 一律跳过, 于是策略的撤单指令漏发、挂单留在交易所无人跟踪。
-    // 现在它先把全体组件按逆装配序停完 (onStop 逐个跑到), 再把原异常抛出。
-    val stopped = ConcurrentLinkedQueue[String]()
-    val failNow = CountDownLatch(1)
-    class Quiet(override val name: String) extends Actor:
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        stopped.add(name); Vector.empty
-    class SelfManagedFailure extends Actor:
-      override def name = "feed"
-      override def onStart(ctx: ActorContext): Unit = ctx.fork {
-        failNow.await()
-        sys.error("私有流断了")
+    supervised:
+      // 交易所插件自管的 WS 断了这类"子任务失败", 从前直接炸穿 ox 作用域: 所有 fork 被中断、
+      // onStop 一律跳过, 于是策略的撤单指令漏发、挂单留在交易所无人跟踪。
+      // 现在它先把全体组件按逆装配序停完 (onStop 逐个跑到), 再把原异常抛出。
+      val stopped = ConcurrentLinkedQueue[String]()
+      val failNow = CountDownLatch(1)
+      class Quiet(override val name: String) extends Actor:
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          stopped.add(name); Vector.empty
+      class SelfManagedFailure extends Actor:
+        override def name = "feed"
+        override def onStart(ctx: ActorContext): Unit = ctx.fork {
+          failNow.await()
+          sys.error("私有流断了")
+        }
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          stopped.add(name); Vector.empty
+
+      intercept[RuntimeException] {
+        supervised:
+          val system = ActorSystem(EventBus())
+          system.spawn(Quiet("gateway")) // 先装
+          system.spawn(SelfManagedFailure())
+          system.spawn(Quiet("strategy")) // 后装
+          failNow.countDown()
+          system.awaitShutdown()         // 等失败把停机跑起来并最终抛出
       }
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        stopped.add(name); Vector.empty
 
-    intercept[RuntimeException] {
-      supervised:
-        val system = ActorSystem(EventBus())
-        system.spawn(Quiet("gateway")) // 先装
-        system.spawn(SelfManagedFailure())
-        system.spawn(Quiet("strategy")) // 后装
-        failNow.countDown()
-        system.awaitShutdown()         // 等失败把停机跑起来并最终抛出
-    }
-
-    assertEquals(
-      stopped.asScala.toVector,
-      Vector("strategy", "feed", "gateway"),
-      "逆装配序: 后装的先停 —— 策略的撤单指令发出去时, 柜台还活着接得住",
-    )
+      assertEquals(
+        stopped.asScala.toVector,
+        Vector("strategy", "feed", "gateway"),
+        "逆装配序: 后装的先停 —— 策略的撤单指令发出去时, 柜台还活着接得住",
+      )
 
   test("请求停机 -> 同样是逆装配序, 且不抛异常"):
-    val stopped = ConcurrentLinkedQueue[String]()
-    class Quiet(override val name: String) extends Actor:
-      override def onStop(now: Timestamp): Vector[AnyEvent] =
-        stopped.add(name); Vector.empty
     supervised:
-      val system = ActorSystem(EventBus())
-      system.spawn(Quiet("gateway"))
-      system.spawn(Quiet("strategy"))
-      system.requestShutdown("测试")
-      system.awaitShutdown() // 正常停机: 没有 failure, 不该抛
-      assertEquals(system.alive, 0, "全体已停")
-    assertEquals(stopped.asScala.toVector, Vector("strategy", "gateway"))
+      val stopped = ConcurrentLinkedQueue[String]()
+      class Quiet(override val name: String) extends Actor:
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          stopped.add(name); Vector.empty
+      supervised:
+        val system = ActorSystem(EventBus())
+        system.spawn(Quiet("gateway"))
+        system.spawn(Quiet("strategy"))
+        system.requestShutdown("测试")
+        system.awaitShutdown() // 正常停机: 没有 failure, 不该抛
+        assertEquals(system.alive, 0, "全体已停")
+      assertEquals(stopped.asScala.toVector, Vector("strategy", "gateway"))
 
   test("进入全系统停机后拒绝新装配, 不让快照之外的组件漏网"):
     supervised:
@@ -1177,3 +1201,98 @@ class ActorSystemSpec extends munit.FunSuite:
       system.spawn(Relay())
       bus.publish(Event.at(Topics.Bbo, bbo(123.0), t0))
       assertEquals(downstream.events.receive().as(Topics.Fill).map(_.price.value), Some(123.0))
+
+  test("事件循环异常退出: onStop 仍按停机拓扑跑, 子组件先于父组件"):
+    // 从前失败组件的 onStop 就在循环线程上就地跑, 于是父会话的收尾会抢在子 Executor 之前
+    // —— 停机拓扑 (子先于父) 在失败这条路上不成立, 而失败恰恰是最需要它成立的时候。
+    supervised:
+      val bus = EventBus()
+      val order = ConcurrentLinkedQueue[String]()
+      val stopped = CountDownLatch(2)
+
+      class Child extends Actor:
+        override def name = "failing.child"
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          order.add(name)
+          stopped.countDown()
+          Vector.empty
+
+      class Parent extends Actor:
+        override def name = "failing"
+        override def interests = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
+        override def onPrepare(ctx: ActorContext): Unit = ctx.spawn(Child()): Unit
+        override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
+          sys.error("onEvent 炸了")
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          order.add(name)
+          stopped.countDown()
+          Vector.empty
+
+      val system = ActorSystem(bus)
+      system.spawn(Parent()): Unit
+      bus.publish(Event.at(Topics.Bbo, bbo(), t0))
+      assert(stopped.await(5, TimeUnit.SECONDS), s"两个 onStop 都要跑到, 实际 ${order.asScala.mkString(",")}")
+      assertEquals(order.asScala.toVector, Vector("failing.child", "failing"), "子组件的收尾必须先于父组件")
+
+  test("事件循环异常退出: onStop 的**输出**必须送达下游 —— 那是策略的撤单指令"):
+    // 只断言"onStop 跑到了"是不够的: 失败组件的状态此时已是 Failed(终态), 若发布门只看状态,
+    // onStop 返回的事件会在发布时被拒 —— 撤单指令一条都发不出去, 挂单原样留在交易所。
+    supervised:
+      val bus = EventBus()
+      val delivered = ConcurrentLinkedQueue[String]()
+      val got = CountDownLatch(1)
+      val watcher = bus.subscribe(Set(Interest.All(Topics.Fill)))
+      forkUnsupervised {
+        watcher.events.foreach { ev =>
+          ev.as(Topics.Fill).foreach { f => delivered.add(f.symbol); got.countDown() }
+        }
+      }: Unit
+
+      class Failing extends Actor:
+        override def name = "failing-with-cleanup"
+        override def interests = Set(Interest.Keyed(Topics.Bbo, Set(btc)))
+        override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] = sys.error("onEvent 炸了")
+        // 形态与 Executor.onStop 一致: 收尾时产出要发往柜台的指令
+        override def onStop(now: Timestamp): Vector[AnyEvent] =
+          Vector(Event.local(Topics.Fill, Fill(AccountId.Live, ex, "BTCUSDT", Side.Long, 1.0, 1.0, now)))
+
+      val system = ActorSystem(bus)
+      system.spawn(Failing()): Unit
+      bus.publish(Event.at(Topics.Bbo, bbo(), t0))
+      assert(got.await(5, TimeUnit.SECONDS), "失败组件 onStop 产出的事件必须送达下游")
+      assertEquals(delivered.asScala.toVector, Vector("BTCUSDT"))
+      watcher.close()
+
+  test("scheduleEvent: 终态调用即抛; 未到点的延迟事件在停止时被丢弃"):
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus)
+      val seen = ConcurrentLinkedQueue[String]()
+      val ready = CountDownLatch(1)
+      val ctxRef = java.util.concurrent.atomic.AtomicReference[ActorContext](null)
+
+      class Delayer extends Actor:
+        override def name = "delayer"
+        override def onStart(ctx: ActorContext): Unit =
+          ctxRef.set(ctx)
+          ready.countDown()
+
+      val watcher = bus.subscribe(Set(Interest.All(Topics.Fill)))
+      forkUnsupervised(watcher.events.foreach(ev => ev.as(Topics.Fill).foreach(f => seen.add(f.symbol)))): Unit
+
+      val handle = system.spawn(Delayer())
+      assert(ready.await(2, TimeUnit.SECONDS))
+      val ctx = ctxRef.get
+      def fill(sym: Symbol) = Event.local(Topics.Fill, Fill(AccountId.Live, ex, sym, Side.Long, 1.0, 1.0, t0))
+
+      // 到点即发：ms<=0 与 publish 同路径
+      ctx.scheduleEvent(0, fill("NOW"))
+      // 远期的一条：停止时它还没到点 -> 被丢弃 (契约如此, 且会被 WARN 报出来)
+      ctx.scheduleEvent(60_000, fill("LATER"))
+      system.stop(handle)
+      assertEquals(seen.asScala.toVector, Vector("NOW"))
+
+      // 终态后再排期是调用方的错, 不静默丢
+      val rejected = intercept[IllegalStateException](ctx.scheduleEvent(10, fill("AFTER")))
+      assert(rejected.getMessage.contains("不能再排延迟事件"), rejected.getMessage)
+      watcher.close()

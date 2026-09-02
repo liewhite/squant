@@ -55,7 +55,11 @@ final class OkxAccountFeed(
     * 本流不知道账户是谁 —— 那是柜台盖的章 */
   @volatile private var report: AccountReport => Unit = scala.compiletime.uninitialized
 
-  override def connect(sink: AccountReport => Unit, spawn: (=> Unit) => Unit): Unit =
+  override def connect(
+      sink: AccountReport => Unit,
+      spawn: (=> Unit) => Unit,
+      sleepUnlessStopped: Long => Boolean,
+  ): Unit =
     report = sink
     metas = client.symbolMetas // 进程内只拉一次, 与柜台读的是同一份
 
@@ -63,11 +67,9 @@ final class OkxAccountFeed(
     // login 帧入队，连接建立后立即发送 (timestamp 在此刻生成；连接通常亚秒级，OKX 允许 ~30s 偏差)
     outgoing.send(WebSocketFrame.text(loginFrame()))
 
-    // Greeks REST 轮询 (独立虚拟线程，与私有 WS 并行)
+    // Greeks REST 轮询 (受管任务, 与私有 WS 并行)。协作式睡眠: 停机即退出。
     spawn {
-      while true do
-        Thread.sleep(OkxAccountFeed.GreeksPollIntervalMs)
-        pollGreeks()
+      while !sleepUnlessStopped(OkxAccountFeed.GreeksPollIntervalMs) do pollGreeks()
     }
 
   private def loginFrame(): String =
@@ -115,25 +117,35 @@ final class OkxAccountFeed(
     case "error" => throw IllegalStateException(s"OKX private WS error: code=${env.code} msg=${env.msg}")
     case other   => logger.warn(s"ignoring OKX private event '$other': $text")
 
-  /** 缺少 meta 的 symbol 无法做张->币换算，跳过 (非配置 quote 的品种) */
-  private def metaOf(symbol: Symbol): Option[SymbolMeta] = metas.get(symbol)
+  /** 张->币换算所需的合约规格。
+    *
+    * **缺了就抛**：`metas` 是装配期一次性加载的全量表 (见 `ExchangeClient.symbolMetas`)，
+    * 一个已被 `fromOkx` 认作本 quote 的 symbol 却查不到规格，只能是规格表没加载全或
+    * 新上市合约还没进表 —— 而这条仓位读数是对账的输入，静默跳过等于让对账永远"一致"。
+    *
+    * 从前同一个条件在本文件里有两种处理: 仓位路径用 for-comprehension 静默跳过、
+    * 订单路径直接抛。同一事实必须只有一个答案。 */
+  private def metaOf(symbol: Symbol): SymbolMeta =
+    metas.getOrElse(symbol, throw IllegalStateException(s"OKX 缺 $symbol 的合约规格 (装配期未加载?)"))
 
   /** 交易所报的仓位 —— 交给柜台对账, 不进总线 */
   private def publishPosition(d: PositionData): Unit =
-    for
-      sym <- fromOkx(d.instId, client.quote)
-      meta <- metaOf(sym)
-    do report(AccountReport.PositionReported(sym, meta.toCoin(Contracts(d.pos.asDouble)), nowMs))
+    // 非本 quote 的品种 (币本位等) 不属于本柜台, fromOkx 返回 None 即跳过 —— 这条有依据。
+    fromOkx(d.instId, client.quote).foreach { sym =>
+      report(AccountReport.PositionReported(sym, metaOf(sym).toCoin(Contracts(d.pos.asDouble)), nowMs))
+    }
 
   private def publishAccount(d: AccountData): Unit =
-    val ts = d.uTime.toLongOption.getOrElse(nowMs)
+    val ts = d.uTime.toLongOption.getOrElse(
+      throw IllegalStateException(s"OKX account 推送缺 uTime: 原始值='${d.uTime}'")
+    )
     report(AccountReport.EquityChanged(d.totalEq.asDouble, ts))
     // 各币种现金余额：供 StateManager 修正 greeks delta 的现货敞口
     d.details.foreach(detail => report(AccountReport.BalanceChanged(detail.ccy, detail.cashBal.asDouble, ts)))
 
   private def publishOrder(d: OrderPushData): Unit =
     val sym = fromOkx(d.instId, client.quote).getOrElse(throw IllegalStateException(s"Unknown OKX instId in order: '${d.instId}'"))
-    val meta = metaOf(sym).getOrElse(throw IllegalStateException(s"No SymbolMeta for OKX order symbol: $sym"))
+    val meta = metaOf(sym)
     val side = d.side match
       case "buy"  => Side.Long
       case "sell" => Side.Short

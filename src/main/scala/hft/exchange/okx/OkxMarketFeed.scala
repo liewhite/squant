@@ -117,7 +117,11 @@ final class OkxMarketFeed(
       exchange = Exchange.Okx,
       symbol = requireSymbol(d.instId),
       rate = d.fundingRate.asDouble,
-      nextSettleTime = d.fundingTime.toLongOption.getOrElse(0L),
+      // OKX funding-rate 频道恒带 fundingTime。填 0 会让 FundingRate.dailyRate 直接返回 0
+      // (currentTime >= 0)，资金费信号静默归零 —— 缺了就是坏报文, 抛。
+      nextSettleTime = d.fundingTime.toLongOption.getOrElse(
+        throw IllegalStateException(s"OKX funding-rate 缺 fundingTime: instId=${d.instId} 原始值='${d.fundingTime}'")
+      ),
       timestamp = ts,
     )
     publish(Event.at(Topics.FundingRate, fr, ts))

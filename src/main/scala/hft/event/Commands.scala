@@ -87,7 +87,27 @@ object Commands:
 
   /** 策略输出的信号 */
   enum OutcomeEvent:
-    /** 下单信号 (一次决策可包含多个关联订单)
+    // 构造校验：枚举的 case class 成员在 init 时跑到这里，因此不变量对全部构造点一律生效。
+    this match
+      case PlaceOrders(orders, comment) =>
+        require(orders.nonEmpty, s"PlaceOrders 不能为空: 一条没有订单的下单指令没有交易所可路由 (comment=$comment)")
+        val exchanges = orders.map(_.exchange).distinct
+        require(
+          exchanges.sizeIs == 1,
+          s"一条 PlaceOrders 的订单必须同属一个交易所, 实际 ${exchanges.mkString(",")} " +
+            s"—— 跨所决策要按交易所拆成多条 (comment=$comment)",
+        )
+      case CancelOrder(_, _, _) => ()
+
+    /** 下单信号 (一次决策可包含多个关联订单)。
+      *
+      * **不变量在构造处钉死**：非空、且全部订单同属一个交易所。它曾经只写在
+      * [[AccountOutcome]] 的注释里，靠 [[hft.strategy.StrategyContext]] 与
+      * [[hft.engine.StrategyRunner]] 记得先按交易所拆分 —— 而 [[targetExchange]] 取的是
+      * `orders.head.exchange`，混进第二个交易所的订单会被静默路由到错误的柜台，
+      * 唯一症状是那些单去了别的所。三个构造点里只要有一个漏了拆分，这条不变量就破了，
+      * 因此它必须由构造本身保证。
+      *
       * @param comment 信号意图描述，如 "spread_open | spread=0.30% | qty=10"
       */
     case PlaceOrders(orders: Vector[Order], comment: String)
@@ -102,11 +122,8 @@ object Commands:
       *
       * 不叫 `exchange`: 那会与 [[CancelOrder]] 自己的字段撞名。 */
     def targetExchange: Exchange = this match
-      case PlaceOrders(orders, _) =>
-        // 构造处已保证同所 (见 AccountOutcome 的说明)，取第一张即可
-        orders.headOption.map(_.exchange).getOrElse(
-          sys.error("PlaceOrders 不能为空: 一条没有订单的下单指令没有交易所可路由")
-        )
+      // 构造处 (init 校验) 已保证非空且同所，取第一张即可
+      case PlaceOrders(orders, _)      => orders.head.exchange
       case CancelOrder(exchange, _, _) => exchange
 
   /** 带账户与交易所归属的策略信号 —— 一次决策要发往**哪个账户在哪个交易所的柜台**执行。

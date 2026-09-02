@@ -7,7 +7,7 @@ import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.exchange.AccountReport
 import ox.supervised
 
-import java.util.concurrent.ConcurrentLinkedQueue
+import java.util.concurrent.{ConcurrentLinkedQueue, TimeUnit}
 import scala.jdk.CollectionConverters.*
 import hft.TestUnits.given
 
@@ -22,13 +22,13 @@ class TradingGatewaySpec extends munit.FunSuite:
   /** 不推送任何东西的汇报面 —— 本测试只关心执行 */
   private object SilentFeed extends AccountFeed:
     override def exchange: Exchange = Exchange.Binance
-    override def connect(sink: AccountReport => Unit, fork: (=> Unit) => Unit): Unit = ()
+    override def connect(sink: AccountReport => Unit, fork: (=> Unit) => Unit, sleepUnlessStopped: Long => Boolean): Unit = ()
 
   /** 可手动喂报告的汇报面 —— 用来驱动柜台的记账与排序 */
   private class ManualFeed extends AccountFeed:
     @volatile private var sink: AccountReport => Unit = scala.compiletime.uninitialized
     override def exchange: Exchange = Exchange.Binance
-    override def connect(s: AccountReport => Unit, fork: (=> Unit) => Unit): Unit = sink = s
+    override def connect(s: AccountReport => Unit, fork: (=> Unit) => Unit, sleepUnlessStopped: Long => Boolean): Unit = sink = s
     def emit(report: AccountReport): Unit = sink(report)
 
   /** 有求必应的桩客户端 —— 驱动汇报面路径时不该被执行面打扰 */
@@ -38,7 +38,6 @@ class TradingGatewaySpec extends munit.FunSuite:
     override def fetchAllSymbolMetas() = Right(Vector(meta))
     override def cancelOrder(symbol: Symbol, ref: OrderRef) = Right(())
     override def fetchPendingOrders(symbol: Symbol) = Right(Vector.empty)
-    override def setLeverage(symbol: Symbol, leverage: Int) = Right(())
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, Exchange.Binance, 10_000.0))
     override def fetchPositions() = Right(Vector.empty)
 
@@ -136,14 +135,26 @@ class TradingGatewaySpec extends munit.FunSuite:
       assertEquals(positionSizes(seen), Vector(0.3, 0.8), "记的是增量, 报的是新仓位")
     }
 
-  test("成交均价为零 -> 拒绝入账, 不发仓位"):
-    // 市价单的委托价是空的 (多家给 0)。柜台的账本如今只记数量, 零价不再污染均价, 但它仍是
-    // **适配层填错了价格字段**最可靠的信号 —— 同一条回报的价格还会流进成交记录与绩效统计。
-    withFeed { (feed, seen) =>
+  test("成交均价为零 -> 柜台失败并触发有序停机, 不是'记一条 error 然后继续'"):
+    // 市价单的委托价是空的 (多家给 0)，非正的**成交均价**却只能是适配层填错了字段。
+    // 从前柜台打一条 error 后继续: 明知有一笔成交却不入账并接着交易, 账本从此确定性少一笔,
+    // 策略看到旧仓位再下一单。已经确认是 bug 的输入不该有"继续"这条路。
+    val failure = java.util.concurrent.atomic.AtomicReference[Throwable](null)
+    val failed = java.util.concurrent.CountDownLatch(1)
+    supervised:
+      val bus = EventBus()
+      val feed = ManualFeed()
+      val system = ActorSystem(bus, failureSink = e => { failure.set(e); failed.countDown() })
+      system.spawn(RestTradingGateway(QuietClient(), feed, AccountId.Live, metas))
+      align(bus)
+      val seen = ConcurrentLinkedQueue[AnyEvent]()
+      val mailbox = bus.subscribe(Set(Interest.All(Topics.Position), Interest.All(Topics.Fill)))
+      ox.forkDiscard { mailbox.events.foreach(seen.add) }
+
       feed.emit(statusChanged("o1", OrderStatus.Filled, filled = 0.5, orderPrice = 0.0, avgFill = 0.0))
-      eventually(kinds(seen).toString)(kinds(seen).size == 1)
-      assertEquals(kinds(seen), Vector("orderUpdate"), "订单状态照发, 但那一笔没有入账 -> 没有仓位事件")
-    }
+      assert(failed.await(3, TimeUnit.SECONDS), "零均价必须让柜台失败, 而不是继续交易")
+      assert(failure.get.getMessage.contains("成交均价"), failure.get.getMessage)
+      assertEquals(kinds(seen), Vector.empty, "那一笔既没入账, 也不该产出仓位事件")
 
   test("记账认的是成交均价那一路 —— 委托价为空照样入账"):
     withFeed { (feed, seen) =>
@@ -294,7 +305,6 @@ class TradingGatewaySpec extends munit.FunSuite:
     override def fetchAllSymbolMetas() = fail("unexpected call")
     override def cancelOrder(symbol: Symbol, ref: OrderRef) = fail("unexpected call")
     override def fetchPendingOrders(symbol: Symbol) = fail("unexpected call")
-    override def setLeverage(symbol: Symbol, leverage: Int) = fail("unexpected call")
     // 柜台启动即周期刷净值 —— 给一个固定读数, 免得测试依赖网络
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, Exchange.Binance, 10_000.0))
     override def fetchPositions() = fail("unexpected call")
@@ -329,7 +339,7 @@ class TradingGatewaySpec extends munit.FunSuite:
       body(bus, incomes.events, system)
 
   test("dry-run (DryRunClient): 信号以 OrderUpdate(Error) 回流清理 pending"):
-    // dry-run 不是柜台里的开关, 而是换一个客户端实现 —— 它以 4xx 拒单返回,
+    // dry-run 不是柜台里的开关, 而是换一个客户端实现 —— 它以 Rejected 返回,
     // 走的正是既有的"确定性失败"通道, 所以这里的期望与真实拒单那条用例完全一致。
     runGateway(DryRunClient(StubClient(Right("ignored")))) { (bus, incomes, _) =>
       bus.publish(intentOf(orderOf(0.001)))
@@ -338,13 +348,36 @@ class TradingGatewaySpec extends munit.FunSuite:
       assert(update.status.isInstanceOf[OrderStatus.Error])
     }
 
-  test("交易所明确拒单 (4xx): OrderUpdate(Error) 回流策略"):
-    runGateway(StubClient(Left(ExchangeError.Http(400, """{"code":-2019,"msg":"Margin is insufficient."}""")))) { (bus, incomes, _) =>
+  test("交易所明确拒单 (Rejected): OrderUpdate(Error) 回流策略"):
+    // 判据是**语义**不是 HTTP 状态码: 三家表达业务拒单的形状不同 (Binance 4xx、
+    // OKX 200+sCode、Bybit 200+retCode), 各自在边界翻译成 Rejected。
+    runGateway(StubClient(Left(ExchangeError.Rejected("-2019", "Margin is insufficient.")))) { (bus, incomes, _) =>
       bus.publish(intentOf(orderOf(0.001)))
       val update = receivedError(incomes)
       assertEquals(update.clientOrderId, Some("c1"))
       assert(update.status.isInstanceOf[OrderStatus.Error])
     }
+
+  test("限频 (RateLimited): 终止, 不按拒单回流"):
+    // 按拒单回流会让策略重挂 -> 更多请求 -> 重试风暴。它意味着"订单生命周期自然限速"
+    // 这个前提已经不成立。
+    val failed = java.util.concurrent.CountDownLatch(1)
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus, failureSink = _ => failed.countDown())
+      system.spawn(RestTradingGateway(StubClient(Left(ExchangeError.RateLimited("HTTP 429"))), SilentFeed, AccountId.Live, metas))
+      bus.publish(intentOf(orderOf(0.001)))
+      assert(failed.await(2, TimeUnit.SECONDS), "限频必须触发全系统停机")
+
+  test("未归类的失败 (Other): 订单是否成立不确定 -> 终止"):
+    // OKX/Bybit 的请求级错误 (含系统错误) 落在这里: 逐单结果都没拿到, 不能当成"确定未成立"。
+    val failed = java.util.concurrent.CountDownLatch(1)
+    supervised:
+      val bus = EventBus()
+      val system = ActorSystem(bus, failureSink = _ => failed.countDown())
+      system.spawn(RestTradingGateway(StubClient(Left(ExchangeError.Other("OKX API error: code=50013"))), SilentFeed, AccountId.Live, metas))
+      bus.publish(intentOf(orderOf(0.001)))
+      assert(failed.await(2, TimeUnit.SECONDS), "结果不确定必须终止")
 
   test("精度收不下的单: 不发往交易所, 以同一种拒单回流"):
     // 客户端的 placeOrder 会 fail —— 它被触达就说明这一单不该发却发了。

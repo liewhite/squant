@@ -172,16 +172,17 @@ class SimulatedExchangeSpec extends munit.FunSuite:
       val upstream = FakeMarketFeed()
       val sim = SimulatedExchange(upstream, metas, SimConfig(exchangeToStrategyDelayMs = 10, orderToExchangeDelayMs = 10, initialBalanceUsdt = 10_000), AccountId.Live)
       // 时钟间隔调大, 避免测试期周期任务干扰
-      val engine = Engine.start(plugins = Vector(sim), clockIntervalMs = 100_000)
-      // 替身同时接下单指令、对齐指令与行情订阅指令 —— 契约校验因此通过, 策略起得来
-      engine.addStrategy(OneShotMakerStrategy(offsetRatio = 0.0001, orderSize = 0.002), AccountId.Live)
+      Engine.run(plugins = Vector(sim), clockIntervalMs = 100_000) { engine =>
+        // 替身同时接下单指令、对齐指令与行情订阅指令 —— 契约校验因此通过, 策略起得来
+        engine.addStrategy(OneShotMakerStrategy(offsetRatio = 0.0001, orderSize = 0.002), AccountId.Live)
 
-      // 初始行情 -> 策略在买一下方挂 PostOnly 买单 (~49995), resting
-      upstream.emitBbo(50000, 50001, 1)
-      // 行情下跌, 卖价越过买单价 -> 买单成交
-      eventually("策略应已挂出订单到柜台")(sim.restingCount > 0)
-      upstream.emitBbo(49980, 49984, 2)
-      eventually("买单应成交形成多头")(sim.positions.exists(_.size > Coin.Zero))
+        // 初始行情 -> 策略在买一下方挂 PostOnly 买单 (~49995), resting
+        upstream.emitBbo(50000, 50001, 1)
+        // 行情下跌, 卖价越过买单价 -> 买单成交
+        eventually("策略应已挂出订单到柜台")(sim.restingCount > 0)
+        upstream.emitBbo(49980, 49984, 2)
+        eventually("买单应成交形成多头")(sim.positions.exists(_.size > Coin.Zero))
+      }
 
   test("用户自定义的行情 topic 也被替身转发出去 —— 否则它在私有总线上静默消失"):
     // 替身若按内置行情 topic 枚举着收上游, 用户自定义的行情源就会在这里断掉:

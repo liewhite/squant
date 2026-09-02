@@ -97,12 +97,19 @@ final class BinanceMarketFeed(
   // ==================== 公共流解析 (解析失败/未知事件 -> 异常上抛终止) ====================
 
   private def onPublicText(text: String): Unit =
-    readFromString[WsEnvelope](text).e match
+    val envelope = readFromString[WsEnvelope](text)
+    envelope.e match
       case "bookTicker"      => publishBookTicker(readFromString[BookTickerMsg](text))
       case "markPriceUpdate" => publishMarkPrice(readFromString[MarkPriceMsg](text))
       case "aggTrade"        => publishTrade(readFromString[AggTradeMsg](text))
-      case ""                => () // SUBSCRIBE ack: {"result":null,"id":N}，确定可忽略
-      case other             => throw IllegalStateException(s"Unexpected public event '$other': $text")
+      // 没有事件类型 `e` 的帧是请求应答。成功是 {"result":null,"id":N}，失败是
+      // {"id":N,"error":{"code":..,"msg":..}} —— 两者都没有 `e`。从前一律当成 ack 忽略，
+      // 于是一次非法订阅被静默吞掉: 订阅没生效、行情永不到达、没有任何症状。
+      case "" =>
+        envelope.error.foreach(err =>
+          throw IllegalStateException(s"Binance 公共流请求失败: code=${err.code} msg=${err.msg} (id=${envelope.id}): $text")
+        )
+      case other => throw IllegalStateException(s"Unexpected public event '$other': $text")
 
   private def publishTrade(msg: AggTradeMsg): Unit =
     val trade = MarketTrade(Exchange.Binance, msg.s, msg.p.asPrice, Coin(msg.q.asDouble), msg.m, msg.T)

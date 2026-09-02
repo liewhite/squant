@@ -31,7 +31,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
   /** 不推送任何东西的汇报面 —— 实盘成交只能来自真实推送, 本测试不造 */
   private object SilentFeed extends AccountFeed:
     override def exchange: Exchange = ex
-    override def connect(sink: AccountReport => Unit, fork: (=> Unit) => Unit): Unit = ()
+    override def connect(sink: AccountReport => Unit, fork: (=> Unit) => Unit, sleepUnlessStopped: Long => Boolean): Unit = ()
 
   /** 记录下单的假交易所 —— 代表实盘柜台的那一端 */
   private class RecordingClient(placed: ConcurrentLinkedQueue[ExchangeOrder]) extends TradingClient:
@@ -41,7 +41,6 @@ class LiveAndShadowSpec extends munit.FunSuite:
     override def cancelOrder(symbol: Symbol, ref: OrderRef) = Right(())
     override def fetchAllSymbolMetas() = Right(Vector(meta))
     override def fetchPendingOrders(symbol: Symbol) = Right(Vector.empty)
-    override def setLeverage(symbol: Symbol, leverage: Int) = Right(())
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 10_000.0))
     override def fetchPositions() = Right(Vector.empty)
 

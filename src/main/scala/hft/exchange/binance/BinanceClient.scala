@@ -2,14 +2,13 @@ package hft.exchange.binance
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{ExchangeClient, TradingClient}
+import hft.exchange.{ExchangeClient, RestTransport, TradingClient}
 import sttp.client4.*
-import sttp.model.{Method, Uri}
+import sttp.model.Method
 
 import java.nio.charset.StandardCharsets.UTF_8
 import javax.crypto.Mac
 import javax.crypto.spec.SecretKeySpec
-import scala.concurrent.duration.*
 
 import BinanceCodec.*
 import BinanceCodec.given
@@ -17,6 +16,32 @@ import BinanceCodec.given
 final case class BinanceCredentials(apiKey: String, apiSecret: String)
 
 object BinanceClient:
+  /** 撮合引擎超时 —— **执行状态未知**。
+    *
+    * Binance 文档原文: HTTP 408 "used when a timeout has occurred while waiting for a response
+    * from the backend server"，对应业务码 `-1007 TIMEOUT`: "Send status unknown; execution
+    * status unknown."，且明确写着 "This does not always mean that the request failed in the
+    * Matching Engine."
+    *
+    * 它落在 4xx 里，但语义与"明确拒绝"**相反**：按拒单回流会清掉 pending 登记、策略随后重下
+    * 一单，而原来那一单可能真的活在交易所 —— 幽灵挂单加双倍敞口。因此必须从 Rejected 里摘出来。 */
+  private val UnknownOutcomeStatus: Int = 408
+  private val UnknownOutcomeCode: String = "-1007"
+
+  /** 写单路径的错误归类 —— **纯函数**，可直接断言。
+    *
+    * Binance 用 HTTP 4xx 表达业务拒单 (请求没过校验、订单确定未进撮合)，唯一的例外是
+    * 408/-1007 (见 [[UnknownOutcomeStatus]])。5xx 与网络错误结果同样不确定，原样保留。
+    * 限频 (429/418) 已由 [[RestTransport]] 在 HTTP 层归类。 */
+  def classifyWriteError(e: ExchangeError): ExchangeError = e match
+    case ExchangeError.Http(status, body)
+        if status == UnknownOutcomeStatus || body.contains(UnknownOutcomeCode) =>
+      // 结果不确定: 保持原类型, 让共享层走"终止"通道, 由重启后的对齐恢复
+      e
+    case ExchangeError.Http(status, body) if status >= 400 && status < 500 =>
+      ExchangeError.Rejected(status.toString, body)
+    case other => other
+
   /** 只读客户端（无凭证）：只有公共端点，私有面在**类型上**够不着。 */
   /** 返回具体类型而非 `ExchangeClient`：合约清单里有些事实是币安独有的
     * (如传统资产永续的分类，见 [[BinancePublicClient.fetchTradFiPerps]])，
@@ -47,22 +72,30 @@ class BinancePublicClient protected[binance] (
   // ==================== ExchangeClient ====================
 
   override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
-    publicGet[ExchangeInfo]("/fapi/v1/exchangeInfo", Map.empty).map { info =>
+    // exchangeInfo 是三家里最大的响应 (几百个标的), 与下单路径的时限无关
+    publicGet[ExchangeInfo]("/fapi/v1/exchangeInfo", Map.empty, RestTransport.QueryTimeout).map { info =>
       info.symbols.iterator
         .filter(s => s.status == "TRADING" && s.contractType == "PERPETUAL")
         .map { s =>
-          val tickSize = s.filters.find(_.filterType == "PRICE_FILTER").map(_.tickSize.asDouble).getOrElse(0.0)
-          val lotSize = s.filters.find(_.filterType == "LOT_SIZE")
+          // 缺 filter 即抛并带上 symbol 与字段名。
+          //
+          // 从前是 `getOrElse(0.0)` 再由 `.filter(_.isValid)` 滤掉 —— 一个报文异常的 symbol
+          // 会**从规格表里静默消失**, 直到对齐时报"没有合约规格 (装配时未加载?)"。
+          // 故障点被搬走了, 而且那句提示还是误导的。
+          def filterOf(kind: String) =
+            s.filters
+              .find(_.filterType == kind)
+              .getOrElse(throw IllegalStateException(s"Binance ${s.symbol} 的 exchangeInfo 缺 $kind filter"))
+          val lotSize = filterOf("LOT_SIZE")
           SymbolMeta(
             exchange = Exchange.Binance,
             symbol = s.symbol,
-            tickSize = tickSize,
-            sizeStep = lotSize.map(_.stepSize.asDouble).getOrElse(0.0),
-            minOrderSize = lotSize.map(_.minQty.asDouble).getOrElse(0.0),
+            tickSize = filterOf("PRICE_FILTER").tickSize.asDouble,
+            sizeStep = lotSize.stepSize.asDouble,
+            minOrderSize = lotSize.minQty.asDouble,
             contractSize = 1.0, // Binance 直接按币的数量下单
           )
         }
-        .filter(_.isValid)
         .toVector
     }
 
@@ -80,47 +113,46 @@ class BinancePublicClient protected[binance] (
     * 与 7×24 的加密永续混进同一张表，后来者就分不出哪些标的会整段没有行情。
     */
   def fetchTradFiPerps(): Either[ExchangeError, Map[String, Symbol]] =
-    publicGet[ExchangeInfo]("/fapi/v1/exchangeInfo", Map.empty).map { info =>
+    publicGet[ExchangeInfo]("/fapi/v1/exchangeInfo", Map.empty, RestTransport.QueryTimeout).map { info =>
       info.symbols.iterator
         .filter(s => s.status == "TRADING" && s.contractType == "TRADIFI_PERPETUAL" && s.baseAsset.nonEmpty)
         .map(s => s.baseAsset -> s.symbol)
         .toMap
     }
 
-  protected def publicGet[T: JsonValueCodec](path: String, params: Map[String, String]): Either[ExchangeError, T] =
-    request(Method.GET, s"$restBase$path${queryString(params)}", apiKey = None).flatMap(parse[T])
+  protected def publicGet[T: JsonValueCodec](
+      path: String,
+      params: Map[String, String],
+      timeout: scala.concurrent.duration.FiniteDuration = RestTransport.ReadTimeout,
+  ): Either[ExchangeError, T] =
+    request(Method.GET, s"$restBase$path${queryString(params)}", apiKey = None, timeout).flatMap(parse[T])
 
-  protected def request(method: Method, url: String, apiKey: Option[String]): Either[ExchangeError, String] =
-    try
-      val base = basicRequest
-        .method(method, Uri.unsafeParse(url))
-        // 显式短超时: 必须小于策略的 orderTimeoutMs，让"超时"与"请求丢失"语义对齐
-        .readTimeout(3.seconds)
-        .response(asStringAlways)
-      val response = apiKey.fold(base)(k => base.header("X-MBX-APIKEY", k)).send(backend)
-      if response.code.isSuccess then Right(response.body)
-      else Left(ExchangeError.Http(response.code.code, response.body))
-    catch
-      // 作用域取消 (可能被 sttp 包裹) 必须重抛，不能误判为网络错误
-      case e: Exception if isInterrupt(e) => throw e
-      case e: Exception                   => Left(ExchangeError.Network(s"$method $url: ${e.getMessage}"))
+  protected def request(
+      method: Method,
+      url: String,
+      apiKey: Option[String],
+      timeout: scala.concurrent.duration.FiniteDuration = RestTransport.ReadTimeout,
+  ): Either[ExchangeError, String] =
+    RestTransport.send(
+      backend,
+      method,
+      url,
+      headers = apiKey.fold(Map.empty)(k => Map("X-MBX-APIKEY" -> k)),
+      timeout = timeout,
+    )
 
-  /** 异常 cause 链中是否包含线程中断 (ox 作用域取消的信号) */
-  protected def isInterrupt(t: Throwable): Boolean =
-    Iterator.iterate(t)(_.getCause).takeWhile(_ != null).take(10).exists {
-      case _: InterruptedException | _: java.io.InterruptedIOException => true
-      case _                                                           => false
-    }
-
-  protected def parse[T: JsonValueCodec](body: String): Either[ExchangeError, T] =
-    try Right(readFromString[T](body))
-    catch case e: Exception => Left(ExchangeError.Parse(s"${e.getMessage}; body=$body"))
+  protected def parse[T: JsonValueCodec](body: String): Either[ExchangeError, T] = RestTransport.parse[T](body)
 
   protected def queryString(params: Map[String, String]): String =
     if params.isEmpty then "" else params.map((k, v) => s"$k=$v").mkString("?", "&", "")
 
-  protected def fmt(d: Double): String =
-    BigDecimal(d).underlying.stripTrailingZeros.toPlainString
+  protected def fmt(d: Double): String = RestTransport.fmt(d)
+
+  /** 把 Binance 的失败形态归一到框架语义 —— **写单路径 (下单/撤单/改杠杆) 专用**。
+    *
+    * Binance 用 HTTP 4xx 表达业务拒单：请求没通过校验，订单确定未进撮合。5xx 与网络错误则
+    * 结果不确定，原样保留 (共享层会据此终止)。限频已由 [[RestTransport]] 在 HTTP 层归类。 */
+  protected def classifyWrite(e: ExchangeError): ExchangeError = BinanceClient.classifyWriteError(e)
 
 final class BinanceClient private[binance] (
     backend: SyncBackend,
@@ -186,7 +218,10 @@ final class BinanceClient private[binance] (
       case OrderType.Market => base + ("type" -> "MARKET")
       case OrderType.Limit(price, tif) =>
         base + ("type" -> "LIMIT") + ("price" -> fmt(price.value)) + ("timeInForce" -> tifParam(tif))
-    signedRequest[NewOrderResp](Method.POST, "/fapi/v1/order", params).map(_.orderId.toString)
+    signedRequest[NewOrderResp](Method.POST, "/fapi/v1/order", params)
+      .map(_.orderId.toString)
+      .left
+      .map(classifyWrite)
 
   override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
     val idParam = ref match
@@ -197,7 +232,7 @@ final class BinanceClient private[binance] (
       // Binance -2011 Unknown order: 已成交/已撤——在交易所边界归一为类型化错误，不外泄魔法码
       case Left(ExchangeError.Http(_, body)) if body.contains("-2011") =>
         Left(ExchangeError.OrderNotFound(s"Binance -2011 unknown order: ${ref.raw}"))
-      case Left(e) => Left(e)
+      case Left(e) => Left(classifyWrite(e))
 
   override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] =
     signedRequest[List[OpenOrder]](Method.GET, "/fapi/v1/openOrders", Map("symbol" -> symbol)).map {
@@ -211,7 +246,7 @@ final class BinanceClient private[binance] (
             clientOrderId = Some(o.clientOrderId),
             exchange = Exchange.Binance,
             symbol = o.symbol,
-            side = if o.side == "BUY" then Side.Long else Side.Short,
+            side = BinanceCodec.sideFromBinance(o.side),
             status = if filled.nonZero then OrderStatus.PartiallyFilled(filled) else OrderStatus.Pending,
             price = o.price.asPrice,
             quantity = Coin(o.origQty.asDouble),
@@ -221,9 +256,14 @@ final class BinanceClient private[binance] (
         }.toVector
     }
 
-  override def setLeverage(symbol: Symbol, leverage: Int): Either[ExchangeError, Unit] =
-    signedRaw(Method.POST, "/fapi/v1/leverage", Map("symbol" -> symbol, "leverage" -> leverage.toString))
-      .map(_ => ())
+  /** 账户是否处于**单向持仓**模式 (`/fapi/v1/positionSide/dual` 的 `dualSidePosition == false`)。
+    *
+    * 持仓模式是账户级事实，因此该由装配期校验，而不是等第一条 ACCOUNT_UPDATE 推来才发现 ——
+    * "配置错误即终止"要在装配/首次使用时发生，不能跑了半天再崩。 */
+  def isOneWayPositionMode(): Either[ExchangeError, Boolean] =
+    signedRequest[PositionSideDual](Method.GET, "/fapi/v1/positionSide/dual", Map.empty)
+      .map(!_.dualSidePosition)
+
 
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] =
     signedRequest[AccountResp](Method.GET, "/fapi/v2/account", Map.empty).map { account =>

@@ -100,12 +100,15 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
       // 而在本地这两者无从分辨。判定留在这里, 要不要出声由柜台决定。
       if delta.value < -dust then Settled.Regressed(cumulative, already) else Settled.Unchanged
     else if price.value <= 0.0 then
-      // 修过一次的 bug 值得留一道守卫。柜台的账本如今只记数量, 零价不再污染均价 ——
-      // 但它仍是**适配层填错了价格字段**最可靠的信号 (市价单的委托价是空的), 而同一条
-      // 回报的价格还会流进成交记录与绩效统计。宁可拒这一笔并大声报出来。
-      Settled.Rejected(
-        s"$symbol order=$orderId 成交均价为 ${price.value}, 拒绝入账 —— " +
-          "这多半是适配层填了委托价而非成交均价"
+      // 非正的成交均价不是任何市场状态, 只能是**适配层填错了价格字段** (市价单的委托价是空的)。
+      //
+      // 从前这里返回 Settled.Rejected, 柜台打一条 error 然后继续 —— 也就是**明知有一笔成交却
+      // 不入账并接着交易**。此后账本确定性地少一笔, 策略看到旧仓位再下一单, 正是柜台花大段
+      // 文字要消灭的那个"危险侧中间状态", 只不过成因从交易所换成了我们自己。
+      // 已经确认是 bug 的输入不该有"继续"这条路: 在第一现场抛, 带上足以定位的上下文。
+      throw IllegalStateException(
+        s"$symbol order=$orderId 成交均价为 ${price.value} (非正), 拒绝入账并终止 —— " +
+          s"适配层多半填了委托价而非成交均价 (side=$side cumulative=${cumulative.value} 已记=${already.value})"
       )
     else
       settled(orderId) = settled.get(orderId) match
@@ -213,7 +216,6 @@ object PositionBook:
       * 两者在本地分辨不了, 所以这不是告警, 只是一条排查时用得上的线索。
       */
     case Regressed(cumulative: Coin, already: Coin)
-    case Rejected(reason: String)
 
   /** 比对的种类 —— 决定了不一致该怎么处理 */
   enum Kind:

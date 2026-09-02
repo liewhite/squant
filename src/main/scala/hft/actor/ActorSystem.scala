@@ -3,10 +3,10 @@ package hft.actor
 import hft.domain.nowMs
 import hft.event.{AnyEvent, CommandTopic, EventBus}
 import org.slf4j.LoggerFactory
-import ox.uninterruptible
+import ox.{OxUnsupervised, uninterruptible}
 
-import java.util.concurrent.atomic.{AtomicBoolean, AtomicReference}
-import java.util.concurrent.{CopyOnWriteArrayList, CountDownLatch, Executors, ScheduledExecutorService, ScheduledFuture, TimeUnit}
+import java.util.concurrent.atomic.{AtomicBoolean, AtomicLong, AtomicReference}
+import java.util.concurrent.{CopyOnWriteArrayList, CountDownLatch, TimeUnit}
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
@@ -43,12 +43,22 @@ import scala.util.control.NonFatal
   * 从前是直接让异常炸穿 ox 作用域，于是所有 fork 被中断、`onStop` 一律跳过 ——
   * 策略的撤单指令漏发，挂单原样留在交易所无人跟踪。**收尾要跑到，和进程要死掉，
   * 是两件不冲突的事**。
+  *
+  * ## 调用方必须在并发作用域树内
+  *
+  * 本系统起的每条线程都是构造它的那个 `unsupervised` 作用域里的一条 ox fork
+  * (见 [[ManagedTask]])，而 ox 只允许**作用域树内的线程**创建 fork。因此
+  * `spawn`/`spawnAll`/`stop`/`ActorContext.fork` 等入口只能从以下线程调用：创建作用域的那条
+  * 线程、或该作用域 (含子作用域) 里的某条 fork —— 也就是启动器自己、以及任何组件的钩子、
+  * 事件循环与受管任务。从一条与作用域无关的裸线程调用会立刻失败并说明原因，
+  * 而不是留下一条没人管的线程。
   */
 final class ActorSystem(
     private[actor] val bus: EventBus,
     private val failureSink: Throwable => Unit = _ => (),
     private val componentStopTimeoutMs: Long = ActorSystem.ComponentStopTimeoutMs,
-) extends AutoCloseable:
+)(using OxUnsupervised)
+    extends AutoCloseable:
   require(componentStopTimeoutMs > 0, "componentStopTimeoutMs 必须大于 0")
   private val logger = LoggerFactory.getLogger(classOf[ActorSystem])
   private val roots = CopyOnWriteArrayList[ActorHandle]()
@@ -69,31 +79,21 @@ final class ActorSystem(
   private val shutdownRequested = CountDownLatch(1)
   private val allStopped = CountDownLatch(1)
 
-  /** 系统自己的停机监督线程。组件从任何受管线程上报失败都不依赖调用线程属于某个外部作用域。 */
-  Thread
-    .ofVirtual()
-    .name("actor-system-shutdown")
-    .start { () =>
-      shutdownRequested.await()
-      try stopAll()
-      catch case NonFatal(e) => logger.error(s"有序停机失败: ${e.getMessage}", e)
-    }
+  /** 被停机丢弃的延迟事件计数 —— 丢弃必须说得出数量，见 [[ActorContext.scheduleEvent]]。 */
+  private val droppedDelayed = AtomicLong(0L)
 
-  MailboxMonitor.start(() => allHandles, allStopped, logger)
+  /** 延迟发布用的定时器 (单线程 + 提交序全序，见 [[DelayTimer]])。
+    * 它自己的线程死掉意味着全系统延迟事件停摆，因此失败要变成一次有序停机。 */
+  private val timer = DelayTimer("actor-delay-timer", e => reportFailure("actor-delay-timer", e))
 
-  /** 延迟发布用的定时器。
-    *
-    * **单线程是顺序保证的承重墙**：等延迟的事件按提交序 FIFO 投递，把产生它们的那个
-    * actor 的输出序原样透过延迟传出去。改成多线程会打乱等延迟事件的相对顺序 ——
-    * 对撮合回报来说那意味着"成交先于挂单确认"这类不可能的序列。
-    * daemon 线程，进程退出即回收。
-    */
-  private val scheduler: ScheduledExecutorService =
-    Executors.newSingleThreadScheduledExecutor { r =>
-      val t = Thread(r, "actor-scheduler")
-      t.setDaemon(true)
-      t
-    }
+  /** 系统自己的停机监督 fork。组件从任何受管线程上报失败，都不依赖调用线程属于某个外部作用域。 */
+  private val supervisor = ManagedTask.start("actor-system-shutdown") {
+    shutdownRequested.await()
+    try stopAll()
+    catch case NonFatal(e) => logger.error(s"有序停机失败: ${e.getMessage}", e)
+  }
+
+  private val healthMonitor = MailboxMonitor.start(() => allHandles, allStopped, logger)
 
   /** 启动期输出先留在组件本地，整棵事务树提交后才对外可见。 */
   private[actor] def publishFrom(owner: ActorHandle, event: AnyEvent): Unit =
@@ -112,10 +112,28 @@ final class ActorSystem(
     }
     if publishNow then publishWhileActive(owner, event)
 
-  /** 仅供事件循环与 onStop 发布返回值：正常排空期间允许 Stopping，隔离后立即熔断。 */
+  /** 延迟事件的发布路径：启动期仍缓冲 (提交前的输出不能对外可见)，Running/Stopping 直发。
+    *
+    * 与 [[publishFrom]] 的差别只在 Stopping：延迟事件是"已经发生的输出等在路上"，
+    * 排空阶段仍应送出；而组件在 Stopping 期间主动 `publish` 是越界，仍然抛。 */
+  private[actor] def publishDelayedFrom(owner: ActorHandle, event: AnyEvent): Unit =
+    if owner.state == ActorState.Stopping then publishWhileActive(owner, event)
+    else publishFrom(owner, event)
+
+  /** 仅供事件循环与 onStop 发布返回值：正常排空期间允许 Stopping，隔离后立即熔断。
+    *
+    * ## 收尾窗口是独立的判据，不是"有没有失败"
+    *
+    * `onStop` 的返回值必须发得出去 —— 对策略来说那是**撤单指令**。而事件循环异常退出的
+    * 组件状态已经是 `Failed`(终态)，若只按状态放行，它的 `onStop` 输出会在这里被拒，
+    * 挂单原样留在交易所无人跟踪。`onStop` 允许发布 与 终态禁止发布 是同一模块的两条契约，
+    * 冲突点就在这里；解法是把"正在收尾"作为显式事实 ([[ActorHandle.finishing]])，
+    * 而不是从状态去猜。
+    */
   private def publishOutputFrom(owner: ActorHandle, event: AnyEvent): Unit =
     owner.state match
       case ActorState.Running | ActorState.Stopping => publishWhileActive(owner, event)
+      case _ if owner.finishing.get                 => publishWhileActive(owner, event)
       case state => throw IllegalStateException(s"组件 ${owner.name} 已处于 $state, 不能发布运行输出 ${event.topic}")
 
   private def publishWhileActive(owner: ActorHandle, event: AnyEvent): Unit =
@@ -129,67 +147,61 @@ final class ActorSystem(
 
   /** 子系统使用独立消息空间，但失败必须沿生命周期所有权上报父组件。 */
   private[actor] def childSystem(owner: ActorHandle, childBus: EventBus): ActorSystem =
+    // 子系统的 fork 与本系统同属一个 ox 作用域；停机链接则走 manage (父组件释放时有序停完它)。
     val child = ActorSystem(childBus, e => taskFailed(owner, e), componentStopTimeoutMs)
-    manage(owner, child)(_.stopAll())
+    manage(owner, child)(_.close())
 
-  private[actor] def schedule(owner: ActorHandle, ms: Long)(body: => Unit): Unit =
-    if ms <= 0 then
-      owner.lifecycleLock.synchronized {
-        if !owner.state.isTerminal && owner.state != ActorState.Stopping then
-          try body
-          catch case NonFatal(e) => taskFailed(owner, e)
-      }
-    else owner.lifecycleLock.synchronized {
-      if owner.state.isTerminal || owner.state == ActorState.Stopping then return
-      val ref = AtomicReference[ScheduledFuture[?]]()
-      val registered = CountDownLatch(1)
-      val future = scheduler.schedule(
-        (() =>
+  /** 排一条归属组件的延迟事件；契约见 [[ActorContext.scheduleEvent]]。
+    *
+    * 终态即抛：那是调用方的错，静默丢弃只会把它藏起来。停止时未到点的条目由
+    * [[stopOwned]] 取消并计入 [[droppedDelayed]]。
+    */
+  private[actor] def scheduleEvent(owner: ActorHandle, ms: Long, event: AnyEvent): Unit =
+    owner.lifecycleLock.synchronized {
+      if owner.state.isTerminal then
+        throw IllegalStateException(s"组件 ${owner.name} 已处于 ${owner.state}, 不能再排延迟事件 ${event.topic}")
+      if ms <= 0 then
+        try publishDelayedFrom(owner, event)
+        catch case NonFatal(e) => taskFailed(owner, e)
+      else
+        val ref = AtomicReference[DelayTimer#Entry](null)
+        val entry = timer.schedule(ms) {
           try
-            registered.await()
             owner.lifecycleLock.synchronized {
-              if !owner.state.isTerminal && owner.state != ActorState.Stopping then
-                try body
+              if owner.state.isTerminal then droppedDelayed.incrementAndGet(): Unit
+              else
+                try publishDelayedFrom(owner, event)
                 catch case NonFatal(e) => taskFailed(owner, e)
             }
-          catch
-            case _: InterruptedException if owner.stopRequested.getCount == 0 => ()
-          finally owner.schedules.remove(ref.get): Unit
-        ): Runnable,
-        ms,
-        TimeUnit.MILLISECONDS,
-      )
-      ref.set(future)
-      owner.schedules.add(future)
-      registered.countDown()
+          // 到点即从登记表摘除。少了这一步, schedules 会随每一条延迟回报无界增长
+          // (撮合替身与影子柜台每笔成交都排一条), 而停机时"丢弃了多少条"数的就是它。
+          finally Option(ref.get).foreach(owner.schedules.remove): Unit
+        }
+        ref.set(entry)
+        owner.schedules.add(entry): Unit
     }
 
-  /** 在组件作用域内启动一条虚拟线程。组件停止时它会被 interrupt 并等待退出。 */
+  /** 在组件作用域内起一条 ox fork。组件停止时它会被取消并等待退出。 */
   private[actor] def forkManaged(owner: ActorHandle)(body: => Unit): ManagedTask = owner.lifecycleLock.synchronized {
     if owner.state.isTerminal || owner.state == ActorState.Stopping then
       throw IllegalStateException(s"组件 ${owner.name} 已处于 ${owner.state}, 不能再启动子任务")
     val taskRef = AtomicReference[ManagedTask]()
-    val thread = Thread
-      .ofVirtual()
-      .name(s"actor-${owner.name}-task")
-      .unstarted { () =>
-        try body
-        catch
-          case _: InterruptedException if owner.stopRequested.getCount == 0 => ()
-          case e: InterruptedException =>
-            Thread.currentThread().interrupt()
-            taskFailed(owner, interruptedFailure(owner, "受管任务", e))
-          case NonFatal(e) if owner.stopRequested.getCount == 0 =>
-            owner.taskCleanupFailures.add(e)
-            logger.warn(s"组件 ${owner.name} 的子任务在停机中异常退出: ${e.getMessage}", e)
-          case NonFatal(e) => taskFailed(owner, e)
-          case e: Throwable => taskFailed(owner, e)
-        finally owner.tasks.remove(taskRef.get): Unit
-      }
-    val task = ManagedTask(thread)
+    val task = ManagedTask.start(s"${owner.name}-task") {
+      try body
+      catch
+        case _: InterruptedException if owner.stopRequested.getCount == 0 => ()
+        case e: InterruptedException =>
+          Thread.currentThread().interrupt()
+          taskFailed(owner, interruptedFailure(owner, "受管任务", e))
+        case NonFatal(e) if owner.stopRequested.getCount == 0 =>
+          owner.taskCleanupFailures.add(e)
+          logger.warn(s"组件 ${owner.name} 的子任务在停机中异常退出: ${e.getMessage}", e)
+        case NonFatal(e)  => taskFailed(owner, e)
+        case e: Throwable => taskFailed(owner, e)
+      finally Option(taskRef.get).foreach(owner.tasks.remove): Unit
+    }
     taskRef.set(task)
-    owner.tasks.add(task)
-    thread.start()
+    owner.tasks.add(task): Unit
     task
   }
 
@@ -229,7 +241,8 @@ final class ActorSystem(
   private[actor] def spawnUnder(parent: Option[ActorHandle], actor: Actor): ActorHandle =
     parent.foreach { owner =>
       owner.state match
-        case ActorState.Preparing if owner.prepareThread.get eq Thread.currentThread() => ()
+        case ActorState.Preparing
+            if Option(owner.prepareTask.get).flatMap(_.runnerThread).contains(Thread.currentThread()) => ()
         case ActorState.Running => ()
         case state =>
           throw IllegalStateException(s"组件 ${owner.name} 处于 $state；只能在 onPrepare 同步创建，或在 Running 时动态创建子组件")
@@ -350,36 +363,29 @@ final class ActorSystem(
   private def prepareHook(handle: ActorHandle): Unit =
     handle.stateRef.set(ActorState.Preparing)
     val problem = AtomicReference[Throwable](null)
-    val finished = CountDownLatch(1)
-    val thread = Thread.ofVirtual().name(s"actor-${handle.name}-prepare").unstarted { () =>
+    val task = ManagedTask.start(s"${handle.name}-prepare") {
       try handle.actor.onPrepare(ActorContext(handle, this))
       catch
         case e: InterruptedException =>
           Thread.currentThread().interrupt()
           problem.set(interruptedFailure(handle, "onPrepare", e))
         case e: Throwable => problem.set(e)
-      finally
-        handle.prepareThread.set(null)
-        finished.countDown()
     }
-    handle.prepareThread.set(thread)
-    thread.start()
-    if !uninterruptible(finished.await(componentStopTimeoutMs, TimeUnit.MILLISECONDS)) then
-      handle.stopHookRun.set(true)
-      thread.interrupt()
-      val timeout = ComponentQuarantinedException(
-        s"组件 ${handle.name} 的 onPrepare 未在 ${componentStopTimeoutMs}ms 内完成: thread=${thread.getName}\n" +
-          thread.getStackTrace.mkString("    at ", "\n    at ", "")
-      )
-      quarantine(handle, timeout)
+    handle.prepareTask.set(task)
+    try
+      if !uninterruptible(task.await(componentStopTimeoutMs)) then
+        handle.stopHookRun.set(true)
+        val timeout = ComponentQuarantinedException(task.timeoutDiagnostic(s"组件 ${handle.name} 的 onPrepare", componentStopTimeoutMs))
+        task.cancel()
+        quarantine(handle, timeout)
+    finally handle.prepareTask.set(null)
     Option(problem.get).foreach(throw _)
     handle.stateRef.set(ActorState.Prepared)
 
   private def startHook(handle: ActorHandle): Unit =
     // 插件可以连接外部系统；总线输出会留在事务缓冲区，直到整批 onStart 成功。
     val problem = AtomicReference[Throwable](null)
-    val finished = CountDownLatch(1)
-    val thread = Thread.ofVirtual().name(s"actor-${handle.name}-start").unstarted { () =>
+    val task = ManagedTask.start(s"${handle.name}-start") {
       try
         handle.startEntered.set(true)
         handle.actor.onStart(ActorContext(handle, this))
@@ -388,54 +394,65 @@ final class ActorSystem(
           Thread.currentThread().interrupt()
           problem.set(interruptedFailure(handle, "onStart", e))
         case e: Throwable => problem.set(e)
-      finally
-        handle.startThread.set(null)
-        finished.countDown()
     }
-    handle.startThread.set(thread)
-    thread.start()
-    if !uninterruptible(finished.await(componentStopTimeoutMs, TimeUnit.MILLISECONDS)) then
-      handle.stopHookRun.set(true)
-      thread.interrupt()
-      val timeout = ComponentQuarantinedException(
-        s"组件 ${handle.name} 的 onStart 未在 ${componentStopTimeoutMs}ms 内完成: thread=${thread.getName}\n" +
-          thread.getStackTrace.mkString("    at ", "\n    at ", "")
-      )
-      quarantine(handle, timeout)
+    handle.startTask.set(task)
+    try
+      if !uninterruptible(task.await(componentStopTimeoutMs)) then
+        handle.stopHookRun.set(true)
+        val timeout = ComponentQuarantinedException(task.timeoutDiagnostic(s"组件 ${handle.name} 的 onStart", componentStopTimeoutMs))
+        task.cancel()
+        quarantine(handle, timeout)
+    finally handle.startTask.set(null)
     Option(problem.get).foreach(throw _)
 
+  /** 事件循环。
+    *
+    * ## 正常退出与异常退出走的是两条路
+    *
+    * **正常退出** = 邮箱已 `done` 并排空完毕，也就是 [[stopOwned]] 发出的停止信号走到了尽头：
+    * 收尾 (`onStop`) 就在这条线程上接着跑，这正是"积压事件先处理完、再收尾"的语义。
+    *
+    * **异常退出** 则不跑 `onStop`。就地跑会让失败组件的收尾抢在它的子组件与依赖方之前，
+    * 违反停机拓扑 (依赖方先于提供方、子组件先于父组件)：父会话在 `onEvent` 抛异常时，
+    * 它的 `onStop` 会跑在子 Executor 的 `onStop` 之前。收尾改由 [[stopAll]] 按拓扑调度。
+    *
+    * 异常退出时立刻**摘掉邮箱**：本组件的命令处理者随之从总线索引移除，依赖方随后发出的
+    * 命令会在发布时以"处理者基数不足"报错，而不是静默排进一个再也不会被消费的邮箱。
+    */
   private def startLoop(handle: ActorHandle): Unit =
-    val thread = Thread
-      .ofVirtual()
-      .name(s"actor-${handle.name}-loop")
-      .unstarted { () =>
-        var problem: Throwable = null
-        try
-          handle.runGate.await()
-          if handle.loopCommitted.get then
-            handle.mailbox.consumeEach(ev => publishAllFrom(handle, handle.actor.onEvent(ev, nowMs)))
-        catch
-          case e: InterruptedException =>
-            Thread.currentThread().interrupt()
-            problem = interruptedFailure(handle, "事件循环", e)
-          case e: Throwable => problem = e
+    val task = ManagedTask.start(s"${handle.name}-loop") {
+      var problem: Throwable = null
+      try
+        handle.runGate.await()
+        if handle.loopCommitted.get then
+          handle.mailbox.consumeEach(ev => publishAllFrom(handle, handle.actor.onEvent(ev, nowMs)))
+      catch
+        case e: InterruptedException =>
+          Thread.currentThread().interrupt()
+          problem = interruptedFailure(handle, "事件循环", e)
+        case e: Throwable => problem = e
+
+      if problem == null then
         if handle.startEntered.get then
           try finish(handle)
           catch
-            case cleanup: InterruptedException =>
-              val wrapped = interruptedFailure(handle, "onStop", cleanup)
-              if problem == null then problem = wrapped else problem.addSuppressed(wrapped)
-            case cleanup: Throwable =>
-              if problem == null then problem = cleanup else problem.addSuppressed(cleanup)
-        if problem != null then handle.terminalFailure.compareAndSet(null, problem)
-        if handle.terminalFailure.get != null && handle.state != ActorState.Quarantined then
-          handle.stateRef.set(ActorState.Failed)
-        handle.finished.countDown()
-        Option(handle.terminalFailure.get).foreach { e => if failure.get == null then reportFailure(handle.name, e) }
-      }
-    handle.loopThread.set(thread)
-    thread.start()
+            case cleanup: InterruptedException => problem = interruptedFailure(handle, "onStop", cleanup)
+            case cleanup: Throwable            => problem = cleanup
+      else detachMailbox(handle)
+
+      if problem != null then handle.terminalFailure.compareAndSet(null, problem)
+      if handle.terminalFailure.get != null && handle.state != ActorState.Quarantined then
+        handle.stateRef.set(ActorState.Failed)
+      handle.finished.countDown()
+      Option(handle.terminalFailure.get).foreach { e => if failure.get == null then reportFailure(handle.name, e) }
+    }
+    handle.loopTask.set(task)
     handle.loopStarted.set(true)
+
+  /** 从总线索引摘除组件邮箱 (含它的命令处理者)。幂等。 */
+  private def detachMailbox(handle: ActorHandle): Unit =
+    handle.mailbox.close()
+    handle.mailboxClosed.set(true)
 
   /** 锁住整批组件的发布边界，原子激活处理者并冲刷启动输出，然后统一切到 Running。 */
   private def commitTransaction(handles: Vector[ActorHandle]): Unit =
@@ -470,8 +487,11 @@ final class ActorSystem(
   /** 跑一次 onStop 并发出它产出的事件。**只跑一次** —— 正常退出与异常退出共用这一处。 */
   private def finish(handle: ActorHandle): Unit =
     if handle.stopHookRun.compareAndSet(false, true) then
-      // 钩子独占事件循环线程；只有超时看门狗会 interrupt，届时异常必须可见而非递归等待。
-      publishAllFrom(handle, handle.actor.onStop(nowMs))
+      // 收尾窗口：期间允许发布，即便组件已因失败落到终态 (见 publishOutputFrom)。
+      handle.finishing.set(true)
+      // 钩子独占一条线程；只有超时看门狗会 interrupt，届时异常必须可见而非递归等待。
+      try publishAllFrom(handle, handle.actor.onStop(nowMs))
+      finally handle.finishing.set(false)
 
   /** 停一个 actor：先停完它的整棵子树，再停它自己。返回时它的 [[Actor.onStop]] 已跑完。
     *
@@ -528,8 +548,11 @@ final class ActorSystem(
       try ComponentGraph.stopOrder(handles, allHandles) -> Vector.empty[Throwable]
       catch
         case NonFatal(e) =>
-          // 环本身意味着不存在满足全部契约的顺序，但仍必须摘掉邮箱、任务和资源。
-          // 逆装配序对子节点天然先于父节点，并给异常图一个稳定的 best-effort 回收顺序。
+          // 有依据的一条分支, 不是"万一"式兜底: 环确实会被装配校验拒绝, 但那次拒绝发生在
+          // **接线之后** (spawnBatch 先 wire 再跑 stopOrder), 于是回滚这一批时图里真的有环。
+          // 环意味着不存在同时满足所有权与依赖契约的顺序, 但邮箱、任务和资源仍必须摘掉；
+          // 逆装配序让子节点天然先于父节点, 给这种图一个稳定的 best-effort 回收顺序。
+          // 环本身作为失败向上传播 (planningFailures)，不会被这条分支吞掉。
           handles.toVector.sortBy(assemblyRank).reverse -> Vector(e)
     val failures = scala.collection.mutable.ArrayBuffer.from(planningFailures)
     val iterator = order.iterator
@@ -547,10 +570,9 @@ final class ActorSystem(
 
   /** 不做依赖校验的实际停止；显式 stop 已在入口校验，全系统停机则必须无条件尽力收完。 */
   private def stopInternal(handle: ActorHandle): Unit =
-    if handle.state == ActorState.Quarantined then
-      throw Option(handle.terminalFailure.get).getOrElse(
-        ComponentQuarantinedException(s"组件 ${handle.name} 已隔离")
-      )
+    // Quarantined 只由 quarantine() 设置, 它先 getAndSet 终态原因再改状态 —— 读到这个状态
+    // 就一定有原因可抛, 无需再造一个占位异常。
+    if handle.state == ActorState.Quarantined then throw handle.terminalFailure.get
     if !handle.stopStarted.compareAndSet(false, true) then
       uninterruptible(handle.stopped.await())
       Option(handle.terminalFailure.get).foreach(throw _)
@@ -564,22 +586,29 @@ final class ActorSystem(
     handle.lifecycleLock.synchronized {
       if !handle.state.isTerminal then handle.stateRef.set(ActorState.Stopping)
       handle.stopRequested.countDown()
-      handle.schedules.forEach(_.cancel(false))
+      // 未到点的延迟事件已无处可发 (组件即刻被摘除)。丢弃是契约的一部分, 但必须说得出**准确**
+      // 数量: cancel() 只在真的拦下一条尚未执行的条目时返回 true, 已经到点跑掉的不算。
+      var abandoned = 0
+      handle.schedules.forEach(entry => if entry.cancel() then abandoned += 1)
       handle.schedules.clear()
+      if abandoned > 0 then
+        logger.warn(s"组件 ${handle.name} 停止时丢弃了 $abandoned 条尚未到点的延迟事件 (见 ActorContext.scheduleEvent 契约)")
+        droppedDelayed.addAndGet(abandoned.toLong): Unit
       handle.tasks.forEach(_.cancel())
       handle.pendingPublications.clear()
       // 先退订，再关闭邮箱；已缓冲事件仍由事件循环排空。
-      handle.mailbox.close()
-      handle.mailboxClosed.set(true)
+      detachMailbox(handle)
       handle.mailbox.done()
       handle.runGate.countDown()
     }
-    if !handle.loopStarted.get then startRollbackFinish(handle)
+    // 事件循环从未起来 (启动回滚)：没有线程会去数 finished，直接放行由下面的收尾钩子接手。
+    if !handle.loopStarted.get then handle.finished.countDown()
     if !handle.finished.await(componentStopTimeoutMs, TimeUnit.MILLISECONDS) then
       val timeout = componentTimeout(handle)
       handle.stopHookRun.set(true)
-      Option(handle.loopThread.get).foreach(_.interrupt())
+      Option(handle.loopTask.get).foreach(_.cancel())
       quarantine(handle, timeout)
+    cleanupFailures ++= runFinishHook(handle)
     cleanupFailures ++= runCleanups(handle)
     cleanupFailures ++= stopTasks(handle)
     removeHandle(handle)
@@ -600,32 +629,38 @@ final class ActorSystem(
     logger.info(s"actor stopped: ${handle.name} state=${handle.state}")
     if result != null then throw result
 
-  /** 启动回滚时还没有事件循环，由独立线程执行 onStop，避免插件钩子卡死调用者。 */
-  private def startRollbackFinish(handle: ActorHandle): Unit =
-    val thread = Thread.ofVirtual().name(s"actor-${handle.name}-rollback-stop").unstarted { () =>
-      var problem: Throwable = null
-      if handle.startEntered.get then
-        try finish(handle)
-        catch
-          case e: InterruptedException => problem = interruptedFailure(handle, "onStop", e)
-          case e: Throwable            => problem = e
-      if problem != null then handle.terminalFailure.compareAndSet(null, problem)
-      if handle.terminalFailure.get != null && handle.state != ActorState.Quarantined then
-        handle.stateRef.set(ActorState.Failed)
-      handle.finished.countDown()
+  /** 按停机拓扑跑组件的 `onStop`——**当事件循环没有跑过它的时候**。
+    *
+    * 两种情形会走到这里：启动回滚 (循环还没起来) 与事件循环异常退出 (见 [[startLoop]])。
+    * 正常排空退出的组件已在循环线程上收尾完毕，[[finish]] 的 `stopHookRun` 保证只跑一次。
+    *
+    * 钩子跑在独立 fork 上并有界等待：插件的 `onStop` 卡死不能把调用者一起拖住。 */
+  private def runFinishHook(handle: ActorHandle): Vector[Throwable] =
+    if handle.stopHookRun.get || !handle.startEntered.get then return Vector.empty
+    val problem = AtomicReference[Throwable](null)
+    val task = ManagedTask.start(s"${handle.name}-stop") {
+      try finish(handle)
+      catch
+        case e: InterruptedException =>
+          Thread.currentThread().interrupt()
+          problem.set(interruptedFailure(handle, "onStop", e))
+        case e: Throwable => problem.set(e)
     }
-    handle.loopThread.set(thread)
-    thread.start()
+    if !task.await(componentStopTimeoutMs) then
+      val timeout = ComponentQuarantinedException(task.timeoutDiagnostic(s"组件 ${handle.name} 的 onStop", componentStopTimeoutMs))
+      task.cancel()
+      quarantine(handle, timeout)
+    Option(problem.get).toVector
 
   private def componentTimeout(handle: ActorHandle): ComponentQuarantinedException =
     val health = handle.mailboxHealth
-    val thread = handle.loopThread.get
-    val stack = Option(thread).fold("<线程未启动>")(_.getStackTrace.mkString("\n    at "))
+    val task = Option(handle.loopTask.get)
+    val stack = task.flatMap(_.runnerThread).fold("<线程未启动>")(_.getStackTrace.mkString("\n    at "))
     ComponentQuarantinedException(
       s"组件 ${handle.name} 未在 ${componentStopTimeoutMs}ms 内停止: state=${handle.state} " +
         s"queued=${health.queued} oldestMs=${health.oldestEventAgeMs} inFlightMs=${health.inFlightAgeMs} " +
         s"processed=${health.processed} " +
-        s"thread=${Option(thread).fold("<none>")(_.getName)}\n    at $stack"
+        s"task=${task.fold("<none>")(_.diagnosticLabel)}\n    at $stack"
     )
 
   private def quarantine(handle: ActorHandle, cause: ComponentQuarantinedException): Nothing =
@@ -666,22 +701,19 @@ final class ActorSystem(
     while iterator.hasNext do
       val cleanup = iterator.next()
       val failure = AtomicReference[Throwable](null)
-      val finished = CountDownLatch(1)
-      val thread = Thread.ofVirtual().name(s"actor-${handle.name}-resource-cleanup").start { () =>
+      val task = ManagedTask.start(s"${handle.name}-resource-cleanup") {
         try cleanup()
         catch
           case e: InterruptedException =>
             Thread.currentThread().interrupt()
             failure.set(interruptedFailure(handle, "资源释放", e))
           case e: Throwable => failure.set(e)
-        finally finished.countDown()
       }
-      if !finished.await(componentStopTimeoutMs, TimeUnit.MILLISECONDS) then
-        thread.interrupt()
+      if !task.await(componentStopTimeoutMs) then
         val timeout = ComponentQuarantinedException(
-          s"组件 ${handle.name} 的资源释放未在 ${componentStopTimeoutMs}ms 内完成: thread=${thread.getName}\n" +
-            thread.getStackTrace.mkString("    at ", "\n    at ", "")
+          task.timeoutDiagnostic(s"组件 ${handle.name} 的资源释放", componentStopTimeoutMs)
         )
+        task.cancel()
         quarantine(handle, timeout)
       else
         handle.cleanups.remove(cleanup): Unit
@@ -745,12 +777,21 @@ final class ActorSystem(
         val aggregate = IllegalStateException(s"有序停机期间 ${failures.size} 个组件收尾失败")
         failures.foreach(aggregate.addSuppressed)
         stopFailure.set(aggregate)
-      scheduler.shutdownNow()
+      // 关定时器时可能还剩下条目 (例如组件在 Stopping 排空期间排入的), 一并计数。
+      val leftover = timer.close()
+      if leftover > 0 then droppedDelayed.addAndGet(leftover.toLong): Unit
       allStopped.countDown()
+      val dropped = droppedDelayed.get
+      if dropped > 0 then logger.warn(s"有序停机共丢弃 $dropped 条尚未到点的延迟事件")
       logger.warn("有序停机完成")
     Option(stopFailure.get).foreach(throw _)
   }
 
+  /** 有序停机 = 关闭系统。
+    *
+    * 线程回收由 ox 作用域负责 (本系统起的每条 fork 都在构造它的 `unsupervised` 块里)，
+    * 但**必须先 close 再离开作用域**：作用域退出会中断并 join 全部 fork，那时再跑 `onStop`
+    * 就晚了 —— 撤单指令要在总线与柜台都还活着时发出。见 [[hft.engine.Engine.run]]。 */
   override def close(): Unit = stopAll()
 
   /** 阻塞到有人请求停机, 停完全部组件, 然后**核心自己退出**。
@@ -762,6 +803,8 @@ final class ActorSystem(
     * 只是收尾先跑到了**。调用方的 `awaitShutdown` 因此以原始异常退出。
     */
   def awaitShutdown(): Unit =
+    // 唯一不经 ox 的线程: JVM 的 addShutdownHook 只接受 java.lang.Thread, 且它跑在
+    // JVM 关闭流程里、不属于任何并发作用域。它不做业务, 只把停机请求转进来并等停机跑完。
     val hook = Thread(
       () =>
         requestShutdown("收到中断信号")
@@ -784,6 +827,12 @@ final class ActorSystem(
       // JVM 已在关闭流程里时 remove 会抛 —— 那正是 hook 自己触发的这一次, 忽略即可
       try Runtime.getRuntime.removeShutdownHook(hook).discardValue
       catch case _: IllegalStateException => ()
+
+  /** 是否有组件被隔离 —— 即"有一条框架无法停止的线程仍在运行"。
+    *
+    * 它不是一个可恢复状态：线程还在，任何"替换成功"都是假的。装配层据此把进程终结，
+    * 见 [[hft.engine.Engine.run]]。 */
+  def isQuarantined: Boolean = quarantined.get
 
   /** 当前存活的顶层 actor 及其子孙数，供观测与测试 */
   def alive: Int =

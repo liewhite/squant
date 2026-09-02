@@ -113,7 +113,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
   private class ManualFeed extends AccountFeed:
     @volatile private var sink: AccountReport => Unit = scala.compiletime.uninitialized
     override def exchange: Exchange = ex
-    override def connect(s: AccountReport => Unit, fork: (=> Unit) => Unit): Unit = sink = s
+    override def connect(s: AccountReport => Unit, fork: (=> Unit) => Unit, sleepUnlessStopped: Long => Boolean): Unit = sink = s
     def emit(report: AccountReport): Unit = sink(report)
 
   private class AcceptingClient extends TradingClient:
@@ -122,7 +122,6 @@ class PositionOwnershipSpec extends munit.FunSuite:
     override def fetchAllSymbolMetas() = Right(Vector(metas(sym)))
     override def cancelOrder(symbol: Symbol, ref: OrderRef) = Right(())
     override def fetchPendingOrders(symbol: Symbol) = Right(Vector.empty)
-    override def setLeverage(symbol: Symbol, leverage: Int) = Right(())
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 10_000.0))
     override def fetchPositions() = Right(Vector.empty)
 

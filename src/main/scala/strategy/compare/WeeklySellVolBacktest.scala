@@ -15,11 +15,9 @@ import sttp.client4.DefaultSyncBackend
 
 import java.nio.file.{Files, Path}
 import java.time.{LocalDate, ZoneOffset}
-import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import scala.collection.mutable.ArrayBuffer
-import scala.concurrent.duration.Duration
-import scala.concurrent.{Await, ExecutionContext, Future}
+import ox.{parLimit, supervised}
 
 /** **卖方 short-vol** 周度滚动回测 (镜像买方实验, 收 theta / 赚波动均值回复)。
   *
@@ -178,12 +176,15 @@ private def envChoice[A](name: String, default: String, choices: Map[String, A])
     finally backend.close()
 
   val parallelism = sys.env.get("EDGE_PAR").map(_.toInt).getOrElse(math.min(Runtime.getRuntime.availableProcessors, 6))
-  val pool = Executors.newFixedThreadPool(parallelism)
-  given ec: ExecutionContext = ExecutionContext.fromExecutor(pool)
   val t0 = System.nanoTime()
-  try
+  // ox 的结构化并发替代线程池: parLimit 按并行度跑, 任一任务抛出即中断其余并把异常抛出来。
+  // 从前是 Executors + Future + Await.result(Duration.Inf): 池要靠 finally 记得 shutdown,
+  // 而 Await 无限等 —— 一个卡住的 tranche 会让整个回测无声地挂在那里。
+  supervised {
     // 周 RV (并行预扫)：tranche i 用 RV(i-1)/RV(i-2)
-    val rvByWeek = Await.result(Future.sequence(weeks.zipWithIndex.map { case ((s, e), i) => Future(i -> prepass(s, e)) }), Duration.Inf).toMap
+    val rvByWeek = parLimit(parallelism)(
+      weeks.zipWithIndex.map { case ((s, e), i) => () => i -> prepass(s, e) }
+    ).toMap
     // tranche i: 起于第 i 周, 跨 tenorWeeks 周; 需 i>=2 (RV(i-2)) 且 i+tenorWeeks-1 <= 末周
     val trancheIdx = (2 to (weeks.size - tenorWeeks)).take(maxTranches)
     // iv=rv: 卖出 IV = 期权存续期实际 RV (完美预知, 不可交易) -> 用 windowRvRms 作可观测 IV 喂 planObservedIv
@@ -197,24 +198,19 @@ private def envChoice[A](name: String, default: String, choices: Map[String, A])
       WeekPlan(i, start, end, rvByWeek(i), p.iv, p.ivPrev, p.mult, -baseStraddles * p.mult) // 负=做空
     }
     val done = AtomicInteger(0)
-    val recs = Await.result(
-      Future.sequence(plans.map { p =>
-        Future {
-          val r = runTranche(p.start, p.end, p.iv, p.straddles)
-          val k = done.incrementAndGet()
-          println(f"  [$k%2d/${plans.size}] ${p.start}->${p.end} iv=${p.iv}%.3f 卖${-p.straddles}%.0f份 总=${r.total}%+9.1f (${pct(r.total, r.premium)}%+6.2f%%) fills=${r.fills}")
-          WeekRec(p, r)
-        }
-      }),
-      Duration.Inf,
-    ).sortBy(_.plan.idx)
+    val recs = parLimit(parallelism)(plans.map { p => () =>
+      val r = runTranche(p.start, p.end, p.iv, p.straddles)
+      val k = done.incrementAndGet()
+      println(f"  [$k%2d/${plans.size}] ${p.start}->${p.end} iv=${p.iv}%.3f 卖${-p.straddles}%.0f份 总=${r.total}%+9.1f (${pct(r.total, r.premium)}%+6.2f%%) fills=${r.fills}")
+      WeekRec(p, r)
+    }).toVector.sortBy(_.plan.idx)
 
     writeWeekly(weeklyCsv, recs)
     writeFills(fillsCsv, recs)
     writeSellCurve(curveCsv, recs)
     summarizeSell(recs)
     println(f"\ntranche=$weeklyCsv  曲线=$curveCsv  成交=$fillsCsv   用时 ${(System.nanoTime() - t0) / 1e9}%.1fs (并行度 $parallelism)")
-  finally pool.shutdown()
+  }
 
 /** 按到期日排序的累计已实现净值 (每 tranche 一点；tranche 周步进、到期亦有序) */
 private def writeSellCurve(path: String, recs: Seq[WeekRec]): Unit =

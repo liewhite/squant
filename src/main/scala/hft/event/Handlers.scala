@@ -63,4 +63,8 @@ object Handlers:
     def run(event: AnyEvent, ctx: C, now: Timestamp): Vector[AnyEvent] =
       // 判据用 Interest.accepts，与总线索引同源 —— 回测直接 dispatch 时同样要过滤 key
       if !interest.accepts(event) then Vector.empty
-      else event.as(topic).map(p => f(p, ctx, now)).getOrElse(Vector.empty)
+      else
+        // accepts 通过即 `event.topic eq topic`, 因此 as 必为 Some。给它配一个 getOrElse
+        // 反而向读者声称"载荷可能取不出、取不出就当没这条事件", 那是本文件开头明确否掉的写法。
+        val payload = event.as(topic).getOrElse(throw IllegalStateException(s"Interest 接受了 $event 却取不出 $topic 的载荷"))
+        f(payload, ctx, now)

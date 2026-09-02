@@ -52,9 +52,12 @@ private[actor] object ComponentGraph:
 
     plannedCounts.foreach { case ((capability, key), added) =>
       val total = availableCount(capability, key) + added
-      if capability.cardinality == Cardinality.ExactlyOne && total != 1 then
+      // 判据只有一处: Cardinality.accepts。手写 `== ExactlyOne && total != 1` 会在新增基数
+      // 类型时静默漏掉它 (AtLeastOne 下 total>=1 恒真, 恰好等价 —— 但那只是巧合)。
+      if !capability.cardinality.accepts(total) then
         throw IllegalStateException(
-          s"能力 $capability@$key 要求恰好一个提供者, 已有提供者或本批重复提供, 装配后将有 $total 个"
+          s"能力 $capability@$key 要求${capability.cardinality.explain}提供者, " +
+            s"已有提供者或本批重复提供, 装配后将有 $total 个"
         )
     }
 

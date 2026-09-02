@@ -30,7 +30,6 @@ class PositionBookSpec extends munit.FunSuite:
       case PositionBook.Settled.Recorded(delta, _) => Some(delta.value)
       case PositionBook.Settled.Unchanged          => None
       case PositionBook.Settled.Regressed(_, _)    => None // 同样不入账; 单独一条用例盯着它
-      case PositionBook.Settled.Rejected(reason)   => fail(s"unexpected rejection: $reason")
 
   // ==================== 记账 ====================
 
@@ -64,14 +63,15 @@ class PositionBookSpec extends munit.FunSuite:
       "尾巴量级的回退只是浮点噪声, 不是倒退")
     assertEqualsDouble(b.positionOf(btc).size.value, 0.8, 1e-12, "两者都不入账")
 
-  test("成交均价为零 -> 拒绝入账"):
-    // 拿委托价 (市价单为空) 记账会把持仓均价记成 0, 平仓时算出巨额假亏损而毫无报错
+  test("成交均价为零 -> 在第一现场抛错, 不是'记一条 error 然后继续'"):
+    // 非正均价只能是适配层填错了字段 (市价单的委托价是空的)。从前它返回 Settled.Rejected,
+    // 柜台打一条 error 后继续 —— 明知有一笔成交却不入账并接着交易, 账本从此确定性少一笔。
     val b = book()
     b.align(Set(btc), Vector.empty, Vector.empty, now = 0L)
-    b.settle("o1", btc, Side.Long, Price(0.0), Coin(0.5), 0L) match
-      case PositionBook.Settled.Rejected(reason) => assert(reason.contains("成交均价"), reason)
-      case other                                 => fail(s"应拒绝: $other")
-    assertEqualsDouble(b.positionOf(btc).size.value, 0.0, 1e-12)
+    val e = intercept[IllegalStateException](b.settle("o1", btc, Side.Long, Price(0.0), Coin(0.5), 0L))
+    assert(e.getMessage.contains("成交均价"), e.getMessage)
+    assert(e.getMessage.contains("o1"), "错误必须带上足以定位的上下文")
+    assertEqualsDouble(b.positionOf(btc).size.value, 0.0, 1e-12, "抛出前不能已经改了账本")
 
   test("容差以下的增量视作零 —— 浮点尾巴不产生幻影成交"):
     val b = book(dust = 0.0005) // 半个最小变动单位
@@ -117,14 +117,6 @@ class PositionBookSpec extends munit.FunSuite:
     assertEqualsDouble(b.positionOf(btc).size.value, 0.7, 1e-12, "账本认快照")
     assertEqualsDouble(settledDelta(b, "o1", btc, 0.9).getOrElse(fail("这笔增量该记进去")), 0.2, 1e-12,
       "进度也认快照, 增量按新基线算")
-
-  test("拒绝入账不推进记账进度 —— 下一条带真价格的回报要记全额"):
-    // 价格填错时若把进度推到 0.5, 这笔成交就再也没有机会入账了。
-    val b = book()
-    b.align(Set(btc), Vector.empty, Vector.empty, now = 0L)
-    b.settle("o1", btc, Side.Long, Price(0.0), Coin(0.5), 0L)
-    assertEquals(settledDelta(b, "o1", btc, 0.5), Some(0.5), "进度没被那次拒绝推走")
-    assertEqualsDouble(b.positionOf(btc).size.value, 0.5, 1e-12)
 
   test("对齐之前什么标的都不管 —— 那时既不知道管什么, 账本也没初值"):
     val b = book()

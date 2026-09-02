@@ -104,8 +104,17 @@ trait AccountFeed:
     *
     * @param sink  把解析出的每一条变动交给柜台。**在连接线程上调用**，柜台负责串行化
     * @param fork  在柜台插件的作用域内起一条常驻线程 (抛出的异常级联终止引擎)
+    * @param sleepUnlessStopped
+    *   协作式睡眠：返回 true 表示停机已请求，循环应立即退出。**心跳、轮询一类的常驻循环
+    *   必须用它，不要用裸 `Thread.sleep`** —— 后者只能靠中断打断，于是每次停机都多一次
+    *   "能不能按时退出"的不确定，超时就会让整个系统进入 Quarantined。
+    *   与 [[hft.actor.ActorContext.sleepUnlessStopped]] 是同一个能力，只是经由柜台转交。
     */
-  def connect(sink: AccountReport => Unit, fork: (=> Unit) => Unit): Unit
+  def connect(
+      sink: AccountReport => Unit,
+      fork: (=> Unit) => Unit,
+      sleepUnlessStopped: Long => Boolean,
+  ): Unit
 
 /** 汇报面送进柜台邮箱的一跳 —— **不发到总线**，由 [[hft.actor.ActorContext.tell]] 直投。
   *

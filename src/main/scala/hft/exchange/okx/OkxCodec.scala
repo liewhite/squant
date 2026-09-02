@@ -41,13 +41,20 @@ private[okx] object OkxCodec:
       case Array(base, _) => Some(base)
       case _              => None
 
-  /** OKX 订单状态映射。未知状态归为 Rejected，由上层决定是否致命 */
+  /** OKX 订单状态映射。按文档的**完整**枚举，只有文档之外的值才抛。
+    *
+    * 依据 OKX v5 文档: 终态是 `filled` / `canceled` / `mmp_canceled` (做市商保护撤单),
+    * 未终结是 `live` / `partially_filled`。
+    *
+    * 归成 `OrderStatus.Rejected` 会让一张还活着的单被本地宣告死亡 (终态触发 markTerminal、
+    * 清掉 pending 登记), 所以未知值必须抛而不是归成终态；而**文档里有的**状态必须映射到位,
+    * 否则同样是启动对齐时见到一张 mmp_canceled 的历史单就崩。 */
   def mapOrderState(state: String, filled: Coin): OrderStatus = state match
-    case "live"             => OrderStatus.Pending
-    case "partially_filled" => OrderStatus.PartiallyFilled(filled)
-    case "filled"           => OrderStatus.Filled
-    case "canceled" | "cancelled" => OrderStatus.Cancelled
-    case other              => OrderStatus.Rejected(s"Unknown OKX state: $other")
+    case "live"                                   => OrderStatus.Pending
+    case "partially_filled"                       => OrderStatus.PartiallyFilled(filled)
+    case "filled"                                 => OrderStatus.Filled
+    case "canceled" | "cancelled" | "mmp_canceled" => OrderStatus.Cancelled
+    case other => throw IllegalStateException(s"文档之外的 OKX 订单状态: '$other' (filled=${filled.value})")
 
   // ==================== WebSocket: 通用包络 ====================
 
@@ -178,6 +185,8 @@ private[okx] object OkxCodec:
       px: String = "0",
       sz: String = "0",
       accFillSz: String = "0",
+      /** 交易所侧的最后更新时刻 (ms)。用它而不是本地钟：柜台把它当 exchangeTs 用作延迟基准。 */
+      uTime: String = "",
   )
   final case class PendingResp(code: String = "", msg: String = "", data: List[PendingData] = Nil)
 

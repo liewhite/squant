@@ -49,7 +49,11 @@ final class RestTradingGateway(
   /** 汇报面解析出的每一条都排进本柜台的邮箱 (不经总线)，由 actor 线程按序消费 ——
     * 于是"柜台是回报的唯一发布者"成立，账本也只有一个写者。 */
   override protected def connect(): Unit =
-    feed.connect(report => tell(Event.local(GatewayInboxes, GatewayInbox(report))), body => fork(body))
+    feed.connect(
+      report => tell(Event.local(GatewayInboxes, GatewayInbox(report))),
+      body => fork(body),
+      ms => sleepUnlessStopped(ms),
+    )
 
   override protected def onOther(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
     event.as(Topics.Clock).foreach { _ =>
@@ -135,7 +139,6 @@ final class RestTradingGateway(
             "不入账。多半是乱序后到的旧推送; 若持续出现, 查适配层是否读错了累计量字段"
         )
         Vector.empty
-      case PositionBook.Settled.Rejected(reason) => logger.error(s"!!! $target $reason"); Vector.empty
 
   private def report(alarm: PositionBook.Alarm): Unit = alarm match
     case PositionBook.Alarm.Disagreement(symbol, verdict) =>
@@ -166,7 +169,17 @@ final class RestTradingGateway(
   /** 每个 REST 调用 fork 独立虚拟线程，互不阻塞，也不阻塞柜台的事件循环。
     *
     * "不真下单"不是这里的开关，而是换一个客户端实现 ([[DryRunClient]]) ——
-    * 它以 4xx 拒单形态返回，正好落在下面第一条通道上，本类因此一个分支都不需要。
+    * 它以 [[ExchangeError.Rejected]] 返回，正好落在拒单通道上，本类因此一个分支都不需要。
+    *
+    * ## 分类看语义，不看数字
+    *
+    * 三条通道对应三种语义：**明确拒绝**(订单确定未成立) -> 回流策略；**限频**(前提被打破)
+    * -> 终止；**其余**(结果不确定) -> 终止。判据是 [[ExchangeError]] 的类型，不是 HTTP 状态码。
+    *
+    * 从前这里按 `Http(4xx)` 判"明确拒绝"，而那只是 **Binance** 表达业务拒单的形状：
+    * OKX 拒单是 HTTP 200 + `data[0].sCode != "0"`、Bybit 是 HTTP 200 + `retCode != 0`，
+    * 两家都落进了最后一条"结果不确定"通道。于是 OKX/Bybit 上一次「保证金不足」等于**进程崩溃**，
+    * 而且策略侧的 pending 登记也不会被清理。归一到语义之后，各交易所在自己的边界翻译数字。
     */
   override protected def placeAligned(order: Order, now: Timestamp): Unit =
     fork {
@@ -174,16 +187,16 @@ final class RestTradingGateway(
         case Right(orderId) =>
           // 订单确认 (Pending/Filled) 以私有流推送为准，这里只记录
           logger.info(s"下单已受理: $exchange ${order.symbol} orderId=$orderId clientOrderId=${order.clientOrderId}")
-        case Left(e @ ExchangeError.Http(status, _)) if status == 429 || status == 418 =>
+        case Left(e: ExchangeError.RateLimited) =>
           // 限频/封禁: 说明"订单生命周期自然限速"的假设已被打破，
           // 按拒单回流会形成"拒单->重挂->更多请求"的重试风暴，必须终止
           throw IllegalStateException(s"被交易所限频, 终止: $exchange ${order.symbol} ${e.message}")
-        case Left(e @ ExchangeError.Http(status, _)) if status >= 400 && status < 500 =>
+        case Left(e: ExchangeError.Rejected) =>
           // 交易所明确拒绝，订单确定未成立 -> 回流策略 (与精度拒绝同一条路径)
           logger.warn(s"下单被拒: $exchange ${order.symbol} ${e.message}")
           reject(order, e.message, now)
         case Left(e) =>
-          // 网络/超时/5xx: 订单是否成立不确定，本地状态无法保证正确
+          // 网络/超时/5xx/系统错误: 订单是否成立不确定，本地状态无法保证正确
           throw IllegalStateException(s"下单结果不确定, 终止: $exchange ${order.symbol} ${e.message}")
     }
 
@@ -227,13 +240,18 @@ final class RestTradingGateway(
     val after = fetchOrders(symbols)
     if filledByOrder(before) == filledByOrder(after) then (positions, after)
     else if attempt >= RestTradingGateway.SnapshotAttempts then
-      // 一直有成交进来说明这个账户正忙。快照本身仍然可用 (只是可能差一笔),
-      // 而对账会在几个节拍内发现并报出来 —— 比无限重试卡住启动强。
-      logger.warn(
+      // 拿不到一致快照就**不启动**。
+      //
+      // fetchPositions 的契约原文是"拉不到就返回 Left 让启动失败 —— 账户状态没对上就开始交易,
+      // 比不启动危险得多"。从前这里 warn 一句然后放行, 理由是"交给三方对账兜底" —— 而对账只
+      // 告警不修复, 那一笔会永久漏记, 之后每一次仓位判断都带着这个偏差。同一个模块的两处
+      // 契约不能一处说"没对上就别启动"、另一处说"差一笔也先跑起来"。
+      //
+      // 抛出让外层拉起重试: 重启后账户很可能已经静下来, 那才是一致快照该来的时候。
+      throw IllegalStateException(
         s"$target 连取 $attempt 次仍未拿到互相一致的仓位/挂单快照 (期间一直有成交), " +
-          "本次对齐可能差一笔, 交给三方对账兜底"
+          "对齐无法保证账本正确, 拒绝启动 —— 账户静下来后重试, 或先撤掉本柜台标的的全部挂单"
       )
-      (positions, after)
     else
       logger.info(s"$target 取快照期间有成交进来, 重取 (第 ${attempt + 1} 次)")
       consistentSnapshot(symbols, attempt + 1)

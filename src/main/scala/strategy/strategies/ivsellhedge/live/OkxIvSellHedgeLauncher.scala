@@ -88,40 +88,41 @@ import sttp.client4.DefaultSyncBackend
     val opt = OkxOptionsClient(backend, Some(credentials), quote = conf.quote, optionCcy = Some(t.ccy), simulated = conf.simulated)
     // 柜台在前、行情在后: 柜台既接下单指令也推回报 (消费者), 行情源是纯生产者。
     val gateway = RestTradingGateway.load(perp, OkxAccountFeed(perp, backend), AccountId.Live)
-    val engine = Engine.start(plugins = Vector(gateway, OkxMarketFeed(perp, backend)))
+    Engine.run(plugins = Vector(gateway, OkxMarketFeed(perp, backend))) { engine =>
 
-    // 预热的取数通道。策略按**自己序列**的粒度与长度来要 (它才知道指标窗口多长),
-    // 这里只负责把毫秒换回 OKX 的粒度串 —— 粒度串是配置里的事实, 毫秒由它派生。
-    // 什么时候预热、失败了怎么办, 都在 DeltaHedgeStrategy.prepare 里, 不再是本启动器的记性。
-    val barLabel = Map(t.macdBarMs -> t.macdBar, t.fastBarMs -> t.fastBar)
-    def klineHistory(barMs: Long, bars: Int): Either[String, Seq[(Double, Double, Double)]] =
-      barLabel
-        .get(barMs)
-        .toRight(s"配置里没有 ${barMs}ms 对应的 OKX K 线粒度串 (只有 ${t.macdBar} 与 ${t.fastBar})")
-        .flatMap(bar => opt.linearKlines(t.symbol, bar, bars))
+      // 预热的取数通道。策略按**自己序列**的粒度与长度来要 (它才知道指标窗口多长),
+      // 这里只负责把毫秒换回 OKX 的粒度串 —— 粒度串是配置里的事实, 毫秒由它派生。
+      // 什么时候预热、失败了怎么办, 都在 DeltaHedgeStrategy.prepare 里, 不再是本启动器的记性。
+      val barLabel = Map(t.macdBarMs -> t.macdBar, t.fastBarMs -> t.fastBar)
+      def klineHistory(barMs: Long, bars: Int): Either[String, Seq[(Double, Double, Double)]] =
+        barLabel
+          .get(barMs)
+          .toRight(s"配置里没有 ${barMs}ms 对应的 OKX K 线粒度串 (只有 ${t.macdBar} 与 ${t.fastBar})")
+          .flatMap(bar => opt.linearKlines(t.symbol, bar, bars))
 
-    val hedge = DeltaHedgeStrategy(
-      Exchange.Okx, t.symbol, t.ccy,
-      band = t.deltaBand,
-      fastBarMs = t.fastBarMs,
-      erPeriodBars = t.erPeriod,
-      rvBars = t.rvBars,
-      sigmaSource = t.sigma,
-      macdBarMs = t.macdBarMs,
-      macdFastPeriod = t.macdFast,
-      macdSlowPeriod = t.macdSlow,
-      macdSignal = t.macdSignal,
-      quotes = t.quotePolicy,
-      cancelConfirmMs = t.cancelConfirmMs,
-      minHedgeQty = Coin(t.minHedgeQty),
-      maxHedgeQty = Coin(t.maxHedgeQty),
-      maxExposureStaleMs = t.exposureStaleMs,
-      history = klineHistory,
-    )
-    // addStrategy 会在策略开跑之前调用 hedge.prepare() 把两条序列喂热 (阻塞, 见 Strategy.prepare)
-    engine.addStrategy(hedge, AccountId.Live) // 先订阅总线
-    engine.install(OptionSellerActor(opt, Exchange.Okx, sellerCfg)) // 再开始发敞口读数
+      val hedge = DeltaHedgeStrategy(
+        Exchange.Okx, t.symbol, t.ccy,
+        band = t.deltaBand,
+        fastBarMs = t.fastBarMs,
+        erPeriodBars = t.erPeriod,
+        rvBars = t.rvBars,
+        sigmaSource = t.sigma,
+        macdBarMs = t.macdBarMs,
+        macdFastPeriod = t.macdFast,
+        macdSlowPeriod = t.macdSlow,
+        macdSignal = t.macdSignal,
+        quotes = t.quotePolicy,
+        cancelConfirmMs = t.cancelConfirmMs,
+        minHedgeQty = Coin(t.minHedgeQty),
+        maxHedgeQty = Coin(t.maxHedgeQty),
+        maxExposureStaleMs = t.exposureStaleMs,
+        history = klineHistory,
+      )
+      // addStrategy 会在策略开跑之前调用 hedge.prepare() 把两条序列喂热 (阻塞, 见 Strategy.prepare)
+      engine.addStrategy(hedge, AccountId.Live) // 先订阅总线
+      engine.install(OptionSellerActor(opt, Exchange.Okx, sellerCfg)) // 再开始发敞口读数
 
-    logger.warn("运行中 (期权腿旁路 REST, 对冲腿走框架通道). Ctrl+C 退出")
-    // 阻塞到停机: 中断信号或组件失败都会唤醒它, 停完全部组件 (onStop 逐个跑到) 核心最后退出
-    engine.awaitShutdown()
+      logger.warn("运行中 (期权腿旁路 REST, 对冲腿走框架通道). Ctrl+C 退出")
+      // 阻塞到停机: 中断信号或组件失败都会唤醒它, 停完全部组件 (onStop 逐个跑到) 核心最后退出
+      engine.awaitShutdown()
+    }

@@ -204,6 +204,9 @@ abstract class TradingGateway extends Actor:
   /** 在本插件的作用域内 fork 一条线程 (常驻私有流循环, 或一次性的 REST 调用) */
   protected final def fork(body: => Unit): Unit = ctx.fork(body)
 
+  /** 协作式睡眠 —— 停机请求会立即唤醒并返回 true。转交给汇报面实现使用，见 [[AccountFeed.connect]]。 */
+  protected final def sleepUnlessStopped(ms: Long): Boolean = ctx.sleepUnlessStopped(ms)
+
   /** 把连接、订阅或嵌套系统登记到本插件作用域 */
   protected final def manage[A](resource: A)(release: A => Unit): A = ctx.manage(resource)(release)
 

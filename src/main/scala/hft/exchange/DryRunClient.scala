@@ -33,13 +33,15 @@ final class DryRunClient(delegate: TradingClient) extends TradingClient:
 
   // ==================== 写入：拒绝 ====================
 
-  /** 以 4xx 拒单形态返回 —— 让它走既有的"确定性失败"通道，而不是新造一条 dry-run 专用路径。 */
+  /** 以**明确拒绝**形态返回 —— 让它走既有的"确定性失败"通道，而不是新造一条 dry-run 专用路径。
+    *
+    * 这也正是 dry-run 的事实：订单确定没有成立。 */
   override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
     logger.warn(
       s"[DRY-RUN] 未下单: ${order.exchange} ${order.symbol} ${order.side} ${order.orderType} " +
         s"qty=${order.quantity.value} reduceOnly=${order.reduceOnly} clientOrderId=${order.clientOrderId}"
     )
-    Left(ExchangeError.Http(400, "dry-run: order not placed"))
+    Left(ExchangeError.Rejected("dry-run", "order not placed"))
 
   /** dry-run 下没有真实挂单可撤，回 `OrderNotFound` —— 这既是事实，也正好落在
     * [[TradingGateway]] 既有的容忍分支上（撤一张已不存在的单非致命）。 */
@@ -47,12 +49,3 @@ final class DryRunClient(delegate: TradingClient) extends TradingClient:
     logger.warn(s"[DRY-RUN] 未撤单: $exchange $symbol ${ref.raw}")
     Left(ExchangeError.OrderNotFound("dry-run: no live order to cancel"))
 
-  /** 杠杆是账户配置，dry-run 不改它。
-    *
-    * 这里返回成功而不是拒绝，是**有意的**：杠杆设置通常在启动路径上，拒绝会让接线验证在
-    * 第一步就中断，而验证接线正是 dry-run 存在的理由。代价是这一步"看起来成功了其实没做"，
-    * 所以必须打日志说清楚 —— 不打日志才是不能接受的那种。
-    */
-  override def setLeverage(symbol: Symbol, leverage: Int): Either[ExchangeError, Unit] =
-    logger.warn(s"[DRY-RUN] 未设置杠杆 (账户配置保持不变): $exchange $symbol -> ${leverage}x")
-    Right(())

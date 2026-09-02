@@ -21,23 +21,42 @@ private[bybit] object BybitCodec:
   def fromBybit(symbol: String): Option[Symbol] =
     if symbol.nonEmpty then Some(symbol) else None
 
-  /** Bybit 订单状态映射。cum 为累计成交量 (币本位)。未知状态归为 Rejected，由上层决定是否致命。
-    * PartiallyFilledCanceled/Deactivated 为终态撤单 (部分成交后撤 / 条件单失效)。
+  /** Bybit 订单状态映射。cum 为累计成交量 (币本位)。
+    *
+    * ## 按文档的**完整**枚举，不是按已实现的子集
+    *
+    * 依据 Bybit v5 `docs/v5/enum` 的 orderStatus 全表：
+    *   - 未终结: `New`、`PartiallyFilled`、`Untriggered` ("Conditional orders are created")
+    *   - 终结:   `Filled`、`Cancelled`、`PartiallyFilledCanceled`、`Deactivated`、`Rejected`、
+    *             `Triggered` ("instantaneous state for conditional orders from Untriggered to New")
+    *
+    * `Untriggered`/`Triggered` 是**条件单**的状态。本框架自己只下普通限价/市价单，所以它们只会
+    * 出现在**别人的**单上 —— 手工挂的止损、交易所生成的 TP/SL，而私有 order 频道推的是整个
+    * 账户的订单，`/v5/order/realtime` 在启动对齐时也会返回它们。把它们当"未知状态"抛出，
+    * 结果是账户里只要存在一张条件单，进程立刻死、甚至启动即崩。
+    *
+    * `Triggered` 虽被文档归在 closed 一栏，但它的含义是"条件单刚变成 New"，不是订单结束，
+    * 因此映射为 [[OrderStatus.Pending]] 而不是终态 —— 映射成终态会让本地宣告一张刚活过来的单死亡。
+    *
+    * 只有**文档之外**的值才抛：那时确实是协议变了。
     */
   def mapOrderStatus(status: String, cum: Coin): OrderStatus = status match
-    case "New"                                          => OrderStatus.Pending
-    case "PartiallyFilled"                              => OrderStatus.PartiallyFilled(cum)
-    case "Filled"                                       => OrderStatus.Filled
+    case "New"              => OrderStatus.Pending
+    case "PartiallyFilled"  => OrderStatus.PartiallyFilled(cum)
+    case "Filled"           => OrderStatus.Filled
+    // 条件单: 已创建但未触发 / 刚触发变成 New —— 都还活着
+    case "Untriggered" | "Triggered"                             => OrderStatus.Pending
     case "Cancelled" | "PartiallyFilledCanceled" | "Deactivated" => OrderStatus.Cancelled
-    case "Rejected"                                     => OrderStatus.Rejected("Bybit rejected")
-    case other                                          => OrderStatus.Rejected(s"Unknown Bybit status: $other")
+    case "Rejected"                                              => OrderStatus.Rejected("Bybit rejected")
+    case other => throw IllegalStateException(s"文档之外的 Bybit 订单状态: '$other' (cum=${cum.value})")
 
   /** 统一方向 -> Bybit 下单方向 */
   def sideToParam(side: Side): String = side match
     case Side.Long  => "Buy"
     case Side.Short => "Sell"
 
-  /** Bybit 方向 -> 统一方向。非 Buy/Sell (如空仓的空串) 由调用方自行处理，此处仅用于已知有向语境 */
+  /** Bybit 方向 -> 统一方向。**只用于已知有向的语境** (成交、订单回报)；
+    * 空仓的无方向形态由持仓路径自己穷举 (见 BybitClient.fetchPositions)。 */
   def sideFromBybit(side: String): Side = side match
     case "Buy"  => Side.Long
     case "Sell" => Side.Short
@@ -101,6 +120,9 @@ private[bybit] object BybitCodec:
       qty: String = "0",
       cumExecQty: String = "0", // 累计成交 (币本位)
       avgPrice: String = "0",   // 累计成交均价；未成交时为空。**记账用它, 不能用 price** (市价单 price 为空)
+      /** 交易所侧的更新时刻 (ms)。docs/v5/websocket/private/order: "Order updated timestamp (ms)"。
+        * 用它而不是本地钟 —— 柜台把它当 exchangeTs 用作延迟基准, 本地钟会让延迟恒为零。 */
+      updatedTime: String = "",
   )
 
   final case class ExecutionData(
@@ -148,6 +170,8 @@ private[bybit] object BybitCodec:
       price: String = "0",
       qty: String = "0",
       cumExecQty: String = "0",
+      /** 交易所侧的最后更新时刻 (ms)。用它而不是本地钟：本地钟会让延迟统计恒为零。 */
+      updatedTime: String = "",
   )
   final case class OpenOrdersResult(list: List[OpenOrderData] = Nil, nextPageCursor: String = "")
   final case class OpenOrdersResp(retCode: Int = -1, retMsg: String = "", result: OpenOrdersResult = OpenOrdersResult())

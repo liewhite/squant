@@ -32,7 +32,14 @@ class OkxCodecSpec extends munit.FunSuite:
     assertEquals(mapOrderState("filled", Coin(10.0)), OrderStatus.Filled)
     assertEquals(mapOrderState("canceled", Coin(0.0)), OrderStatus.Cancelled)
     assertEquals(mapOrderState("cancelled", Coin(0.0)), OrderStatus.Cancelled)
-    assert(mapOrderState("whatever", Coin(0.0)).isInstanceOf[OrderStatus.Rejected])
+
+  test("mmp_canceled 是文档内的终态撤单 (做市商保护), 不是未知状态"):
+    // 启动对齐会拉到历史单, 把文档里有的状态当"未知"抛出等于见到它就崩
+    assertEquals(mapOrderState("mmp_canceled", Coin(0.0)), OrderStatus.Cancelled)
+
+  test("文档之外的订单状态 -> 抛错, 不归成终态"):
+    val e = intercept[IllegalStateException](mapOrderState("something_new", Coin(0.0)))
+    assert(e.getMessage.contains("文档之外的 OKX 订单状态"), e.getMessage)
 
   test("asDouble / asDoubleOrZero"):
     assertEquals("42000.5".asDouble, 42000.5)

@@ -5,7 +5,7 @@
 
 | 概念 | hft-engine-rs (Rust) | 本框架 (Scala) |
 |---|---|---|
-| 并发原语 | tokio task + kameo Actor | Java 虚拟线程 + ox Channel |
+| 并发原语 | tokio task + kameo Actor | ox 结构化并发 (虚拟线程) + ox Channel |
 | 消息投递 | kameo PubSub (unbounded mailbox) | `EventBus` (按 (topic, key) 建索引，每订阅者一条 `Channel.unlimited`) |
 | 事件扩展 | 封闭 enum + `CustomEvent` (类型擦除, 复用行情的 scope) | 开放的 `Topic[K, P]` (自带路由键类型与载荷类型) |
 | 状态串行化 | actor mailbox | 每策略独占一个虚拟线程串行消费 |
@@ -333,16 +333,26 @@ def handlers = StrategyHandlers.empty
 - **不丢弃**: 消息解析失败、未知事件类型、未知订单状态，一律抛错。静默丢弃一条
   私有流消息等于丢一笔成交。
 - **不确定即终止**: 下单/撤单遇到网络错误或超时，订单是否成立**不确定**，立即终止；
-  只有交易所明确拒绝 (HTTP 4xx) 才作为正常业务结果以 OrderUpdate(Error) 回流策略。
-  REST 超时 (3s) 必须小于订单超时 (orderTimeoutMs)，使 Created 订单超时未确认
-  成为"不可能事件"——一旦发生即假设被破坏，终止。
+  只有交易所**明确拒绝**才作为正常业务结果以 OrderUpdate(Error) 回流策略。
+  判据是 `ExchangeError` 的语义 (`Rejected` / `RateLimited` / 其余)，**不是 HTTP 状态码**：
+  三家表达业务拒单的形状各不相同 (Binance 是 HTTP 4xx，OKX 是 200+`sCode`，Bybit 是
+  200+`retCode`)，各交易所在自己的边界把数字翻译成语义，共享层只认语义。
+  REST 超时 (`RestTransport.ReadTimeout` = 3s) 必须小于订单超时 (orderTimeoutMs)，使
+  Created 订单超时未确认成为"不可能事件"——一旦发生即假设被破坏，终止。
 - **配置错误即终止**: 缺 SymbolMeta、缺 client/connector、启动对齐失败 (除"未配置
   凭证"这一确定安全的例外) 都在装配/首次使用时抛错。
 
 `ActorSystem` 自己监督事件循环、受管任务与子系统。第一个失败先触发依赖拓扑停机，全部
-`onStop` 与资源清理完成后，`awaitShutdown` 把原始异常重新抛给启动器，使进程以非零码退出。
-离开一个 ox scope 不会自动回收 ActorSystem；应用启动器必须以 `awaitShutdown` 作为最后一行，
-嵌套消息空间则必须通过 `ActorContext.childSystem` 绑定到父组件。
+`onStop` 与资源清理完成后，把原始异常重新抛给启动器，使进程以非零码退出。
+
+引擎的生命周期边界是 `Engine.run(plugins)(body)` —— 一个**作用域组合子**，不是"取一个
+Engine 再自己记得收尾"。引擎起的每条线程都是它内部那个 `unsupervised` 作用域里的一条 ox
+fork，离开这个块必然被中断并 join；而有序停机写在它的 `finally` 里，因此必然发生在作用域
+回收线程之前。从前 `start` 返回 Engine、由启动器最后调 `awaitShutdown`，于是两者之间任何
+一次抛出 (租约冲突、对齐超时、`watchMarket` 校验失败) 都会跳过整个停机流程 —— 已连上交易所
+的柜台不跑 `onStop`，挂单原样留在交易所无人跟踪。`awaitShutdown` 仍是 body 的常规最后一行
+(阻塞到有人请求停机)，但它不再承担"记得收尾"的责任。
+嵌套消息空间必须通过 `ActorContext.childSystem` 绑定到父组件。
 
 ### 两种插件形态
 
@@ -406,7 +416,9 @@ def handlers = StrategyHandlers.empty
   **不做局部重启** —— 一个崩掉的策略留下的挂单与仓位归谁管没有好答案，而重启后的启动对齐有答案。
 - 每个策略一个 `StrategySession`，它拥有租约、对齐状态和一个 `Executor` 子组件；Executor 独占
   虚拟线程串行消费事件，策略与状态无锁。
-- `WsLoop` 每条连接两个虚拟线程: 发送线程是连接唯一写入者 (Pong 回应也经出站 channel)，
+- 框架不创建裸线程: 每条线程都是 `ActorSystem` 作用域里的一条 ox fork (见
+  [框架内核契约](framework-kernel.md) 的线程模型), 唯一例外是 JVM 关闭钩子。
+- `WsLoop` 每条连接两条 fork: 发送线程是连接唯一写入者 (Pong 回应也经出站 channel)，
   接收线程重组分片文本帧后回调；任一侧出错即异常上抛终止 (不重连)。
 - `RestTradingGateway` 每个 REST 调用 fork 独立虚拟线程，下单互不阻塞，也不阻塞柜台的事件循环。
 

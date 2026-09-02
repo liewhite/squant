@@ -70,43 +70,44 @@ import strategy.strategies.crossspread.logic.*
     val monitor = CrossSpreadMonitor(detector)
 
     // 消费者先起、生产者后起：监控器要先挂在总线上, 否则最早那批盘口没人接
-    val engine = Engine.start(plugins =
+    Engine.run(plugins =
       Vector(
         BinanceMarketFeed(backend),
         OkxMarketFeed(okx, backend),
         HyperliquidMarketFeed(backend, HyperliquidClient.StockDex),
       )
-    )
-    engine.install(monitor)
-    // 不占标的、不做启动对齐: 这些标的谁都可以拿去交易, 监控器只是在看
-    engine.watchMarket(detector.instruments, Set(Topics.Bbo))
+    ) { engine =>
+      engine.install(monitor)
+      // 不占标的、不做启动对齐: 这些标的谁都可以拿去交易, 监控器只是在看
+      engine.watchMarket(detector.instruments, Set(Topics.Bbo))
 
-    val perVenue = detector.instruments.groupBy(_.exchange).map((e, is) => s"$e ${is.size}").toVector.sorted
-    logger.warn(
-      s"监控 ${pairs.size} 个价差对 / ${detector.instruments.size} 个标的 (${perVenue.mkString(", ")}) " +
-        s"| 均线窗口 ${detector.config.sampleMs * detector.config.windowSamples / 1000}s " +
-        s"| 预热 ${detector.config.warmupMs / 1000}s (完成前不报) " +
-        s"| 阈值 z>=$minZ 且 偏离>=${minDeviationBps}bp"
-    )
+      val perVenue = detector.instruments.groupBy(_.exchange).map((e, is) => s"$e ${is.size}").toVector.sorted
+      logger.warn(
+        s"监控 ${pairs.size} 个价差对 / ${detector.instruments.size} 个标的 (${perVenue.mkString(", ")}) " +
+          s"| 均线窗口 ${detector.config.sampleMs * detector.config.windowSamples / 1000}s " +
+          s"| 预热 ${detector.config.warmupMs / 1000}s (完成前不报) " +
+          s"| 阈值 z>=$minZ 且 偏离>=${minDeviationBps}bp"
+      )
 
-    // 旁路观察者：把异动打到控制台。策略消费同一条 topic 即可, 这里只做人看的输出。
-    val mailbox = engine.subscribe(Set(Interest.All(SpreadDislocations)))
-    fork {
-      mailbox.events.foreach { ev =>
-        ev.as(SpreadDislocations).foreach(d => logger.warn(SpreadDislocation.describe(d)))
+      // 旁路观察者：把异动打到控制台。策略消费同一条 topic 即可, 这里只做人看的输出。
+      val mailbox = engine.subscribe(Set(Interest.All(SpreadDislocations)))
+      fork {
+        mailbox.events.foreach { ev =>
+          ev.as(SpreadDislocations).foreach(d => logger.warn(SpreadDislocation.describe(d)))
+        }
       }
-    }
 
-    // 心跳：预热进度与累计报警数, 让"还没到点"与"接线错了"能区分开
-    fork {
-      while true do
-        Thread.sleep(30_000)
-        val s = monitor.stats
-        logger.warn(
-          s"[心跳] 盘口 ${s.quotesSeen} 条 | 价差对 ${s.pairsTracked} 个 | " +
-            s"预热就绪 ${s.pairsReady}/${s.pairsTracked} | 剔除 ${s.pairsRejected} | 累计报警 ${s.alertsEmitted}"
-        )
-    }
+      // 心跳：预热进度与累计报警数, 让"还没到点"与"接线错了"能区分开
+      fork {
+        while true do
+          Thread.sleep(30_000)
+          val s = monitor.stats
+          logger.warn(
+            s"[心跳] 盘口 ${s.quotesSeen} 条 | 价差对 ${s.pairsTracked} 个 | " +
+              s"预热就绪 ${s.pairsReady}/${s.pairsTracked} | 剔除 ${s.pairsRejected} | 累计报警 ${s.alertsEmitted}"
+          )
+      }
 
-    // 阻塞到停机: 中断信号或组件失败都会唤醒它, 停完全部组件后核心最后退出
-    engine.awaitShutdown()
+      // 阻塞到停机: 中断信号或组件失败都会唤醒它, 停完全部组件后核心最后退出
+      engine.awaitShutdown()
+    }

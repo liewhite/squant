@@ -52,9 +52,6 @@ trait TradingClient extends ExchangeClient:
   /** 查询当前挂单 (live + partially_filled) */
   def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]]
 
-  /** 设置杠杆 */
-  def setLeverage(symbol: Symbol, leverage: Int): Either[ExchangeError, Unit]
-
   /** 获取账户信息 (净值 + 总持仓名义价值) */
   def fetchAccountInfo(): Either[ExchangeError, AccountInfo]
 

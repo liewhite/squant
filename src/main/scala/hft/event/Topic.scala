@@ -59,8 +59,13 @@ abstract class Topic[K, P](val name: String):
   * 不计入处理者基数。
   */
 abstract class CommandTopic[K, P](name: String, val cardinality: Cardinality) extends Topic[K, P](name):
-  /** 命令处理者自动提供的生命周期能力；装配器只看这个通用契约，不依赖 EventBus 内部索引。 */
-  final val capability: Capability[K] = Capability(s"command:$name", cardinality)
+  /** 命令处理者自动提供的生命周期能力；装配器只看这个通用契约，不依赖 EventBus 内部索引。
+    *
+    * `private[hft]`：处理能力的唯一事实来源是 [[CommandHandler]]。若它是公开的，任何组件都能
+    * 用 `CapabilityProvider.provide(topic.capability, key)` 在 `capabilities` 里**声称**自己处理
+    * 某条命令而不真的声明 `CommandHandler` —— 装配期校验通过、依赖方照常启动，直到发布那一刻
+    * 才以"实际 0 个处理者"失败。硬依赖图不该有办法在编译期合法地说谎。 */
+  private[hft] final val capability: Capability[K] = Capability(s"command:$name", cardinality)
 
 /** 公共行情 topic 的标记类型。
   *

@@ -15,11 +15,35 @@ import BybitCodec.*
 import BybitCodec.given
 
 object BybitAccountFeed:
-  /** 算作真实成交的执行类型。其余 (资金费、结算) 不进账本 */
-  private val TradeExecTypes: Set[String] = Set("Trade", "AdlTrade", "BustTrade", "Delivery", "BlockTrade", "")
+  /** 算作真实成交的执行类型。其余 (资金费、结算) 不进账本。
+    *
+    * 空串**不在**这里：Bybit 的 execution 帧一定带 execType，空串只可能是 codec 默认值顶上来的
+    * (即报文缺字段)。把它算成成交等于给缺失字段填了默认值。 */
+  private val TradeExecTypes: Set[String] = Set("Trade", "AdlTrade", "BustTrade", "Delivery", "BlockTrade")
 
-  /** 明确不是成交的执行类型 —— 见到它们静默跳过，不必告警 */
-  private val NonTradeExecTypes: Set[String] = Set("Funding", "Settle", "SessionSettlePnl", "MovePosition")
+  /** 明确不是成交的执行类型 —— 见到它们跳过，不必告警。
+    *
+    * 依据 Bybit v5 `docs/v5/enum` 的 execType 全表: Funding (资金费)、Settle (反向合约结算)、
+    * MovePosition (转仓)、FutureSpread (价差腿)、ForwardSplitSettle / ReverseSplitSettle
+    * (股票拆分的零股结算)、Dividend (分红)。`SessionSettlePnl` 保留 (UTA 的日结)。
+    *
+    * 与 [[TradeExecTypes]] 合起来覆盖文档全表；剩下的只有 `UNKNOWN`，见 publishExecution。 */
+  private val NonTradeExecTypes: Set[String] = Set(
+    "Funding",
+    "Settle",
+    "SessionSettlePnl",
+    "MovePosition",
+    "FutureSpread",
+    "ForwardSplitSettle",
+    "ReverseSplitSettle",
+    "Dividend",
+  )
+
+  /** 文档标注为 "May be returned by a classic account. Cannot query by this type"。
+    *
+    * 本客户端只用统一账户 (accountType=UNIFIED)，因此它的出现意味着账户类型的前提被打破 ——
+    * 而"这条执行到底算不算成交"无从判断，静默丢弃会让对账报出一个无从定位的差额。 */
+  private val ClassicAccountExecType: String = "UNKNOWN"
 
   /** auth 帧 expires 相对当前时间的前移量 (ms)，给握手留出窗口 */
   val AuthExpiresBufferMs: Long = 10_000
@@ -53,10 +77,16 @@ final class BybitAccountFeed(
     * 本流不知道账户是谁 —— 那是柜台盖的章 */
   @volatile private var report: AccountReport => Unit = scala.compiletime.uninitialized
   @volatile private var spawnThread: (=> Unit) => Unit = scala.compiletime.uninitialized
+  @volatile private var cooperativeSleep: Long => Boolean = scala.compiletime.uninitialized
 
-  override def connect(sink: AccountReport => Unit, spawn: (=> Unit) => Unit): Unit =
+  override def connect(
+      sink: AccountReport => Unit,
+      spawn: (=> Unit) => Unit,
+      sleepUnlessStopped: Long => Boolean,
+  ): Unit =
     report = sink
     spawnThread = spawn
+    cooperativeSleep = sleepUnlessStopped
     WsLoop.run("bybit/private", backend, () => wsUrl, outgoing, onPrivateText, spawn)
     // auth 帧入队，连接建立后立即发送 (expires 在此刻生成，留 10s 窗口)
     outgoing.send(WebSocketFrame.text(authFrame()))
@@ -102,9 +132,18 @@ final class BybitAccountFeed(
     */
   private def publishExecution(d: ExecutionData): Unit =
     if !BybitAccountFeed.TradeExecTypes.contains(d.execType) then
-      // 未知类型也报出来: 交易所加了新的执行类型时, 宁可看见也别默默当成交算进去
-      if d.execType.nonEmpty && !BybitAccountFeed.NonTradeExecTypes.contains(d.execType) then
-        logger.warn(s"Bybit 未知 execType '${d.execType}', 不计入成交 (order=${d.orderId} qty=${d.execQty})")
+      // 明确不是成交的类型: 跳过 (有依据, 见 NonTradeExecTypes)。
+      // 其余一律抛 —— 丢弃一条不认识的执行帧会让对账报出"我们这边的 bug"却无从定位,
+      // 而空 execType 说明报文本身缺字段。
+      if d.execType == BybitAccountFeed.ClassicAccountExecType then
+        throw IllegalStateException(
+          s"Bybit 返回 execType=UNKNOWN (order=${d.orderId} symbol=${d.symbol} qty=${d.execQty}) —— " +
+            "该值文档标注只出现在**经典账户**, 而本客户端按统一账户接入; 这条执行算不算成交无从判断"
+        )
+      if !BybitAccountFeed.NonTradeExecTypes.contains(d.execType) then
+        throw IllegalStateException(
+          s"文档之外的 Bybit execType: '${d.execType}' (order=${d.orderId} symbol=${d.symbol} qty=${d.execQty})"
+        )
       return
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in execution: '${d.symbol}'"))
     report(AccountReport.Executed(
@@ -112,7 +151,10 @@ final class BybitAccountFeed(
       side = sideFromBybit(d.side),
       price = d.execPrice.asPrice,
       qty = Coin(d.execQty.asDouble),
-      timestamp = d.execTime.toLongOption.getOrElse(nowMs),
+      // 交易所时间戳不可解析 = 坏报文。退回本地钟会让延迟统计恒为零, 且掩盖了报文问题。
+      timestamp = d.execTime.toLongOption.getOrElse(
+        throw IllegalStateException(s"Bybit execution execTime 不是时间戳: '${d.execTime}' (order=${d.orderId})")
+      ),
     ))
 
   /** 订单状态。本频道带**累计**成交量 —— 柜台拿它补记账 (execution 先到时增量为零)，
@@ -121,8 +163,8 @@ final class BybitAccountFeed(
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in order: '${d.symbol}'"))
     val filled = Coin(d.cumExecQty.asDouble)
     val status = mapOrderStatus(d.orderStatus, filled)
-    // 终态之后不会再有新成交, 清掉本地累加器。**晚到的那条 execution 由柜台兜住**:
-    // 它的记账进度在终态后还留一分钟墓碑, 认得出"这笔已经记过了" (见 RestTradingGateway.settled)。
+    // 晚到的那条 execution 由柜台兜住: 记账进度在终态后还留一分钟墓碑,
+    // 认得出"这笔已经记过了" (见 PositionBook 的墓碑说明)。
     report(AccountReport.OrderStatusChanged(
       orderId = d.orderId,
       clientOrderId = if d.orderLinkId.nonEmpty then Some(d.orderLinkId) else None,
@@ -133,29 +175,37 @@ final class BybitAccountFeed(
       avgFillPrice = Price(d.avgPrice.asDoubleOrZero), // 记账用它 —— 市价单的 price 为空
       quantity = Coin(d.qty.asDouble),
       filledQuantity = filled,
-      timestamp = nowMs,
+      timestamp = d.updatedTime.toLongOption.getOrElse(
+        throw IllegalStateException(s"Bybit order 推送缺 updatedTime: orderId=${d.orderId} 原始值='${d.updatedTime}'")
+      ),
     ))
 
   /** 交易所报的仓位 -> 交给柜台对账。size 是绝对值, 方向在 side 里 */
   private def publishPosition(d: PositionData): Unit =
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in position: '${d.symbol}'"))
-    val magnitude = d.size.asDoubleOrZero
+    val magnitude = d.size.asDouble
+    // 穷举方向。从前是 `case _ => magnitude`: 任何未知 side 都被记成**多头**,
+    // 而同一件事在 REST 路径上写的是 `case _ => Coin.Zero` (归零) —— 同一事实两个答案。
     val signed = d.side match
-      case "Sell" => -magnitude
-      case _      => magnitude // Buy, 或空仓时的 "None"
+      case "Buy"           => magnitude
+      case "Sell"          => -magnitude
+      // 空仓: Bybit v5 position 的 side 为**空串** (docs/v5/position 的 WS 示例即 side:"" size:"0")
+      case "" if magnitude == 0.0 => 0.0
+      case other =>
+        throw IllegalStateException(s"未知的 Bybit 持仓方向: '$other' (symbol=${d.symbol} size=${d.size})")
     report(AccountReport.PositionReported(sym, Coin(signed), nowMs))
 
   /** 钱包快照 -> 账户净值 + 各币种现金余额 */
   private def publishWallet(d: WalletData): Unit =
     val ts = nowMs
     report(AccountReport.EquityChanged(d.totalEquity.asDouble, ts))
-    d.coin.foreach(c => report(AccountReport.BalanceChanged(c.coin, c.walletBalance.asDoubleOrZero, ts)))
+    d.coin.foreach(c => report(AccountReport.BalanceChanged(c.coin, c.walletBalance.asDouble, ts)))
 
   /** 心跳发送线程：定期入队 ping 帧，维持私有连接 (无成交时也不致空闲被断) */
   private def startHeartbeat(): Unit =
     spawnThread {
-      while true do
-        Thread.sleep(BybitMarketFeed.HeartbeatIntervalMs)
+      // 协作式睡眠: 停机请求立即唤醒并退出, 不必靠中断打断 (见 AccountFeed.connect 契约)
+      while !cooperativeSleep(BybitMarketFeed.HeartbeatIntervalMs) do
         outgoing.send(WebSocketFrame.text("""{"op":"ping"}"""))
     }
     ()
