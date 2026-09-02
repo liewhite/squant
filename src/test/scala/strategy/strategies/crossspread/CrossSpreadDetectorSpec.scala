@@ -111,20 +111,54 @@ class CrossSpreadDetectorSpec extends munit.FunSuite:
     assertEquals(d.evaluate(resumeTs).dislocations, Vector.empty, "断档后第一条样本必然'大幅偏离', 不该据此报警")
     assertEquals(d.stats.pairsReady, 0, "窗口已重置, 需要重新预热")
 
-  test("价差大到不像同一个标的即剔除该对, 且只报一次"):
+  test("持续差出一个数量级的一对被剔除, 且只报一次"):
     val d = detector()
-    // 一张对一股 vs 一张对十股: 价差约 ln(10) ≈ 23000bp
-    d.onQuote(bbo(bn, 1000.0, 1_000_000L))
-    d.onQuote(bbo(hl, 100.0, 1_000_000L))
-    val first = d.evaluate(1_000_000L)
-    assertEquals(first.rejections.size, 1)
-    assertEquals(first.rejections.head.pair, pair)
+    // 一张对一股 vs 一张对十股: 每一条样本的价差都约 ln(10) ≈ 23000bp
+    val results = (0 until config.minSamples).map { i =>
+      val ts = 1_000_000L + i * config.sampleMs
+      d.onQuote(bbo(bn, 1000.0, ts))
+      d.onQuote(bbo(hl, 100.0, ts))
+      d.evaluate(ts)
+    }
+    assert(results.init.forall(_.rejections.isEmpty), "证据没攒够之前不下结论")
+    val rejection = results.last.rejections
+    assertEquals(rejection.size, 1)
+    assertEquals(rejection.head.pair, pair)
+    assertEquals(rejection.head.samples, config.minSamples)
     assertEquals(d.stats.pairsRejected, 1)
 
-    val nextTs = 1_000_000L + config.sampleMs
+    val nextTs = 1_000_000L + config.minSamples * config.sampleMs
     d.onQuote(bbo(bn, 1000.0, nextTs))
     d.onQuote(bbo(hl, 100.0, nextTs))
     assert(d.evaluate(nextTs).isEmpty, "已剔除的对不再参与, 也不重复报")
+
+  test("单个离群样本既不剔除该对, 也不污染中枢"):
+    // 稀薄品种偶尔报一次极宽的盘口。拿它做不可逆的剔除, 等于一次坏报价永久丢掉一个价差对;
+    // 让它入窗, 则 23000bp 摊进 60 个样本的窗口会把中枢整个拖走, 之后每一条正常样本都"大幅偏离"
+    val d = detector()
+    val out = Vector.newBuilder[SpreadDislocation]
+    (0 until 60).foreach { i =>
+      val ts = 1_000_000L + i * config.sampleMs
+      val (pb, ph) = if i == 20 then (1000.0, 100.0) else (100.3, 100.0)
+      d.onQuote(bbo(bn, pb, ts))
+      d.onQuote(bbo(hl, ph, ts))
+      out ++= d.evaluate(ts).dislocations
+    }
+    assertEquals(d.stats.pairsRejected, 0, "一条坏报价不足以给一对下结构性结论")
+    assertEquals(out.result(), Vector.empty, "离群样本没进窗口, 中枢仍是那 30bp")
+    assertEquals(d.stats.pairsReady, 1, "其余样本照常入窗, 预热正常完成")
+
+  test("一条在范围内的样本清零超限计数: 判据是**连续**超限"):
+    val d = detector()
+    // 差一条就够: 中间插一条正常样本, 计数归零, 于是永远攒不够
+    (0 until config.minSamples * 3).foreach { i =>
+      val ts = 1_000_000L + i * config.sampleMs
+      val (pb, ph) = if i % (config.minSamples - 1) == 0 then (100.3, 100.0) else (1000.0, 100.0)
+      d.onQuote(bbo(bn, pb, ts))
+      d.onQuote(bbo(hl, ph, ts))
+      d.evaluate(ts): Unit
+    }
+    assertEquals(d.stats.pairsRejected, 0)
 
   test("冷却期内不重复报同一件事: 一次异动会持续若干个采样点"):
     val d = detector()

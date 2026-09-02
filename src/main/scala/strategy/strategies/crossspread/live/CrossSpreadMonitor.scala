@@ -46,8 +46,8 @@ final class CrossSpreadMonitor(detector: CrossSpreadDetector) extends Actor:
       val result = detector.evaluate(now)
       result.rejections.foreach { r =>
         logger.warn(
-          f"[配对剔除] ${r.pair.ticker}%-6s ${r.pair.a} 与 ${r.pair.b} 价差 ${r.spreadBps}%.0fbp " +
-            "超出上限, 视为不是同一个标的或合约乘数不同, 不再参与监控"
+          f"[配对剔除] ${r.pair.ticker}%-6s ${r.pair.a} 与 ${r.pair.b} 连续 ${r.samples} 条样本价差超限 " +
+            f"(最新 ${r.spreadBps}%.0fbp), 视为不是同一个标的或合约乘数不同, 不再参与监控"
         )
       }
       result.dislocations.map { d =>

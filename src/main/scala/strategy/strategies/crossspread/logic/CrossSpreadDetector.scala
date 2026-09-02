@@ -17,8 +17,9 @@ import scala.collection.mutable
   *                       移位，拿断档前的中枢判断当下，第一条样本几乎必然"大幅偏离"
   * @param cooldownMs     同一对两次报警的最小间隔。一次异动会持续若干个采样点，
   *                       不设冷却就会每个节拍重复报同一件事
-  * @param maxBaselineBps 价差绝对值的上限。两个合约若差出这么多，它们不是同一个标的
-  *                       (代码撞名) 或不是同一个合约乘数 —— 那不是价差，见 [[PairRejection]]
+  * @param maxSpreadBps   单条样本的价差绝对值上限。超出它的样本**不是一次可用的测量**，
+  *                       不入窗；连续 [[minSamples]] 条都超出才认定这一对配错了，
+  *                       见 [[PairRejection]]
   */
 final case class CrossSpreadConfig(
     sampleMs: Long = 1000,
@@ -27,7 +28,7 @@ final case class CrossSpreadConfig(
     maxQuoteAgeMs: Long = 10_000,
     resetGapMs: Long = 30_000,
     cooldownMs: Long = 60_000,
-    maxBaselineBps: Double = 2000.0,
+    maxSpreadBps: Double = 2000.0,
 ):
   require(sampleMs > 0, s"sampleMs 须为正, 实为 $sampleMs")
   require(windowSamples > 1, s"windowSamples 须 > 1, 实为 $windowSamples")
@@ -35,20 +36,34 @@ final case class CrossSpreadConfig(
   require(maxQuoteAgeMs > 0, s"maxQuoteAgeMs 须为正, 实为 $maxQuoteAgeMs")
   require(resetGapMs >= sampleMs, s"resetGapMs 须 >= sampleMs, 实为 $resetGapMs")
   require(cooldownMs >= 0, s"cooldownMs 不可为负, 实为 $cooldownMs")
-  require(maxBaselineBps > 0, s"maxBaselineBps 须为正, 实为 $maxBaselineBps")
+  require(maxSpreadBps > 0, s"maxSpreadBps 须为正, 实为 $maxSpreadBps")
 
   /** 预热完成所需时长 —— 装配方用它告诉人"什么时候开始该信这些信号" */
   def warmupMs: Long = sampleMs * minSamples
 
-/** 一个价差对被判定为**配错了** —— 两条腿的价格差出了一个数量级意义上的距离。
+/** 一个价差对被判定为**配错了** —— 两条腿的价格持续差出一个数量级意义上的距离。
   *
   * 跨所配对靠标的代码相同，而代码会撞：某所的加密永续与另一所的股票永续可能同名，
   * 同一个股票在两所的合约乘数也可能不同 (一张对一股 vs 对十股)。这两种情况下"价差"
   * 不是价差，是两个无关数字相减，其偏离量同样会突然变化 —— 报出来全是假信号。
   *
   * 判据放在价格上而不是命名规则上：命名规则各所各改各的，价格骗不了人。
+  *
+  * ## 为什么要连续 `minSamples` 条而不是一条
+  *
+  * "这两个合约是不是同一个标的"是**结构性事实**，那就得用结构性证据去判 ——
+  * 一条瞬时报价不是。稀薄品种偶尔报一次极宽的盘口 (Hyperliquid 的股票永续尤其常见)，
+  * 拿它做一次**不可逆**的剔除，等于一次坏报价就永久丢掉一个价差对，而且只留一行日志。
+  *
+  * 反过来，真配错的一对**每一条**样本都超限，攒够 `minSamples` 条只要一个预热的时间，
+  * 而那段时间里本来就不出信号 —— 认定晚一点不损失任何东西。
+  *
+  * `minSamples` 一处定义两处使用，因为它表达的是同一件事：**下结论之前要多少证据**。
+  *
+  * @param spreadBps 认定时那一条样本的价差
+  * @param samples   连续超限的样本数 (= 认定所需的证据量)
   */
-final case class PairRejection(pair: VenuePair, spreadBps: Double)
+final case class PairRejection(pair: VenuePair, spreadBps: Double, samples: Int)
 
 /** 一轮采样的产出：异动信号，以及本轮新认定配错的对 (只在认定的那一次给出)。 */
 final case class ScanResult(dislocations: Vector[SpreadDislocation], rejections: Vector[PairRejection]):
@@ -82,6 +97,11 @@ final class CrossSpreadDetector(
     var lastSampleAt: Timestamp = Long.MinValue
     var lastAlertAt: Timestamp = Long.MinValue
     var rejected: Boolean = false
+    /** 连续超出 [[CrossSpreadConfig.maxSpreadBps]] 的样本数。
+      *
+      * 只由一条**在范围内**的样本清零，不由采样断档清零：断档不削弱
+      * "至今为止每一条样本都超限"这个证据，而报价稀疏的标的本就要攒很久。 */
+    var outOfRange: Int = 0
 
   private val states: Map[VenuePair, PairState] = pairs.map(_ -> PairState()).toMap
   private val quotes = mutable.Map.empty[Instrument, VenueQuote]
@@ -112,10 +132,15 @@ final class CrossSpreadDetector(
         if !state.rejected then
           freshQuotes(pair, now).foreach { (quoteA, quoteB) =>
             val spreadBps = logRatioBps(quoteA.mid, quoteB.mid)
-            if math.abs(spreadBps) > config.maxBaselineBps then
-              state.rejected = true
-              rejections += PairRejection(pair, spreadBps)
+            if math.abs(spreadBps) > config.maxSpreadBps then
+              // 超限的样本不入窗: 它不是一次可用的测量, 放进去会把中枢整个拖走。
+              // 攒够连续 minSamples 条才认定配错 —— 理由见 PairRejection
+              state.outOfRange += 1
+              if state.outOfRange >= config.minSamples then
+                state.rejected = true
+                rejections += PairRejection(pair, spreadBps, state.outOfRange)
             else
+              state.outOfRange = 0
               if state.lastSampleAt != Long.MinValue && now - state.lastSampleAt > config.resetGapMs then
                 state.window.reset()
               judge(pair, state, quoteA, quoteB, spreadBps, now).foreach { d =>
