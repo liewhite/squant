@@ -251,6 +251,7 @@ final class BinanceClient private[binance] (
             price = o.price.asPrice,
             quantity = Coin(o.origQty.asDouble),
             filledQuantity = filled,
+            reduceOnly = RestTransport.requireFlag(o.reduceOnly, "Binance", "reduceOnly", s"orderId=${o.orderId}"),
             timestamp = o.time,
           )
         }.toVector

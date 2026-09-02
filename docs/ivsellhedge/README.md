@@ -253,7 +253,7 @@ Idle ──place──> Placing ──Pending──> Resting ──超时/被抢
 （默认 3s）是"撤单请求发出这么久交易所还没回应"。混成一个的话，1s 的追单模式会让撤单确认的
 容忍度也变成 1s，于是每一次正常的撤单往返都触发一次"重发 + 告警"。
 
-框架的 `orderTimeoutMs` 取最长存活时间的 3 倍，否则正常挂单会被当成丢单清理。
+框架的 `orderTimeoutMs` 与挂单存活时间**无关** —— 它衡量的是"下单请求发出到拿到交易所确认"这一跳，已确认的 resting 单本来就豁免这项校验。取 `Strategy.RecommendedOrderTimeoutMs`。
 
 ### 安全闸门
 

@@ -18,10 +18,10 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Ledger.Holdin
   /** 账户读数快照 —— 净值与名义价值的**唯一构造处**。
     *
     * 回测周期发布、影子盘周期发布、实盘替身的 REST 查询，三处此前各拼一遍
-    * `AccountInfo(account, exchange, equity(...), notional(...))`。同一个读数三处构造，
+    * `AccountInfo(account, exchange, equity(...))`。同一个读数三处构造，
     * 迟早有一处漏跟上口径变化 (比如将来净值要扣未结算资金费)。
     */
-  def accountInfo(exchange: Exchange, markOf: Symbol => Price): AccountInfo =
+  def accountInfo(exchange: Exchange, markOf: Symbol => Option[Price]): AccountInfo =
     AccountInfo(account, exchange, equity = equity(markOf))
 
   /** 应用一笔成交，返回新账本：
@@ -54,13 +54,13 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Ledger.Holdin
         else price // 反手: 剩余在成交价重开
       Ledger(account, positions.updated(symbol, pos.copy(size = newSize, entryPrice = newEntry)), cash + realized - fee.value)
 
-  /** 账户净值 = 现金 + 未实现盈亏 (markOf 提供各 symbol 的估值价格) */
-  def equity(markOf: Symbol => Price): Double =
-    cash + positions.map((sym, h) => Ledger.unrealizedPnl(h, markOf(sym))).sum
-
-  /** 总持仓名义价值 (用于杠杆率) */
-  def notional(markOf: Symbol => Price): Double =
-    positions.map((sym, h) => h.size.abs.notional(markOf(sym)).value).sum
+  /** 账户净值 = 现金 + 未实现盈亏。
+    *
+    * `markOf` 对**持有仓位**的标的必须给得出估值价：给不出就意味着这部分仓位的盈亏算不出来，
+    * 而净值是策略的杠杆闸门读的数。从前无估值价时把那一段未实现盈亏记作 0 —— 净值静默少算
+    * 一块且没有任何症状。 */
+  def equity(markOf: Symbol => Option[Price]): Double =
+    cash + positions.map((sym, h) => Ledger.unrealizedPnl(sym, h, markOf(sym))).sum
 
   /** 非空持仓的**总线形态** —— 只有数量 (见 [[Position]] 关于均价与盈亏的说明)。
     *
@@ -86,6 +86,16 @@ object Ledger:
   object Holding:
     val empty: Holding = Holding(Coin.Zero, Price.Zero)
 
-  /** 未实现盈亏：(标记价 - 均价) * 带符号仓位；无估值价格时记 0 */
-  private def unrealizedPnl(h: Holding, mark: Price): Double =
-    if mark <= Price.Zero then 0.0 else h.size.pnl(h.entryPrice, mark).value
+  /** 未实现盈亏：(标记价 - 均价) × 带符号仓位。空仓不需要估值价。 */
+  private def unrealizedPnl(symbol: Symbol, h: Holding, mark: Option[Price]): Double =
+    if h.isEmpty then 0.0 else h.size.pnl(h.entryPrice, requireMark(symbol, h, mark)).value
+
+  /** 持有仓位却拿不到估值价 = 净值算不出来。只由 [[unrealizedPnl]] 在**非空仓**时调用。 */
+  private def requireMark(symbol: Symbol, h: Holding, mark: Option[Price]): Price =
+    mark.filter(_ > Price.Zero) match
+      case Some(px) => px
+      case None =>
+        sys.error(
+          s"$symbol 持仓 ${h.size.value} 却没有可用的估值价 (mark=$mark) —— " +
+            "净值与名义额都算不出来, 记 0 会让杠杆闸门读到一个偏小的净值"
+        )

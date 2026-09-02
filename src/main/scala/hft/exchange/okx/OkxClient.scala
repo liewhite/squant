@@ -258,6 +258,7 @@ final class OkxClient private[okx] (
               price = Price(d.px.asDoubleOrZero),
               quantity = metaOf(sym).toCoin(Contracts(d.sz.asDouble)),
               filledQuantity = filled,
+              reduceOnly = OkxCodec.booleanFrom(d.reduceOnly, "reduceOnly"),
               // 交易所侧的更新时刻。用本地钟会让延迟基准恒为零 (柜台把它当 exchangeTs 用)。
               timestamp = d.uTime.toLongOption.getOrElse(
                 throw IllegalStateException(s"OKX orders-pending 缺 uTime: ordId=${d.ordId} 原始值='${d.uTime}'")

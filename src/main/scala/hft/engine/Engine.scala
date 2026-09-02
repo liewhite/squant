@@ -151,10 +151,7 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
     require(instruments.nonEmpty, "watchMarket 需要至少一个标的")
     require(topics.nonEmpty, "watchMarket 需要至少一个行情 topic")
     val subscription = Subscription(topics.map(t => Interest.Keyed(t, instruments)))
-    val requirements = subscription.marketStreams.map(_._1).map { exchange =>
-      hft.actor.Requirement.command(MarketSubscription, exchange, s"行情订阅指令 $exchange 无处理者")
-    }
-    system.validate(requirements, "watchMarket")
+    system.validate(hft.actor.Requirement.marketSubscriptions(subscription), "watchMarket")
     requestMarketData(subscription)
     logger.info(s"watching ${instruments.size} instruments for ${topics.map(_.name).mkString(",")} (不交易, 不占标的)")
   }
@@ -163,8 +160,8 @@ final class Engine private (bus: EventBus, system: ActorSystem)(using Ox):
 
   /** 把订阅范围派生成行情订阅指令。同一条流被请求多次由行情插件去重 (幂等增量) */
   private def requestMarketData(subscription: Subscription): Unit =
-    subscription.marketStreams.groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
-      bus.publish(Event.local(MarketSubscription, MarketSubscriptionRequest(exchange, kinds.toSet)))
+    subscription.marketRequests.foreach { (exchange, kinds) =>
+      bus.publish(Event.local(MarketSubscription, MarketSubscriptionRequest(exchange, kinds)))
     }
 
 object Engine:

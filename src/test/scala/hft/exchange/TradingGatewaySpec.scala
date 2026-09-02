@@ -81,7 +81,7 @@ class TradingGatewaySpec extends munit.FunSuite:
   ) =
     AccountReport.OrderStatusChanged(
       orderId, Some("c1"), "BTCUSDT", Side.Long, status,
-      Price(orderPrice), Price(avgFill), Coin(1.0), Coin(filled), 1L,
+      Price(orderPrice), Price(avgFill), Coin(1.0), Coin(filled), false, 1L,
     )
 
   private def kinds(seen: ConcurrentLinkedQueue[AnyEvent]): Vector[String] =
@@ -217,7 +217,7 @@ class TradingGatewaySpec extends munit.FunSuite:
           Right(Vector(Position(AccountId.Live, Exchange.Binance, "BTCUSDT", Coin(0.3))))
         override def fetchPendingOrders(symbol: Symbol) = Right(Vector(
           OrderUpdate(AccountId.Live, "o1", Some("c1"), Exchange.Binance, "BTCUSDT", Side.Long,
-            OrderStatus.PartiallyFilled(Coin(0.3)), Price(100.0), Coin(1.0), Coin(0.3), 1L)
+            OrderStatus.PartiallyFilled(Coin(0.3)), Price(100.0), Coin(1.0), Coin(0.3), false, 1L)
         ))
       ActorSystem(bus).spawn(RestTradingGateway(PartialClient(), feed, AccountId.Live, metas))
       align(bus)

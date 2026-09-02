@@ -236,6 +236,7 @@ final class BybitClient private[bybit] (
                 price = Price(d.price.asDoubleOrZero), // 市价单的委托价为空, 只用于回显
                 quantity = Coin(d.qty.asDouble),
                 filledQuantity = filled,
+                reduceOnly = RestTransport.requireFlag(d.reduceOnly, "Bybit", "reduceOnly", s"orderId=${d.orderId}"),
                 timestamp = d.updatedTime.toLongOption.getOrElse(
                   throw IllegalStateException(s"Bybit order updatedTime 不是时间戳: '${d.updatedTime}' (${d.orderId})")
                 ),

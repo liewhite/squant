@@ -286,9 +286,16 @@ object TradingGateway:
         symbol = order.symbol,
         side = order.side,
         status = OrderStatus.Error(reason),
-        price = Price.Zero,
-        quantity = Coin.Zero,
-        filledQuantity = Coin.Zero,
+        // 这些事实都是**已知的** —— 它们就在被拒的那张单上。从前填 Zero 占位, 于是策略读到
+        // 一条"价格 0、数量 0"的拒单, 与交易所真实拒单 (带着原委托价与数量) 形状不同,
+        // 而两者本该走同一条路径。
+        price = order.orderType match
+          case OrderType.Limit(px, _) => px
+          case OrderType.Market       => Price.Zero // 市价单确实没有委托价
+        ,
+        quantity = order.quantity,
+        filledQuantity = Coin.Zero, // 拒单 = 一点没成交
+        reduceOnly = order.reduceOnly,
         timestamp = now,
       ),
       now,

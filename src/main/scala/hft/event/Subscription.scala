@@ -51,6 +51,14 @@ final case class Subscription(interests: Set[Interest]):
     case _ => Set.empty[(Exchange, SubscriptionKind)]
   }
 
+  /** 行情订阅指令的**派生结果**：一个交易所一条指令。
+    *
+    * 与 [[marketRequirements]] 成对：一处声明 (interests)，两处派生。收在这里是因为
+    * `Engine.watchMarket` 与 `StrategySession` 从前各写了一遍同样的 groupMap，
+    * 而"该向哪个交易所订哪些流"只该有一个答案。 */
+  def marketRequests: Set[(Exchange, Set[SubscriptionKind])] =
+    marketStreams.groupMap(_._1)(_._2).view.mapValues(_.toSet).toSet
+
   /** 涉及的全部交易所：交易标的所属的，加上账户级声明直接指名的 */
   def exchanges: Set[Exchange] =
     instruments.map(_.exchange) ++ keysOf(Topics.account).map(_.exchange)

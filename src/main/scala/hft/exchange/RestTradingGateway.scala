@@ -90,13 +90,16 @@ final class RestTradingGateway(
       book.recordFill(symbol, side, qty)
       Vector(Event.stamped(Topics.Fill, Fill(account, exchange, symbol, side, price, qty, ts), ts, now))
 
-    case AccountReport.OrderStatusChanged(orderId, clientOrderId, symbol, side, status, price, avgFillPrice, quantity, filledQuantity, ts) =>
+    case AccountReport.OrderStatusChanged(
+          orderId, clientOrderId, symbol, side, status, price, avgFillPrice, quantity, filledQuantity, reduceOnly, ts
+        ) =>
       // 记账用**成交均价**而不是委托价: 市价单的委托价是空的, 拿它记账会把持仓均价记成 0。
       val settlement =
         if filledQuantity.isZero then Vector.empty
         else settle(orderId, symbol, side, avgFillPrice, filledQuantity, ts, now)
       if status.isTerminal then book.markTerminal(orderId, now)
-      val update = OrderUpdate(account, orderId, clientOrderId, exchange, symbol, side, status, price, quantity, filledQuantity, ts)
+      val update =
+        OrderUpdate(account, orderId, clientOrderId, exchange, symbol, side, status, price, quantity, filledQuantity, reduceOnly, ts)
       // 顺序在这里构造: 仓位先于订单状态。反过来的话, 策略会看到"挂单已消失、仓位还没更新"
       // —— 它据此认为自己既没单也没仓位, 于是再下一单。那是危险侧的中间状态。
       settlement :+ Event.stamped(Topics.OrderUpdate, update, ts, now)

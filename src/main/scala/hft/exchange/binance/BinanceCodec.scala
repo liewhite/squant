@@ -77,6 +77,8 @@ private[binance] object BinanceCodec:
       z: String = "0", // cumulative filled qty
       L: String = "0", // last filled price
       ap: String = "0", // average filled price —— 记账用它, 不能用 p (市价单为 0)
+      /** reduceOnly (Binance ORDER_TRADE_UPDATE 的 `R`)。缺失与 false 必须分得开。 */
+      R: Option[Boolean] = None,
       T: Long = 0,     // transaction time
   )
 
@@ -123,6 +125,8 @@ private[binance] object BinanceCodec:
       side: String = "",
       status: String = "",
       symbol: String = "",
+      /** 缺失与 false 必须分得开 —— 见 BinanceClient 的读取处。 */
+      reduceOnly: Option[Boolean] = None,
       time: Long = 0,
   )
 

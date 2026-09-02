@@ -15,28 +15,18 @@ trait SymbolView:
   def symbol: Symbol
 
   def bbo(exchange: Exchange): Option[BBO]
-  def lastTrade(exchange: Exchange): Option[MarketTrade]
-  /** 最新成交价 (trade-only 行情下的价格基准) */
-  def lastTradePrice(exchange: Exchange): Option[Price]
   def markPrice(exchange: Exchange): Option[MarkPrice]
   def indexPrice(exchange: Exchange): Option[IndexPrice]
   def fundingRate(exchange: Exchange): Option[FundingRate]
 
   def position(exchange: Exchange): Option[Position]
-  /** 仓位大小。无仓位记录等价于空仓 */
+  /** 仓位大小。没有记录 = 空仓，依据见 `SymbolState.positionSize` */
   def positionSize(exchange: Exchange): Coin
-  def hasPositions: Boolean
-  /** 多空仓位大小: (多头总量(正), 空头总量(负)) */
-  def positionSizes: (Coin, Coin)
 
   /** 本策略在该标的上的挂单。[[PendingOrder]] 是不可变数据，读它不会动到框架状态 */
   def pendingOrders: Iterable[PendingOrder]
   def hasPendingOrders: Boolean
   def hasPendingSide(side: Side): Boolean
-
-  /** 日化费率最高/最低的交易所 (跨所资费套利用) */
-  def bestShortExchange: Option[(Exchange, FundingRate)]
-  def bestLongExchange: Option[(Exchange, FundingRate)]
 
 /** 策略能看到的**账户级**状态 —— 只读。
   *

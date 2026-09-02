@@ -24,7 +24,7 @@ class SupervisorSpec extends munit.FunSuite:
   private val paper = AccountId.Paper(1)
 
   private class Noop extends Strategy:
-    def orderTimeoutMs: Long = 0L
+    def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
     def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (_, _, _) => Vector.empty }
 
   private class Idle extends Actor:

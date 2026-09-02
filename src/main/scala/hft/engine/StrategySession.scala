@@ -19,22 +19,28 @@ private[engine] final class StrategySession(
 ) extends Actor:
   require(syncTimeoutMs > 0, "syncTimeoutMs 必须大于 0")
   private val logger = LoggerFactory.getLogger(classOf[StrategySession])
-  private val executor = Executor(strategy, account)
+  /** 本会话这一轮对齐的编号。**先于 Executor 生成** —— 闸门要拿它去认领属于自己的应答。 */
+  private val requestId = StrategySession.nextRequestId()
+  private val executor = Executor(strategy, account, requestId)
   private val subscription: Subscription = executor.subscription
   private val targets = subscription.alignmentTargets(account)
   private val symbolsByExchange = subscription.instruments.groupMap(_.exchange)(_.symbol)
-  private val requestId = StrategySession.nextRequestId()
   private val readiness = AlignmentReadiness(targets, requestId)
   private var ctx: ActorContext = scala.compiletime.uninitialized
 
   override def name: String = s"strategy-session(${strategy.getClass.getSimpleName}@$account)"
+
+  /** 独占租约里指认本会话的唯一身份 (同类同账户可以有多个实例)。 */
+  private def claimOwner: String = s"$name#$requestId"
 
   override def interests: Set[Interest] = Set(Interest.Keyed(AccountSynced, targets))
 
   override def onPrepare(context: ActorContext): Unit =
     ctx = context
     val keys = subscription.instruments.map(AccountInstrument(account, _))
-    context.manage(claims.acquire(name, keys))(_.close())
+    // 租约的 owner 要能**唯一指认这个会话实例**: `name` 对同类同账户的两个实例是同一个字符串,
+    // 于是冲突信息会写成"已被 X 占用, X 不能重复接管"这种自指的话。
+    context.manage(claims.acquire(claimOwner, keys))(_.close())
     context.spawn(executor)
 
   override def onStart(context: ActorContext): Unit =
@@ -64,8 +70,8 @@ private[engine] final class StrategySession(
   def awaitReady(): Unit = readiness.awaitReady(name)
 
   private def activateMarketStreams(): Unit =
-    subscription.marketStreams.groupMap(_._1)(_._2).foreach { (exchange, kinds) =>
-      ctx.publish(Event.local(MarketSubscription, MarketSubscriptionRequest(exchange, kinds.toSet)))
+    subscription.marketRequests.foreach { (exchange, kinds) =>
+      ctx.publish(Event.local(MarketSubscription, MarketSubscriptionRequest(exchange, kinds)))
     }
 
 private[engine] object StrategySession:

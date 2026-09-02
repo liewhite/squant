@@ -23,7 +23,7 @@ class PositionBookSpec extends munit.FunSuite:
 
   private def pending(orderId: String, symbol: Symbol, filled: Double) =
     OrderUpdate(account, orderId, Some("c1"), ex, symbol, Side.Long, OrderStatus.PartiallyFilled(Coin(filled)),
-      Price(100.0), Coin(1.0), Coin(filled), 0L)
+      Price(100.0), Coin(1.0), Coin(filled), false, 0L)
 
   private def settledDelta(b: PositionBook, orderId: String, symbol: Symbol, cumulative: Double, now: Long = 0L) =
     b.settle(orderId, symbol, Side.Long, Price(100.0), Coin(cumulative), now) match

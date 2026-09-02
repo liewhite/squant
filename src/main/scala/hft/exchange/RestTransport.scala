@@ -80,6 +80,16 @@ object RestTransport:
     try Right(readFromString[T](body))
     catch case e: Exception => Left(ExchangeError.Parse(s"${e.getMessage}; body=$body"))
 
+  /** 读一个**契约上必返**的布尔字段。缺失即抛。
+    *
+    * jsoniter 对缺失字段取默认值，于是 `Boolean = false` 会把"报文没带"变成"值是 false" ——
+    * 正是要消灭的默认值填充。因此这类字段在 codec 里声明为 `Option`，读取时经这里，
+    * 让"缺失"变成一次带上下文的失败。 */
+  def requireFlag(value: Option[Boolean], exchange: String, field: String, context: => String): Boolean =
+    value.getOrElse(
+      throw IllegalStateException(s"$exchange 报文缺字段 $field ($context) —— 它不是可选项, 不能当成 false")
+    )
+
   /** 出站数字格式的**单一数据源**：定点、无科学计数、去掉尾随零。
     *
     * `Double.toString` 会在小量级上给出 `1.0E-4` 这种科学计数法，交易所一律拒收；

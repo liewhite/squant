@@ -114,3 +114,12 @@ class OkxCodecSpec extends munit.FunSuite:
     val push = readFromString[OkxEnvelope]("""{"arg":{"channel":"bbo-tbt","instId":"BTC-USDT-SWAP"},"data":[]}""")
     assertEquals(push.event, "")
     assertEquals(push.arg.channel, "bbo-tbt")
+
+  test("reduceOnly 缺失与 false 分得开 —— OKX 用字符串, 空串即缺失"):
+    // 把缺失当成 false 就是给缺失字段填默认值; 而策略拿它给 resting 单分槽。
+    assertEquals(OkxCodec.booleanFrom("true", "reduceOnly"), true)
+    assertEquals(OkxCodec.booleanFrom("false", "reduceOnly"), false)
+    val missing = intercept[IllegalStateException](OkxCodec.booleanFrom("", "reduceOnly"))
+    assert(missing.getMessage.contains("缺字段"), missing.getMessage)
+    val bad = intercept[IllegalStateException](OkxCodec.booleanFrom("1", "reduceOnly"))
+    assert(bad.getMessage.contains("不是布尔字符串"), bad.getMessage)

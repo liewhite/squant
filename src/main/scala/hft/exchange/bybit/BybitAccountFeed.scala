@@ -2,7 +2,7 @@ package hft.exchange.bybit
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{AccountFeed, AccountReport, WsLoop}
+import hft.exchange.{AccountFeed, AccountReport, RestTransport, WsLoop}
 import org.slf4j.LoggerFactory
 import ox.channels.Channel
 import sttp.client4.WebSocketSyncBackend
@@ -173,6 +173,7 @@ final class BybitAccountFeed(
       status = status,
       price = Price(d.price.asDoubleOrZero),
       avgFillPrice = Price(d.avgPrice.asDoubleOrZero), // 记账用它 —— 市价单的 price 为空
+      reduceOnly = RestTransport.requireFlag(d.reduceOnly, "Bybit", "reduceOnly", s"orderId=${d.orderId}"),
       quantity = Coin(d.qty.asDouble),
       filledQuantity = filled,
       timestamp = d.updatedTime.toLongOption.getOrElse(

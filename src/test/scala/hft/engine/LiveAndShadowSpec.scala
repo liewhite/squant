@@ -47,7 +47,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
   /** 收到首个 BBO 就挂一张买单 —— 同一份逻辑给两个账户各跑一份 */
   private class OneShotMaker extends Strategy:
     private var placed = false
-    def orderTimeoutMs: Long = 0L
+    def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
     def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (b, ctx, _) =>
       if placed then Vector.empty
       else

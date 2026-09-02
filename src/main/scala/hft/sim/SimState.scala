@@ -51,13 +51,15 @@ final case class SimState(
     takerFeeRate: Double = 0.0,
     restingSeq: Long = 0L,
 ):
-  /** 估值价格：标记价 > BBO 中间价 > 最新成交价 (trade-only 行情用最新成交价估值) */
-  def markOf(symbol: Symbol): Price =
+  /** 估值价格：标记价 > BBO 中间价 > 最新成交价 (trade-only 行情用最新成交价估值)。
+    *
+    * 一条行情都没见过时给 `None`，不给 `Price.Zero` —— 0 是一个**合法的价格取值**，
+    * 用它表示"没见过行情"会让账本把一段未实现盈亏静默算成 0 (见 [[Ledger.equity]])。 */
+  def markOf(symbol: Symbol): Option[Price] =
     lastMark
       .get(symbol)
       .orElse(lastBbo.get(symbol).map(_.midPrice))
       .orElse(lastTrade.get(symbol))
-      .getOrElse(Price.Zero)
 
   // ==================== 上游行情到达 (实时, 用于撮合) ====================
 
@@ -159,7 +161,7 @@ final case class SimState(
       case Some((orderId, o)) =>
         val ev = Event.stamped(
           Topics.OrderUpdate,
-          OrderUpdate(account, orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, Coin.Zero, now),
+          OrderUpdate(account, orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, Coin.Zero, o.reduceOnly, now),
           now,
           now,
         )
@@ -202,7 +204,7 @@ final case class SimState(
           case Side.Long  => qty.min((-posSize).max(Coin.Zero)) // 买平空: 至多平掉现有空头
     if reduceOnly && effectiveQty.isZero then
       // reduceOnly 无可平仓位 -> 不成交，回 Cancelled (订单已被调用方移出簿 / 不入簿)
-      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Cancelled, fillPrice, qty, Coin.Zero, now)
+      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Cancelled, fillPrice, qty, Coin.Zero, reduceOnly, now)
       (this, Vector(Event.stamped(Topics.OrderUpdate, update, now, now)))
     else
       val feeRate = liquidity match
@@ -210,7 +212,7 @@ final case class SimState(
         case Liquidity.Taker => takerFeeRate
       val fee = effectiveQty.notional(fillPrice) * feeRate
       val next = copy(ledger = ledger.applyFill(exchange, symbol, side, fillPrice, effectiveQty, fee))
-      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, now)
+      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, reduceOnly, now)
       val f = Fill(account, exchange, symbol, side, fillPrice, effectiveQty, now)
       // 顺序是这三条的全部意义, 见 hft.exchange.TradingGateway 的"回报有固定顺序":
       //   仓位快照 -> 成交 -> 订单终态
@@ -226,7 +228,7 @@ final case class SimState(
   private def statusEvent(exchange: Exchange, order: Order, orderId: OrderId, status: OrderStatus, price: Price, now: Timestamp): AnyEvent =
     Event.stamped(
       Topics.OrderUpdate,
-      OrderUpdate(account, orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, Coin.Zero, now),
+      OrderUpdate(account, orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, Coin.Zero, order.reduceOnly, now),
       now,
       now,
     )

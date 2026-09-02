@@ -25,7 +25,3 @@ class FundingRateSpec extends munit.FunSuite:
   test("数据已过结算时间则视为过期，返回 0"):
     assertEquals(FundingRate(Exchange.Binance, "BTCUSDT", 0.0001, nextSettleTime = t0, timestamp = t0).dailyRate, 0.0)
 
-  test("dailyRateWithBaseTime 用统一基准跨交易所比较"):
-    val r = rate(0.0002, 8)
-    // 统一基准取 2 小时后结算
-    assertEqualsDouble(r.dailyRateWithBaseTime(t0 + 2 * hour, t0), 0.0002 * 12, 1e-12)

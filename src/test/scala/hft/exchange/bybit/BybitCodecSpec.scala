@@ -158,3 +158,29 @@ class BybitCodecSpec extends munit.FunSuite:
     val data = readFromString[BybitWsMsg]("""{"topic":"tickers.BTCUSDT","ts":1,"data":{}}""")
     assertEquals(data.op, "")
     assertEquals(data.topic, "tickers.BTCUSDT")
+
+  test("reduceOnly 缺失与 false 分得开 —— 缺失即抛, 不当成 false"):
+    // jsoniter 对缺失字段取默认值, 于是 `Boolean = false` 会把"报文没带"变成"值是 false"。
+    // 而策略拿 reduceOnly 给 resting 单分槽 (止盈槽 vs 加仓槽), 归错槽就会多挂一张单。
+    val withoutFlag = readFromString[WsList[OrderData]](
+      """{"topic":"order","id":"x","data":[{"symbol":"BTCUSDT","orderId":"o1","side":"Buy","orderStatus":"New"}]}"""
+    ).data.head
+    assertEquals(withoutFlag.reduceOnly, None, "codec 里必须是 Option, 不能是默认 false")
+    val e = intercept[IllegalStateException](
+      hft.exchange.RestTransport.requireFlag(withoutFlag.reduceOnly, "Bybit", "reduceOnly", "orderId=o1")
+    )
+    assert(e.getMessage.contains("不能当成 false"), e.getMessage)
+
+    val withFlag = readFromString[WsList[OrderData]](
+      """{"topic":"order","id":"x","data":[{"symbol":"BTCUSDT","orderId":"o1","side":"Buy","orderStatus":"New","reduceOnly":true}]}"""
+    ).data.head
+    assertEquals(hft.exchange.RestTransport.requireFlag(withFlag.reduceOnly, "Bybit", "reduceOnly", "o1"), true)
+
+  test("REST 挂单查询同样必须带 reduceOnly (缺失即抛, 不当成 false)"):
+    val withoutFlag = readFromString[OpenOrdersResp](
+      """{"retCode":0,"retMsg":"OK","result":{"list":[{"symbol":"BTCUSDT","orderId":"o1","side":"Buy","orderStatus":"New","updatedTime":"1700000000000"}],"nextPageCursor":""}}"""
+    ).result.list.head
+    assertEquals(withoutFlag.reduceOnly, None)
+    intercept[IllegalStateException](
+      hft.exchange.RestTransport.requireFlag(withoutFlag.reduceOnly, "Bybit", "reduceOnly", "orderId=o1")
+    )

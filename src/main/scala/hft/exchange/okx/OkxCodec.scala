@@ -41,6 +41,25 @@ private[okx] object OkxCodec:
       case Array(base, _) => Some(base)
       case _              => None
 
+  /** OKX 用字符串 "true"/"false" 表达布尔 (v5 的 `reduceOnly` 就是这个形态)。
+    *
+    * **待人工核实**：本仓库无法确认 OKX 是否在**每一个**订单接口与推送里都返回 `reduceOnly`
+    * (文档未就此明确表态)。这里选择"缺失即抛"而不是"缺失当 false"：后者正是要消灭的默认值
+    * 填充，代价是若某个接口真的不返回它，实盘会在收到第一条订单推送时失败并打出这条消息。
+    * 上实盘前请抓一条真实推送确认；若确实不返回，正确的修法是把它一路做成 `Option` 传到
+    * 策略、由策略决定怎么办，而不是退回 `false`。
+    *
+    * 空串 = **报文里没有这个字段** (codec 的默认值)，与"值不认识"分开报错：把缺失当成 `false`
+    * 正是要消灭的那种默认值填充，而 `reduceOnly` 决定了策略把 resting 单归到哪个槽。 */
+  def booleanFrom(raw: String, field: String): Boolean = raw match
+    case "true"  => true
+    case "false" => false
+    case "" =>
+      throw IllegalStateException(
+        s"OKX 报文缺字段 $field —— 它决定策略如何归类挂单, 不能当成 false。请核对该接口的响应字段"
+      )
+    case other => throw IllegalStateException(s"OKX $field 不是布尔字符串: '$other'")
+
   /** OKX 订单状态映射。按文档的**完整**枚举，只有文档之外的值才抛。
     *
     * 依据 OKX v5 文档: 终态是 `filled` / `canceled` / `mmp_canceled` (做市商保护撤单),
@@ -119,6 +138,8 @@ private[okx] object OkxCodec:
       clOrdId: String = "",
       side: String = "",
       state: String = "",
+      /** OKX 以字符串 "true"/"false" 返回。默认空串 = 报文没带, 由 booleanFrom 报错 */
+      reduceOnly: String = "",
       px: String = "",      // 市价单为空
       sz: String = "0",     // 张
       fillSz: String = "0", // 本次成交 (张)
@@ -185,6 +206,8 @@ private[okx] object OkxCodec:
       px: String = "0",
       sz: String = "0",
       accFillSz: String = "0",
+      /** OKX 以字符串 "true"/"false" 返回。默认空串 = 报文没带, 由 booleanFrom 报错 */
+      reduceOnly: String = "",
       /** 交易所侧的最后更新时刻 (ms)。用它而不是本地钟：柜台把它当 exchangeTs 用作延迟基准。 */
       uTime: String = "",
   )

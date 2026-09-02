@@ -50,7 +50,7 @@ final class BandHedgeStrategy(
   /** 对冲中心价 (NaN = 尚未初始化，首个行情设为现价) */
   private var center: Double = Double.NaN
 
-  override def orderTimeoutMs: Long = 5000
+  override def orderTimeoutMs: Long = Strategy.RecommendedOrderTimeoutMs
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
     .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, _) =>

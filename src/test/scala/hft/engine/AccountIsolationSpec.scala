@@ -26,7 +26,7 @@ class AccountIsolationSpec extends munit.FunSuite:
 
   /** 记录自己看到的成交与仓位；两个实例共用同一份逻辑 */
   private class Recorder(seen: ConcurrentLinkedQueue[String], tag: String) extends Strategy:
-    def orderTimeoutMs: Long = 0L
+    def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
     def handlers = StrategyHandlers.empty
       .market(Topics.Bbo, inst) { (_, _, _) => seen.add(s"$tag:bbo"); Vector.empty }
       .own(Topics.Fill) { (f, _, _) => seen.add(s"$tag:fill:${f.size}"); Vector.empty }

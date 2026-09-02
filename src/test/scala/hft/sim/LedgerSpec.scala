@@ -56,17 +56,23 @@ class LedgerSpec extends munit.FunSuite:
     assertEquals(sizeOf(l), 0.0)
     assertEquals(l.cash, 10_020.0)
 
-  test("equity / notional 用未实现盈亏估值"):
+  test("equity 用未实现盈亏估值"):
     val l = empty.applyFill(ex, sym, Side.Long, 100.0, Coin(2.0))
-    val markOf = (_: Symbol) => Price(150.0)
+    val markOf = (_: Symbol) => Some(Price(150.0))
     assertEquals(l.equity(markOf), 10_000.0 + (150.0 - 100.0) * 2.0) // 10100
-    assertEquals(l.notional(markOf), 2.0 * 150.0) // 300
     // openPositions 是**总线形态**, 只有数量 —— 未实现盈亏由 equity 表达 (见 Position 的说明)
     assertEquals(l.openPositions(ex).head.size.value, 2.0)
 
-  test("无估值价格 (mark<=0) 时未实现盈亏记 0"):
+  test("持有仓位却拿不到估值价 -> 抛错, 不把那段盈亏记成 0"):
+    // 净值是策略杠杆闸门读的数。记 0 会让它读到一个偏小的净值且没有任何症状。
     val l = empty.applyFill(ex, sym, Side.Long, 100.0, Coin(2.0))
-    assertEquals(l.equity((_: Symbol) => 0.0), 10_000.0)
+    val e = intercept[RuntimeException](l.equity((_: Symbol) => None))
+    assert(e.getMessage.contains("没有可用的估值价"), e.getMessage)
+    // 0 价同样不是估值价 (它是一个合法的价格取值, 不能用来表示"没有")
+    intercept[RuntimeException](l.equity((_: Symbol) => Some(Price(0.0))))
+
+  test("空仓不需要估值价 —— 那一段盈亏本来就是 0"):
+    assertEquals(empty.equity((_: Symbol) => None), 10_000.0)
 
   test("Matcher.marketable (taker, 乐观): 价格重合即可成交"):
     val bbo = BBO(ex, sym, bidPrice = 100.0, Coin(1), askPrice = 101.0, Coin(1), timestamp = 0)

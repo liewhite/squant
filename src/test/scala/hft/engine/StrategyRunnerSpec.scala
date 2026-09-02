@@ -21,7 +21,7 @@ class StrategyRunnerSpec extends munit.FunSuite:
     val position = Event.local(Topics.Position, Position(AccountId.Live, ex, "BTCUSDT", 1.0))
     val orderUpdate = Event.local(
       Topics.OrderUpdate,
-      OrderUpdate(AccountId.Live, "1", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Filled, 100.0, Coin(1.0), Coin(1.0), 0L),
+      OrderUpdate(AccountId.Live, "1", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Filled, 100.0, Coin(1.0), Coin(1.0), reduceOnly = false, 0L),
     )
     assert(sub.accepts(position), "持仓必须补齐: 漏订就是拿着错的敞口决策")
     assert(sub.accepts(orderUpdate), "订单回报必须补齐: 超时检测与停机撤单都靠它")

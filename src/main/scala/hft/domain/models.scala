@@ -141,6 +141,13 @@ final case class OrderUpdate(
     quantity: Coin,
     /** 累计成交量 */
     filledQuantity: Coin,
+    /** 是否只减仓。
+      *
+      * **没有默认值是有意的**：策略拿它给 resting 单分槽 (止盈槽 vs 加仓槽)。从前对齐时接管的
+      * 挂单在本地被伪造成 `reduceOnly = false` —— 重启后真正的止盈单被归进加仓槽，策略以为
+      * 没有止盈单、于是再挂一张，而那张真的止盈单还在簿上。
+      * 三家交易所的挂单查询与订单推送都返回这个字段，它不是"填不出来"的事实，是没去读。 */
+    reduceOnly: Boolean,
     timestamp: Timestamp,
 )
 
@@ -243,8 +250,13 @@ final case class FundingRate(
   /** 基于剩余时间的日化费率: rate * 24 / hoursToSettle (最小 1 小时防止结算临近时爆炸) */
   def dailyRate: Rate = dailyRateWithBaseTime(nextSettleTime, timestamp)
 
-  /** 基于指定时间基准的日化费率，用于跨交易所公平比较 */
-  def dailyRateWithBaseTime(baseSettleTime: Timestamp, currentTime: Timestamp): Rate =
+  /** 基于指定时间基准的日化费率。
+    *
+    * 它公开的理由曾是"跨交易所用统一基准公平比较"，而那个消费者
+    * (`SymbolView.bestShort/bestLongExchange`) 已随无人使用一并删除。现在只剩
+    * [[dailyRate]] 一个调用方，故收成私有 —— 一个没有消费者的公开参数化入口，
+    * 只会让读者以为存在"另一种基准"的用法。 */
+  private def dailyRateWithBaseTime(baseSettleTime: Timestamp, currentTime: Timestamp): Rate =
     if currentTime >= baseSettleTime then 0.0
     else
       val hoursToSettle = (baseSettleTime - currentTime).toDouble / (1000.0 * 60 * 60)

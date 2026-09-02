@@ -2,7 +2,7 @@ package hft.exchange.binance
 
 import com.github.plokhotnyuk.jsoniter_scala.core.*
 import hft.domain.*
-import hft.exchange.{AccountFeed, AccountReport, WsLoop}
+import hft.exchange.{AccountFeed, AccountReport, RestTransport, WsLoop}
 import org.slf4j.LoggerFactory
 import ox.channels.Channel
 import sttp.client4.WebSocketSyncBackend
@@ -110,6 +110,7 @@ final class BinanceAccountFeed(
       price = o.p.asPrice,
       avgFillPrice = o.ap.asPrice, // 记账用它 —— 市价单的 o.p 是 0
       quantity = Coin(o.q.asDouble),
+      reduceOnly = RestTransport.requireFlag(o.R, "Binance", "R(reduceOnly)", s"orderId=${o.i}"),
       filledQuantity = filledQty,
       timestamp = o.T,
     ))

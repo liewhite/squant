@@ -4,6 +4,7 @@ import hft.actor.{Actor, ActorContext, Requirement}
 import hft.domain.*
 import hft.event.Commands.{AccountSync, AccountSynced, MarketSubscription, OrderIntent}
 import hft.event.{AnyEvent, Interest, Subscription}
+import hft.exchange.RestTransport
 import hft.strategy.Strategy
 
 /** 策略执行器：把一个 [[Strategy]] 包装成引擎里的 [[Actor]]。
@@ -20,8 +21,13 @@ final class Executor private (
       * 是危险侧失效；装配处若留个 `= Live` 的默认值，等于把同一个坑重新挖开 ——
       * 给影子策略装配时忘传账户，它就真金白银在实盘上跑，而编译器不会吭声。 */
     val account: AccountId,
-    /** 是否要等启动对齐落地才叫醒策略。见 [[awaiting]] */
-    awaitAlignment: Boolean,
+    /** 本次启动对齐的**轮次编号**；`None` = 调用方自己保证世界已就绪 (测试/回测)。
+      *
+      * 编号不是装饰: 对齐应答按 `(账户, 交易所)` 路由，而**同一个 (账户, 交易所) 上可以有
+      * 多个策略会话**(同批装配、或先后装载)。只按 target 放行的话，A 会话的应答会打开
+      * B 会话的闸门 —— 那一刻 B 自己那一轮的仓位与挂单还在几次 REST 往返之外，
+      * 它会按"仓位为零"做第一次决策。见 [[awaiting]] 与 plugin-bus 架构文档 §7.3。 */
+    alignmentRequestId: Option[Long],
 ) extends Actor:
   private val runner = StrategyRunner(strategy, account)
 
@@ -38,7 +44,8 @@ final class Executor private (
     * 把闸门放在策略这一侧，"对齐先于行情"就从**指令发出顺序**升级为**策略可见顺序**，
     * 上面那几种场景一并覆盖。
     */
-  private var awaiting: Set[AccountExchange] = if awaitAlignment then alignmentTargets else Set.empty
+  private var awaiting: Set[AccountExchange] =
+    if alignmentRequestId.isDefined then alignmentTargets else Set.empty
 
   override def name: String = s"executor(${strategy.getClass.getSimpleName}@$account)"
 
@@ -61,11 +68,9 @@ final class Executor private (
 
   /** 实盘组件的硬依赖从订阅范围派生；测试/回测的 readyToTrade 形态由调用方直接驱动，不装配依赖。 */
   override def requirements: Set[Requirement] =
-    if !awaitAlignment then Set.empty
+    if alignmentRequestId.isEmpty then Set.empty
     else
-      val market = runner.subscription.marketStreams.map(_._1).map { exchange =>
-        Requirement.command(MarketSubscription, exchange, s"行情订阅指令 $exchange 无处理者")
-      }
+      val market = Requirement.marketSubscriptions(runner.subscription)
       val account = runner.subscription.exchanges.flatMap { exchange =>
         val target = AccountExchange(this.account, exchange)
         Set(
@@ -85,8 +90,11 @@ final class Executor private (
   /** 策略产出什么就发什么 —— 下单意图、也可以是它自己的指标事件。
     * 账户由 [[hft.strategy.StrategyContext]] 在构造下单意图时补上，这里不再包一层。 */
   override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-    // 对齐应答是给闸门看的, 不归策略 —— 它不在策略的订阅范围里, 别喂给状态机
-    event.as(AccountSynced).foreach(report => awaiting -= report.target)
+    // 对齐应答是给闸门看的, 不归策略 —— 它不在策略的订阅范围里, 别喂给状态机。
+    // **只认领本轮的应答**: 别人那一轮的 ACK 打开自己的闸门, 等于放行一个仓位还没到手的策略。
+    event.as(AccountSynced).foreach { report =>
+      if alignmentRequestId.contains(report.requestId) then awaiting -= report.target
+    }
     if !runner.accepts(event) then Vector.empty
     else if awaiting.nonEmpty then
       // 对齐未落地: 状态照收 (排队的事件一条都不能丢), 但先不叫醒策略
@@ -114,8 +122,20 @@ object Executor:
     * 闸门在构造时就位，不靠装配方记得调一下 —— spawn 之后事件循环立即开跑，
     * 那种"必须在某步之前调用"的约定迟早有人漏掉。
     */
-  def apply(strategy: Strategy, account: AccountId): Executor =
-    new Executor(strategy, account, awaitAlignment = true)
+  def apply(strategy: Strategy, account: AccountId, alignmentRequestId: Long): Executor =
+    // 实盘装配是**唯一知道"这是实盘"的位置**, 所以那条不变量落在这里:
+    //   REST 读超时 < orderTimeoutMs
+    // 它此前只写在文档里 (hft-framework.md 与 RestTransport 的注释), 没有一处代码承载。
+    // 反了会怎样: 本地等得比策略的订单超时还久 -> 策略先判定"订单结果不确定"并终止,
+    // 而那次 REST 其实还在路上。0 (关闭校验) 更是把唯一能发现"结果不确定"的机制关掉,
+    // 它的合法用途只有回测与单测 (确认是同步的), 那两条路走 readyToTrade。
+    require(
+      strategy.orderTimeoutMs > RestTransport.ReadTimeout.toMillis,
+      s"${strategy.getClass.getSimpleName} 的 orderTimeoutMs=${strategy.orderTimeoutMs}ms 必须大于 " +
+        s"REST 读超时 ${RestTransport.ReadTimeout.toMillis}ms —— 实盘装配不接受 " +
+        "(0 = 关闭校验, 只允许在回测/单测里使用)",
+    )
+    new Executor(strategy, account, Some(alignmentRequestId))
 
   /** 世界已经就绪的执行器 —— **不等对齐**。
     *
@@ -126,4 +146,4 @@ object Executor:
     * 文档里，所以收成 `private[hft]`：框架内的测试与回测够得着，框架外的装配代码够不着。
     */
   private[hft] def readyToTrade(strategy: Strategy, account: AccountId): Executor =
-    new Executor(strategy, account, awaitAlignment = false)
+    new Executor(strategy, account, alignmentRequestId = None)

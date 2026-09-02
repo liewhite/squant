@@ -120,6 +120,8 @@ private[bybit] object BybitCodec:
       qty: String = "0",
       cumExecQty: String = "0", // 累计成交 (币本位)
       avgPrice: String = "0",   // 累计成交均价；未成交时为空。**记账用它, 不能用 price** (市价单 price 为空)
+      /** 缺失与 false 必须分得开 —— 见 BybitAccountFeed.requireReduceOnly */
+      reduceOnly: Option[Boolean] = None,
       /** 交易所侧的更新时刻 (ms)。docs/v5/websocket/private/order: "Order updated timestamp (ms)"。
         * 用它而不是本地钟 —— 柜台把它当 exchangeTs 用作延迟基准, 本地钟会让延迟恒为零。 */
       updatedTime: String = "",
@@ -170,6 +172,8 @@ private[bybit] object BybitCodec:
       price: String = "0",
       qty: String = "0",
       cumExecQty: String = "0",
+      /** 缺失与 false 必须分得开 —— 见 BybitAccountFeed.requireReduceOnly */
+      reduceOnly: Option[Boolean] = None,
       /** 交易所侧的最后更新时刻 (ms)。用它而不是本地钟：本地钟会让延迟统计恒为零。 */
       updatedTime: String = "",
   )

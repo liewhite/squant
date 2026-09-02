@@ -9,9 +9,14 @@ import scala.collection.mutable
   *
   * 可变状态，仅在所属 Executor 的虚拟线程内访问，无需同步。
   */
-final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long) extends StateView:
+final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long) extends StateView:
+  /** 每个标的一份状态，并把**它声明过的交易所**一起带下去。
+    *
+    * 从前这里只收 `symbols`，`Instrument` 的 exchange 维度在状态层被丢掉了 —— 于是
+    * "从未声明、从未对齐的交易所"与"已对齐的空仓"读数完全相同 (都是 0)，跨所策略问错
+    * 一个交易所会静默拿到零仓。声明集合是一个事实，不该在这一层只剩一半。 */
   private val states: Map[Symbol, SymbolState] =
-    symbols.map(s => s -> SymbolState(s)).toMap
+    instruments.groupMap(_.symbol)(_.exchange).map((sym, exs) => sym -> SymbolState(sym, exs.toSet)).toMap
   private val balances: mutable.Map[Exchange, Double] = mutable.Map.empty
   private val accountInfos: mutable.Map[Exchange, AccountInfo] = mutable.Map.empty
   /** 原始账户级希腊字母 (按 (交易所, 币种) 索引)，delta 未含现货修正 */
@@ -48,7 +53,7 @@ final class StateManager(symbols: Iterable[Symbol], orderTimeoutMs: Long) extend
 
   def totalUsdtBalance: Double = balances.values.sum
 
-  /** 账户信息 (equity + notional 原子性保证)，None 表示数据尚未到达 */
+  /** 账户信息 (目前只有净值)，None 表示数据尚未到达 */
   def accountInfo(exchange: Exchange): Option[AccountInfo] = accountInfos.get(exchange)
 
   def equity(exchange: Exchange): Option[Double] = accountInfos.get(exchange).map(_.equity)

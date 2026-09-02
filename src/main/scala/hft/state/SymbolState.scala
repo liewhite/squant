@@ -17,13 +17,11 @@ final case class PendingOrder(
   *
   * 可变状态，仅在所属 Executor 的虚拟线程内访问，无需同步。
   */
-final class SymbolState(val symbol: Symbol) extends SymbolView:
+final class SymbolState(val symbol: Symbol, val declaredExchanges: Set[Exchange]) extends SymbolView:
   private val logger = LoggerFactory.getLogger(classOf[SymbolState])
 
   val fundingRates: mutable.Map[Exchange, FundingRate] = mutable.Map.empty
   val bbos: mutable.Map[Exchange, BBO] = mutable.Map.empty
-  /** 最新公共成交印记 (trade-only 行情下作价格基准) */
-  val lastTrades: mutable.Map[Exchange, MarketTrade] = mutable.Map.empty
   val markPrices: mutable.Map[Exchange, MarkPrice] = mutable.Map.empty
   val indexPrices: mutable.Map[Exchange, IndexPrice] = mutable.Map.empty
   val positions: mutable.Map[Exchange, Position] = mutable.Map.empty
@@ -33,24 +31,28 @@ final class SymbolState(val symbol: Symbol) extends SymbolView:
   // ==================== 查询 ====================
 
   def bbo(exchange: Exchange): Option[BBO] = bbos.get(exchange)
-  def lastTrade(exchange: Exchange): Option[MarketTrade] = lastTrades.get(exchange)
-  /** 最新成交价 (trade-only 行情下的价格基准)，无成交记录返回 None */
-  def lastTradePrice(exchange: Exchange): Option[Price] = lastTrades.get(exchange).map(_.price)
   def markPrice(exchange: Exchange): Option[MarkPrice] = markPrices.get(exchange)
   def indexPrice(exchange: Exchange): Option[IndexPrice] = indexPrices.get(exchange)
   def fundingRate(exchange: Exchange): Option[FundingRate] = fundingRates.get(exchange)
   def position(exchange: Exchange): Option[Position] = positions.get(exchange)
 
-  /** 仓位大小。无仓位记录等价于空仓 (size = 0)，策略启动初期确实没有仓位 */
+  /** 仓位大小。**已声明的交易所上"没有记录 = 空仓"**，这一条有依据，不是兜底：
+    *
+    *   - 实盘/影子：柜台在启动对齐时为每个已声明标的**显式推一条零仓快照**
+    *     (见 `TradingGateway.syncEvents`)，而策略在对齐落地之前根本不动作
+    *     (见 `Executor.awaiting` 的闸门)。所以策略能看到的第一个决策时刻，快照必已到达。
+    *   - 回测 / `Executor.readyToTrade`：账户按构造从零开始，"没有仓位"就是事实。
+    *
+    * 换句话说，这里不存在"其实有仓位但记录还没到"的窗口 —— 那个窗口被闸门挡住了。
+    * 需要区分"还没有任何快照"与"仓位为零"的调用方 (诊断、监控) 用 [[position]]，它给 `Option`。 */
   def positionSize(exchange: Exchange): Coin =
+    // 只对**声明过**的交易所成立: 没声明就没有对齐, 那时的 0 不是"空仓"而是"问错了地方"。
+    require(
+      declaredExchanges.contains(exchange),
+      s"[$symbol] 没有声明 $exchange (已声明: ${declaredExchanges.mkString(",")}) —— " +
+        "未声明的交易所不会被对齐, 读到的 0 不是空仓",
+    )
     positions.get(exchange).map(_.size).getOrElse(Coin.Zero)
-
-  def hasPositions: Boolean = positions.values.exists(p => !p.isEmpty)
-
-  /** 多空仓位大小: (多头总量(正), 空头总量(负)) */
-  def positionSizes: (Coin, Coin) =
-    val sizes = positions.values.map(_.size)
-    (sizes.filter(_ > Coin.Zero).sumCoin, sizes.filter(_ < Coin.Zero).sumCoin)
 
   def hasPendingOrders: Boolean = _pendingOrders.nonEmpty
 
@@ -58,26 +60,6 @@ final class SymbolState(val symbol: Symbol) extends SymbolView:
     _pendingOrders.values.exists(_.order.side == side)
 
   def pendingOrders: Iterable[PendingOrder] = _pendingOrders.values
-
-  /** 统一时间基准: (所有交易所中最近的结算时间, 最新数据时间)，用于公平比较日化费率 */
-  private def unifiedTimeBase: Option[(Timestamp, Timestamp)] =
-    if fundingRates.isEmpty then None
-    else
-      val minSettle = fundingRates.values.map(_.nextSettleTime).min
-      val current = fundingRates.values.map(_.timestamp).max
-      Some((minSettle, current))
-
-  /** 日化费率最高的交易所 (适合做空收资费) */
-  def bestShortExchange: Option[(Exchange, FundingRate)] =
-    unifiedTimeBase.map { (base, current) =>
-      fundingRates.maxBy((_, r) => r.dailyRateWithBaseTime(base, current))
-    }
-
-  /** 日化费率最低的交易所 (适合做多付资费) */
-  def bestLongExchange: Option[(Exchange, FundingRate)] =
-    unifiedTimeBase.map { (base, current) =>
-      fundingRates.minBy((_, r) => r.dailyRateWithBaseTime(base, current))
-    }
 
   // ==================== 订单管理 ====================
 
@@ -97,6 +79,8 @@ final class SymbolState(val symbol: Symbol) extends SymbolView:
     * 已确认挂单 (Pending/PartiallyFilled) 由策略决定何时撤单，不参与校验。
     */
   def failOnTimedOutOrders(now: Timestamp, timeoutMs: Long): Unit =
+    // 0 = 关闭 (回测/单测: 下单确认是同步的, 不存在"结果不确定")。这条语义写在
+    // Strategy.orderTimeoutMs 的契约里, 实盘装配路径由 Executor.apply 拒绝 0。
     if timeoutMs > 0 then
       _pendingOrders.find((_, p) => p.status == OrderStatus.Created && now - p.createdAt > timeoutMs).foreach {
         (clientId, p) =>
@@ -116,7 +100,6 @@ final class SymbolState(val symbol: Symbol) extends SymbolView:
   def apply(event: AnyEvent): Unit =
     event.as(Topics.FundingRate).foreach(r => fundingRates(r.exchange) = r)
     event.as(Topics.Bbo).foreach(b => bbos(b.exchange) = b)
-    event.as(Topics.Trade).foreach(t => lastTrades(t.exchange) = t)
     event.as(Topics.MarkPrice).foreach(m => markPrices(m.exchange) = m)
     event.as(Topics.IndexPrice).foreach(i => indexPrices(i.exchange) = i)
     event.as(Topics.Position).foreach(applyPosition)
@@ -137,7 +120,12 @@ final class SymbolState(val symbol: Symbol) extends SymbolView:
       s"[$symbol] order status: exchange=${update.exchange} orderId=${update.orderId} " +
         s"clientOrderId=${update.clientOrderId} status=${update.status}"
     )
-    // 用 clientOrderId 跟踪订单；没有 clientOrderId 说明不是我们发起的订单，忽略
+    // 用 clientOrderId 跟踪订单；**没有 clientOrderId 就不是我们发起的单**。
+    //
+    // 这条依据现在两条路径一致: WS 推送与 REST 挂单查询都只在交易所真的带了 clOrdId/orderLinkId
+    // 时给出 Some (适配层不再拿 ordId 冒充)。而 OKX 文档写明 clOrdId "will be included in the
+    // response if provided in the request" —— 手工单、交易所生成的 TP/SL 都没有它。
+    // 别人的单不该进本策略的挂单登记: 那会让 hasPendingOrders 恒真、槽位判断错乱。
     update.clientOrderId.foreach { clientId =>
       if update.status.isTerminal then _pendingOrders.remove(clientId)
       else if update.status.isConfirmed then
@@ -149,7 +137,15 @@ final class SymbolState(val symbol: Symbol) extends SymbolView:
               else pending.order
             _pendingOrders(clientId) = pending.copy(order = order, status = update.status)
           case None =>
-            // 启动时同步的现有挂单，注册到 pendingOrders
+            // 启动对齐时从交易所接管的既有挂单 (上一个进程留下的自己的单)。
+            //
+            // `reduceOnly` 取回报里的真值, 不再本地填 false —— 策略拿它给 resting 单分槽
+            // (止盈槽 vs 加仓槽), 填错会让重启后真正的止盈单被归进加仓槽, 于是再挂一张,
+            // 而那张真的止盈单还在簿上。
+            //
+            // TIF 记为 GTC 有依据而不是默认值: **还在簿上 resting 的限价单必然是 GTC 语义** ——
+            // IOC/FOK 从不 resting, 而 PostOnly 只是下单时刻的约束, 对一张已经挂上的单
+            // 不再有行为差别。
             val order = Order(
               id = update.orderId,
               exchange = update.exchange,
@@ -157,7 +153,7 @@ final class SymbolState(val symbol: Symbol) extends SymbolView:
               side = update.side,
               orderType = OrderType.Limit(update.price, TimeInForce.GTC),
               quantity = update.quantity,
-              reduceOnly = false,
+              reduceOnly = update.reduceOnly,
               clientOrderId = clientId,
             )
             _pendingOrders(clientId) = PendingOrder(order, update.status, update.timestamp)

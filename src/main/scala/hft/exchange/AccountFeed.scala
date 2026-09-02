@@ -63,6 +63,9 @@ enum AccountReport:
       avgFillPrice: Price,
       quantity: Coin,
       filledQuantity: Coin,
+      /** 是否只减仓 —— 三家的挂单查询与订单推送都返回它。策略拿它给 resting 单分槽,
+        * 本地伪造一个 false 会让重启后真正的止盈单被归错槽、于是再挂一张。 */
+      reduceOnly: Boolean,
       timestamp: Timestamp,
   )
 

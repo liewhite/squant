@@ -164,8 +164,9 @@ final class DeltaHedgeStrategy(
       series.update(t, h); series.update(t, l); series.update(t, c)
     }
 
-  // 订单超时需 > requote, 否则框架会先把正常挂单当超时清理
-  override def orderTimeoutMs: Long = quotes.maxTtlMs * 3
+  // **不是**"挂单能挂多久": 已确认的 resting 单豁免这项校验, 它只管"下单到确认"这一跳。
+  // 从前按 TTL 的 3 倍配, 依据是一份写错的契约 (见 Strategy.RecommendedOrderTimeoutMs)。
+  override def orderTimeoutMs: Long = Strategy.RecommendedOrderTimeoutMs
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
     .own(Topics.OrderUpdate) { (u, _, now) =>

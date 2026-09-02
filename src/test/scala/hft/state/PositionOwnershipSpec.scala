@@ -29,7 +29,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
   /** 挂一张买单；在成交回调与仓位回调里各记一次"此刻读到的仓位" */
   private class Recorder(atFill: ConcurrentLinkedQueue[Double], atPosition: ConcurrentLinkedQueue[Double]) extends Strategy:
     private var placed = false
-    def orderTimeoutMs: Long = 0L
+    def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
     def handlers = StrategyHandlers.empty
       .market(Topics.Bbo, inst) { (b, ctx, _) =>
         if placed then Vector.empty
@@ -77,7 +77,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
 
       class NoFill extends Strategy:
         private var placed = false
-        def orderTimeoutMs: Long = 0L
+        def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
         def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (b, ctx, _) =>
           seen.add(ctx.state.symbolState(sym).get.positionSize(ex).value)
           if placed then Vector.empty
@@ -140,7 +140,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
 
       class Checker extends Strategy:
         private var placed = false
-        def orderTimeoutMs: Long = 0L
+        def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
         def handlers = StrategyHandlers.empty
           .market(Topics.Bbo, inst) { (b, ctx, _) =>
             if placed then Vector.empty
@@ -174,7 +174,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
 
       feed.emit(AccountReport.OrderStatusChanged(
         "ex-1", Some(clientOrderId), sym, Side.Long, OrderStatus.Filled,
-        Price(100.0), Price(100.0), Coin(0.5), Coin(0.5), 2L,
+        Price(100.0), Price(100.0), Coin(0.5), Coin(0.5), false, 2L,
       ))
 
       // 先等终态确实到了策略手里, 否则"没有违规"可能只是还没发生
@@ -192,7 +192,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
 
       /** 每收到一条行情就记一次"此刻看到的仓位" */
       class Peeker extends Strategy:
-        def orderTimeoutMs: Long = 0L
+        def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
         def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (_, ctx, _) =>
           decisions.add(ctx.state.symbolState(sym).get.positionSize(ex).value)
           Vector.empty
@@ -208,7 +208,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
       // 行情先流起来 —— 模拟"这个标的早就有别的组件在看"
       bus.publish(Event.at(Topics.Bbo, BBO(ex, sym, 100.0, Coin(1.0), 100.1, Coin(1.0), 1L), 1L))
 
-      val gated = Executor(Peeker(), AccountId.Live) // 闸门自带, 无需装配方设置
+      val gated = Executor(Peeker(), AccountId.Live, alignmentRequestId = 7L) // 闸门自带, 无需装配方设置
       system.spawn(gated)
 
       // 此刻策略已在总线上, 行情继续流 —— 但对齐还没发
@@ -216,9 +216,22 @@ class PositionOwnershipSpec extends munit.FunSuite:
       Thread.sleep(100)
       assert(decisions.isEmpty, s"对齐落地前不该动作, 却已决策 ${decisions.asScala.toVector}")
 
-      // 对齐落地
+      // **别人那一轮的对齐应答不能打开自己的闸门**。
+      //
+      // 对齐应答按 (账户, 交易所) 路由, 而同一个 (账户, 交易所) 上可以有多个策略会话
+      // (同批装配、或先后装载)。只按 target 放行的话, A 会话的应答会放行 B —— 那一刻 B
+      // 自己那一轮的仓位还在几次 REST 往返之外, 它会按"仓位为零"做第一次决策。
+      val otherRound = bus.subscribe(Set(Interest.All(AccountSynced)))
+      bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 999L, Set(sym))))
+      otherRound.events.receive(): Unit
+      otherRound.close()
+      Thread.sleep(100)
+      assert(gated.isGated, "别人那一轮 (requestId=999) 的应答不该放行本会话的闸门")
+      assert(decisions.isEmpty, s"闸门未放行就不该决策, 却已决策 ${decisions.asScala.toVector}")
+
+      // 本轮对齐落地 (requestId 与闸门一致)
       val synced = bus.subscribe(Set(Interest.All(AccountSynced)))
-      bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 1L, Set(sym))))
+      bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 7L, Set(sym))))
       synced.events.receive(): Unit
       synced.close()
 
