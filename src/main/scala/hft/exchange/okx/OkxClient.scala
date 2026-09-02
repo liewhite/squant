@@ -89,7 +89,9 @@ class OkxPublicClient protected[okx] (
     publicGet[InstrumentsResp]("/api/v5/public/instruments?instType=SWAP").flatMap { resp =>
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator
-          // 只取配置 quote 的永续 —— 判定收在 fromOkx 里 (见它的说明), 这里不再重复一遍
+          // 只取配置 quote 的**已上市**永续 —— quote 判定收在 fromOkx 里 (见它的说明);
+          // state 判定在这里, 理由见 InstrumentData
+          .filter(_.state == "live")
           .flatMap { d =>
             fromOkx(d.instId, quote).map { sym =>
               SymbolMeta(

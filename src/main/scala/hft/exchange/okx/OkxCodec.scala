@@ -122,8 +122,15 @@ private[okx] object OkxCodec:
 
   // ==================== REST 响应 ====================
 
+  /** 合约规格。
+    *
+    * `state` 是**必须读的**：未上市的合约 (`preopen`) 会带着一整排空字符串下发规格字段，
+    * 而空串不是 "0"，`asDouble` 对它抛错 —— 于是交易所预告一个新合约就能让所有 OKX 客户端
+    * 在启动拉规格时崩掉，与本进程交易什么毫不相干。规格得等它真正上市才有意义。
+    */
   final case class InstrumentData(
       instId: String = "",
+      state: String = "",
       tickSz: String = "0",
       lotSz: String = "0",
       minSz: String = "0",
