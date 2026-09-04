@@ -1,5 +1,14 @@
 # TrendRide v4 — 三周期 MACD 共振 (15m 边沿扳机) 回测结果
 
+> ⚠️ **历史记录 —— 文中的代码已不在仓库里。**
+>
+> 本文引用的 `strategy.strategies.trendride.*` 在 `bbfb5e8`（策略集换代，淘汰 10 个旧策略）
+> 中随该批策略一并删除。留着这份文档是因为**结论本身仍然成立且是负结果**——负结果最容易被
+> 重复踩，删掉它等于让下一次重新做一遍。要看代码请从 `bbfb5e8^` 检出。
+>
+> 文中的数字**不可与现在的回测直接比较**：此后撮合与账本的口径变过（手续费不再有默认 0、
+> 无盘口的限价单不再静默 resting），且回测**不建模资金费**（见 `docs/hft-framework.md`）。
+
 > 代码：`strategy.strategies.trendride.{logic.TrendRideLogic, logic.TrendRideStrategy}`
 > 回测启动器：`strategy.strategies.trendride.backtest.TrendRideBacktest`
 > 数据：Binance UM 永续 trades（`data-cache/futures/um/daily/trades/`，已下载，无需联网）

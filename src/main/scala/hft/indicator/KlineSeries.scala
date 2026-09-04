@@ -19,7 +19,7 @@ final case class Candle(
   * 技术指标以**可叠加 trait** (stackable traits) 混入，覆写钩子 [[onBarClosed]] / [[onBarUpdated]]
   * (须 `abstract override` 并调 `super`，从而沿 mix-in 链依次更新)：
   * {{{
-  *   val klines = new KlineSeries(60_000, 200) with Macd with Kdj
+  *   val klines = new KlineSeries(60_000, 200) with Macd with Atr
   *   klines.update(ts, price, qty)   // 先更新 K 线，再依次更新各指标
   *   klines.macdDirection; klines.kdjValues
   * }}}
