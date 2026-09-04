@@ -59,6 +59,7 @@ object DashboardPage:
   <span class="meta" id="status">连接中…</span>
   <span class="meta" id="heartbeat"></span>
   <span class="meta" id="events"></span>
+  <span class="meta" id="venues"></span>
 </header>
 <section>
   <h2>资产（同一资产的各家交易所并排）</h2>
@@ -70,9 +71,18 @@ object DashboardPage:
 </section>
 
 <script>
-// 陈旧阈值只对**流式读数**成立: 超过 5s 变黄、超过 30s 标红。
-// 一个 4 分钟前的盘口和一个刚到的盘口长得一样, 就是把"不知道"显示成了正常值。
-const WARN_MS = 5000, DEAD_MS = 30000;
+// **"没更新"不等于"数据坏了"。**
+//
+// 股票永续在美股闭市时段几乎不成交, 报价几十秒不动是常态, 而那个价仍是当前真实盘口。
+// 连接真断了是另一回事: WsLoop 有 5 分钟空闲看门狗, 那时进程直接死, 看板也就没了 ——
+// 所以**进程还活着就说明连接是通的**, 报价不动只能说明市场安静。
+// 从前这里按绝对年龄给每条报价染色 (5s 黄 / 30s 红), 于是非交易时段满屏黄红, 而什么都没坏。
+//
+// 真正说明问题的是**不对称**:
+//   - 同一个资产上, 一家还在报而另一家落后很多 -> 那家可能卡住了, 且此时两家的价不可比;
+//   - 一整家交易所的心跳停了 (下面的 venueHeartbeat) -> 那家的流卡住了。
+const SKEW_WARN_MS = 5000;    // 组内报价时刻差: 超过它, 两家的价已经不可比
+const VENUE_DEAD_MS = 60000;  // 一整家所这么久没有任何事件 -> 它的流很可能卡住了
 
 // **年龄对两类读数的含义不同, 不能共用一套阈值。**
 //
@@ -92,37 +102,46 @@ function fmtAge(ms) {
   return ms < 1000 ? ms + 'ms' : ms < 60000 ? (ms / 1000).toFixed(1) + 's' : Math.floor(ms / 60000) + 'm';
 }
 
-/** 流式读数的年龄: 按阈值上色 (年龄 = 陈旧度)。 */
-function ageCell(ms) {
-  if (ms === null || ms === undefined) return '<span class="none">—</span>';
-  const cls = ms > DEAD_MS ? 'dead' : ms > WARN_MS ? 'old' : '';
-  return '<span class="age ' + cls + '">' + fmtAge(ms) + '</span>';
-}
-
-/** 变更驱动读数的年龄: 只显示, 不上色 (年龄 = 距上次变化多久, 不动是常态)。 */
+/** 年龄: 只显示, 不按绝对阈值上色。
+ *
+ * 无论行情还是仓位, 年龄都是"距上次更新多久", 而不动本身不是故障 —— 见文件头的说明。
+ */
 function sinceCell(ms) {
   if (ms === null || ms === undefined) return '<span class="none">—</span>';
   return '<span class="age">' + fmtAge(ms) + '</span>';
 }
 
+/** 组内落后的那一家: 它比同组最新的那条旧了多少。落后太多就标出来 —— 那既可能是它卡住了,
+ *  也意味着此刻它的价与别家不可比。 */
+function laggingCell(ms, freshest) {
+  if (ms === null || ms === undefined) return '<span class="none">—</span>';
+  const behind = ms - freshest;
+  const cls = behind > SKEW_WARN_MS ? 'old' : '';
+  return '<span class="age ' + cls + '">' + fmtAge(ms) + '</span>';
+}
+
 // 没有读数时显示 —— 而不是 0。这两者在交易上完全不是一回事。
 const dash = '<span class="none">—</span>';
 
-function reading(r, fmt) { return r ? fmt(r.value) + ' ' + ageCell(r.ageMs) : dash; }
+function reading(r, fmt) { return r ? fmt(r.value) + ' ' + sinceCell(r.ageMs) : dash; }
 
 function sideCls(v) { return v > 0 ? 'long' : v < 0 ? 'short' : 'none'; }
 
 /** 跨所极差 = 各所中价的 (max − min) / min，单位 bp。
  *
- * **只用新鲜的报价算**：拿一家的现价去比另一家 5 分钟前的价，差出来的是时间不是价差 ——
- * 全量宇宙里确实有标的在某家所几分钟不报价（实测最老到过 5 分钟）。不足两家新鲜就给"—"。
+ * **判据是同时性，不是新鲜度。** 三家一起安静时报价都"旧"却都仍是当前真实盘口，那个价差是
+ * 真的（非交易时段正是这样）；真正不可比的是**一边现价配另一边几十秒前的价** —— 差出来的
+ * 里面掺着这几十秒里对方走过的路。这与 crossspread 的 `maxQuoteAgeMs` 是同一条理由：
+ * "一边的陈旧报价配上另一边的实时报价，会把对方的正常波动算成价差异动"。
+ *
+ * 所以照算不误，但把时刻差 (skew) 一并显示出来；skew 大到不可比时标黄，让人自己判断。
  *
  * 这只是把页面上已经并排显示的几个数做一次减法，**不是策略的异动判断**：后者要看这一对
  * 自己的中枢与 z 值（见 crossspread 的 SpreadDislocations），持续存在的价差是结构性的，
  * 照着它开仓等来的不是回归。别把这一列当信号。
  */
 function crossVenueBps(venues) {
-  const mids = venues.filter(v => v.bbo && v.bbo.ageMs <= WARN_MS).map(v => v.bbo.value.mid);
+  const mids = venues.filter(v => v.bbo).map(v => v.bbo.value.mid);
   if (mids.length < 2) return null;
   const lo = Math.min(...mids), hi = Math.max(...mids);
   return lo > 0 ? (hi - lo) / lo * 10000 : null;
@@ -135,21 +154,28 @@ function assetsTable(rows) {
         + '<th class="num">标记价</th><th class="num">资金费</th><th>账户</th></tr>';
   for (const r of rows) {
     const bps = crossVenueBps(r.venues);
+    const skew = r.quoteSkewMs;
+    const ages = r.venues.filter(v => v.bbo).map(v => v.bbo.ageMs);
+    const freshest = ages.length ? Math.min(...ages) : 0;
     r.venues.forEach((v, i) => {
       const b = v.bbo;
       // 资产名只在该资产的第一行出现，跨所极差同理 —— 它是整组的属性，不是某一家的。
+      // skew 大 = 各家报价不同时刻，这时的极差里掺着时间，标出来让人自己判断。
+      const skewNote = skew === null || skew === undefined
+        ? ''
+        : ' <span class="' + (skew > SKEW_WARN_MS ? 'warn' : 'sub') + '">skew ' + fmtAge(skew) + '</span>';
       const head = i === 0
         ? '<td rowspan="' + r.venues.length + '" class="asset">' + esc(r.asset)
           + (bps === null
               ? '<div class="sub none">跨所极差 —</div>'
-              : '<div class="sub">跨所极差 ' + bps.toFixed(1) + 'bp</div>')
+              : '<div class="sub">跨所极差 ' + bps.toFixed(1) + 'bp' + skewNote + '</div>')
           + '</td>'
         : '';
       h += '<tr class="' + (i === 0 ? 'grp' : '') + '">' + head
         + '<td>' + esc(v.exchange) + '</td><td>' + esc(v.symbol) + '</td>'
         + '<td class="num">' + (b ? num(b.value.bid) : dash) + '</td>'
         + '<td class="num">' + (b ? num(b.value.ask) : dash) + '</td>'
-        + '<td class="num">' + (b ? num(b.value.mid) + ' ' + ageCell(b.ageMs) : dash) + '</td>'
+        + '<td class="num">' + (b ? num(b.value.mid) + ' ' + laggingCell(b.ageMs, freshest) : dash) + '</td>'
         + '<td class="num">' + (b ? num(b.value.spread, 4) : dash) + '</td>'
         + '<td class="num">' + reading(v.markPrice, x => num(x)) + '</td>'
         + '<td class="num">' + (v.funding ? (v.funding.value.rate * 100).toFixed(4) + '%' : dash) + '</td>'
@@ -218,8 +244,13 @@ async function tick() {
     } else if (d.lastEventAgeMs !== null && d.lastEventAgeMs !== undefined) {
       const s = (d.lastEventAgeMs / 1000).toFixed(1);
       hb.textContent = '最后一条事件 ' + s + 's 前';
-      hb.className = d.lastEventAgeMs > DEAD_MS ? 'meta bad' : d.lastEventAgeMs > WARN_MS ? 'meta warn' : 'meta';
+      hb.className = d.lastEventAgeMs > VENUE_DEAD_MS ? 'meta bad' : 'meta';
     }
+    // 各家交易所的心跳 —— "这一家的流还活着吗"唯一靠得住的读数。某个标的不报价可能只是
+    // 没人交易; 一整家所都没有任何事件, 才说明那家卡住了。
+    document.getElementById('venues').innerHTML = (d.venues || []).map(v =>
+      '<span class="pill' + (v.ageMs > VENUE_DEAD_MS ? ' bad' : '') + '">' + esc(v.exchange) + ' ' + fmtAge(v.ageMs) + '</span>'
+    ).join('');
     document.getElementById('symbols').innerHTML = assetsTable(d.assets);
     document.getElementById('accounts').innerHTML = accountsTable(d.accounts);
   } catch (e) {

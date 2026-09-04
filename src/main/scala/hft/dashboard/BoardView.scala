@@ -59,7 +59,28 @@ final case class VenueRowView(
   * 已经存在的知识 —— 建立标的宇宙的那个组件才知道正确答案 (crossspread 的
   * `listings: Exchange -> (Ticker -> Symbol)`)。所以分组函数由装配方注入，见
   * [[BoardView.of]] 的 `assetOf`。默认按 symbol 本身分组：本就同名的自然合并，不发明任何东西。 */
-final case class AssetRowView(asset: String, venues: Vector[VenueRowView])
+final case class AssetRowView(
+    asset: String,
+    venues: Vector[VenueRowView],
+    /** 组内各家报价的**时刻差** = 最新的那条与最旧的那条相差多少毫秒。
+      *
+      * **判据是同时性, 不是新鲜度。** 拿一家的现价去比另一家 30 秒前的价, 差出来的里面掺着
+      * 这 30 秒里对方走过的路 —— crossspread 的 `maxQuoteAgeMs` 防的正是这个:
+      * "一边的陈旧报价配上另一边的实时报价, 会把对方的正常波动算成价差异动"。
+      *
+      * 反过来, **三家一起安静时这个值很小, 那时的价差是真的**: 股票永续在美股闭市时段几乎
+      * 不成交, 报价都"旧"却都仍是当前真实盘口。从前这里按绝对年龄卡, 于是非交易时段一律
+      * 显示"—", 把一个真实存在的价差藏了起来。
+      *
+      * 参与比较的少于两家时为 None。 */
+    quoteSkewMs: Option[Long],
+)
+
+/** 一家交易所的**心跳** —— 它最后一条事件到现在多久。
+  *
+  * 这是"这家的数据流还活着吗"唯一靠得住的读数。单个标的的报价年龄回答不了它:
+  * 那个标的可能只是没人交易。跨所别的标的还在报, 就说明流是活的。 */
+final case class VenueHeartbeatView(exchange: String, ageMs: Long)
 
 final case class BalanceView(currency: String, amount: Double, ageMs: Long)
 
@@ -86,6 +107,8 @@ final case class BoardView(
     lastEventAgeMs: Option[Long],
     /** 按资产分组的行；每行内含它在各家交易所上的情况。 */
     assets: Vector[AssetRowView],
+    /** 各交易所的心跳 —— 判断"某一家的流是不是卡住了"，见 [[VenueHeartbeatView]]。 */
+    venues: Vector[VenueHeartbeatView],
     accounts: Vector[AccountSummaryView],
 )
 
@@ -107,6 +130,7 @@ object BoardView:
   given sttp.tapir.Schema[AccountRowView] = sttp.tapir.Schema.derived
   given sttp.tapir.Schema[VenueRowView] = sttp.tapir.Schema.derived
   given sttp.tapir.Schema[AssetRowView] = sttp.tapir.Schema.derived
+  given sttp.tapir.Schema[VenueHeartbeatView] = sttp.tapir.Schema.derived
   given sttp.tapir.Schema[BalanceView] = sttp.tapir.Schema.derived
   given sttp.tapir.Schema[AccountSummaryView] = sttp.tapir.Schema.derived
   given sttp.tapir.Schema[BoardView] = sttp.tapir.Schema.derived
@@ -123,16 +147,18 @@ object BoardView:
       .toVector
       .sortBy(_._1)
       .map { (asset, entries) =>
-        AssetRowView(
-          asset,
-          entries.sortBy(kv => (kv._1.exchange.toString, kv._1.symbol)).map((_, board) => venueRow(board, now)),
-        )
+        val venues = entries.sortBy(kv => (kv._1.exchange.toString, kv._1.symbol)).map((_, board) => venueRow(board, now))
+        val ages = venues.flatMap(_.bbo).map(_.ageMs)
+        AssetRowView(asset, venues, Option.when(ages.sizeIs >= 2)(ages.max - ages.min))
       }
     BoardView(
       generatedAtMs = now,
       eventsApplied = snapshot.eventsApplied,
       lastEventAgeMs = snapshot.lastEventAt.map(now - _),
       assets = rows,
+      venues = snapshot.lastEventByExchange.toVector
+        .sortBy(_._1.toString)
+        .map((exchange, at) => VenueHeartbeatView(exchange.toString, now - at)),
       accounts = snapshot.accounts.toVector
         .sortBy(kv => (kv._1.account.toString, kv._1.exchange.toString))
         .map((key, s) => summaryRow(key, s, now)),

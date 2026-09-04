@@ -96,6 +96,14 @@ final case class BoardSnapshot(
     eventsApplied: Long,
     /** 最后一条事件的本地时刻。看板整体的"心跳"。 */
     lastEventAt: Option[Timestamp],
+    /** 每家交易所最后一条事件的本地时刻 —— **那家的心跳**。
+      *
+      * 这是"这家的数据流还活着吗"唯一靠得住的读数, 而单个标的的报价年龄不是:
+      * 一个标的在某家所几分钟不报价, 可能只是**市场安静** (股票永续在美股闭市时段几乎不动),
+      * 也可能是那家的流卡住了 —— 单看它自己分不出来。跨所有别的标的还在报, 就说明流是活的。
+      *
+      * (连接彻底断掉是另一回事: WsLoop 有 5 分钟空闲看门狗, 那种情况进程直接死, 看板也就没了。) */
+    lastEventByExchange: Map[Exchange, Timestamp],
 ):
   /** 折叠一条事件。**必须是已声明的 topic** —— 判据见 [[BoardSnapshot.folds]]。 */
   def apply(event: AnyEvent): BoardSnapshot =
@@ -107,7 +115,14 @@ final case class BoardSnapshot(
       // 事件被计数、心跳在跳、页面上那一列永远是空的。
       throw IllegalStateException(s"看板收到未声明的 topic ${event.topic.name} (key=${event.key})"),
     )
-    fold(this, event, at).copy(eventsApplied = eventsApplied + 1, lastEventAt = Some(at))
+    val next = fold(this, event, at)
+    next.copy(
+      eventsApplied = eventsApplied + 1,
+      lastEventAt = Some(at),
+      lastEventByExchange = BoardSnapshot
+        .exchangeOf(event)
+        .fold(next.lastEventByExchange)(ex => next.lastEventByExchange.updated(ex, at)),
+    )
 
   private def summary(account: AccountId, exchange: Exchange): AccountSummary =
     accounts.getOrElse(AccountExchange(account, exchange), AccountSummary.empty)
@@ -128,7 +143,16 @@ final case class BoardSnapshot(
     copy(accounts = accounts.updated(key, f(accounts.getOrElse(key, AccountSummary.empty))))
 
 object BoardSnapshot:
-  val empty: BoardSnapshot = BoardSnapshot(Map.empty, Map.empty, 0L, None)
+  val empty: BoardSnapshot = BoardSnapshot(Map.empty, Map.empty, 0L, None, Map.empty)
+
+  /** 这条事件来自哪家交易所。看板订阅的每个 topic 的载荷都带交易所, 所以这里不该有 None ——
+    * 留 Option 只是因为签名上给不出保证; 真出现就说明订阅表里混进了不带交易所的 topic。 */
+  private def exchangeOf(event: AnyEvent): Option[Exchange] =
+    event.key match
+      case i: Instrument       => Some(i.exchange)
+      case a: AccountInstrument => Some(a.instrument.exchange)
+      case a: AccountExchange  => Some(a.exchange)
+      case _                   => None
 
   /** 一个 topic 的折叠规则。 */
   private final class Fold[P](val topic: Topic[?, P], f: (BoardSnapshot, P, Timestamp) => BoardSnapshot):

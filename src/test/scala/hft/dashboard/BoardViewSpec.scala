@@ -92,3 +92,44 @@ class BoardViewSpec extends munit.FunSuite:
     assertEquals(view.assets.map(_.asset), Vector("AAPL", "AAPLUSDT"))
     assertEquals(view.assets.head.venues.map(_.exchange), Vector("Hyperliquid", "Okx"), "本就同名的自然合并")
     assertEquals(view.assets(1).venues.map(_.exchange), Vector("Binance"))
+
+  test("跨所极差的判据是同时性, 不是新鲜度 —— 三家一起安静时价差照给"):
+    // 股票永续在美股闭市时段几乎不成交, 报价几十秒不动是常态, 而那个价仍是当前真实盘口。
+    // 从前按绝对年龄卡 (5s), 于是非交易时段一律显示"—", 把一个真实存在的价差藏了起来。
+    val old = t0 - 40_000 // 三家都是 40 秒前, 但彼此只差 1 秒
+    val quiet = Vector(
+      (Exchange.Binance, "AAPLUSDT", old),
+      (Exchange.Okx, "AAPL", old + 1000),
+      (Exchange.Hyperliquid, "AAPL", old + 500),
+    ).foldLeft(BoardSnapshot.empty) { case (acc, (exch, sy, ts)) =>
+      acc.apply(Event.stamped(Topics.Bbo, BBO(exch, sy, 100.0, Coin(1.0), 100.1, Coin(1.0), ts), ts, ts))
+    }
+    val row = BoardView.of(quiet, t0, _ => "AAPL").assets.head
+    assertEquals(row.venues.size, 3)
+    assertEquals(row.quoteSkewMs, Some(1000L), "彼此只差 1 秒 -> 可比")
+
+  test("一边现价配另一边旧价 -> skew 大, 由它说明不可比"):
+    // 这正是 crossspread 的 maxQuoteAgeMs 防的事: 差出来的里面掺着这段时间里对方走过的路。
+    val snap = Vector(
+      (Exchange.Binance, "AAPLUSDT", t0),          // 现价
+      (Exchange.Okx, "AAPL", t0 - 30_000),         // 30 秒前
+    ).foldLeft(BoardSnapshot.empty) { case (acc, (exch, sy, ts)) =>
+      acc.apply(Event.stamped(Topics.Bbo, BBO(exch, sy, 100.0, Coin(1.0), 100.1, Coin(1.0), ts), ts, ts))
+    }
+    assertEquals(BoardView.of(snap, t0, _ => "AAPL").assets.head.quoteSkewMs, Some(30_000L))
+
+  test("只有一家有报价 -> 没有 skew 可言"):
+    val one = BoardSnapshot.empty
+      .apply(Event.stamped(Topics.Bbo, BBO(ex, sym, 1.0, Coin(1.0), 2.0, Coin(1.0), t0), t0, t0))
+    assertEquals(BoardView.of(one, t0).assets.head.quoteSkewMs, None)
+
+  test("各家交易所的心跳: 某个标的不报价 ≠ 那家的流卡住了"):
+    // 单个标的的年龄回答不了"这家还活着吗" —— 它可能只是没人交易。跨所别的标的还在报,
+    // 就说明流是活的。所以心跳按交易所聚合。
+    val snap = BoardSnapshot.empty
+      .apply(Event.stamped(Topics.Bbo, BBO(Exchange.Okx, "AAPL", 1.0, Coin(1.0), 2.0, Coin(1.0), t0 - 60_000), t0 - 60_000, t0 - 60_000))
+      .apply(Event.stamped(Topics.Bbo, BBO(Exchange.Okx, "NVDA", 1.0, Coin(1.0), 2.0, Coin(1.0), t0 - 100), t0 - 100, t0 - 100))
+      .apply(Event.stamped(Topics.Bbo, BBO(Exchange.Binance, "AAPLUSDT", 1.0, Coin(1.0), 2.0, Coin(1.0), t0 - 50_000), t0 - 50_000, t0 - 50_000))
+    val hb = BoardView.of(snap, t0).venues.map(v => v.exchange -> v.ageMs).toMap
+    assertEquals(hb("Okx"), 100L, "AAPL 一分钟没报价, 但 NVDA 刚报过 -> OKX 的流是活的")
+    assertEquals(hb("Binance"), 50_000L, "Binance 全部标的都停了 -> 它的心跳如实反映")
