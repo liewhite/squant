@@ -1290,6 +1290,12 @@ class ActorSystemSpec extends munit.FunSuite:
       // 远期的一条：停止时它还没到点 -> 被丢弃 (契约如此, 且会被 WARN 报出来)
       ctx.scheduleEvent(60_000, fill("LATER"))
       system.stop(handle)
+      // 等那条已发出的事件真的被消费掉再断言。watcher 是**另一条 fork 上的独立订阅者**,
+      // `system.stop` 只保证 actor 停了, 不保证订阅者已经把 channel 里的事件取走 ——
+      // 从前直接断言, 机器一忙 (并行跑别的用例) 就会读到一个还没填上的空队列。
+      // "LATER 不该来"仍然成立: 它在 stop 时已被丢弃, 此后不可能再到。
+      val deadline = System.currentTimeMillis() + 2000
+      while seen.isEmpty && System.currentTimeMillis() < deadline do Thread.sleep(1)
       assertEquals(seen.asScala.toVector, Vector("NOW"))
 
       // 终态后再排期是调用方的错, 不静默丢

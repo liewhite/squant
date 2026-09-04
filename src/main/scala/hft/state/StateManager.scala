@@ -21,10 +21,9 @@ final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long
   private val accountInfos: mutable.Map[Exchange, AccountInfo] = mutable.Map.empty
   /** 原始账户级希腊字母 (按 (交易所, 币种) 索引)，delta 未含现货修正 */
   private val greeksRaw: mutable.Map[(Exchange, String), Greeks] = mutable.Map.empty
-  /** 各币种现金余额 (按 (交易所, 币种) 索引)，用于修正 greeks delta 的现货敞口 */
-  private val cashBalances: mutable.Map[(Exchange, String), Double] = mutable.Map.empty
-  /** 已收到**完整**钱包快照的交易所。此后"某币种不在表里"= 余额为 0，见 [[hft.domain.Wallet]]。 */
-  private val walletKnown: mutable.Set[Exchange] = mutable.Set.empty
+  /** 各交易所的钱包状态。全量整表替换 / 逐币种增量 / 全量之前不能把缺失读作 0 ——
+    * 这三条规则归 [[WalletState]]，**判据只写一遍**（看板用的是同一个）。 */
+    private val wallets: mutable.Map[Exchange, WalletState] = mutable.Map.empty
   /** 各 (交易所, 币种) 的 greeks **本地接收时刻** —— 陈旧判断的唯一基准。
     *
     * 不能用载荷里的 `timestamp`: 那是**交易所钟**, 而且各家适配层给的还不一致 (有的干脆
@@ -83,7 +82,7 @@ final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long
   def greeks(exchange: Exchange, ccy: String): Option[Greeks] =
     for
       g <- greeksRaw.get((exchange, ccy))
-      cashBal <- cashBalances.get((exchange, ccy)).orElse(Option.when(walletKnown.contains(exchange))(0.0))
+      cashBal <- wallets.getOrElse(exchange, WalletState.empty).get(ccy)
     yield g.copy(delta = g.delta + cashBal)
 
   /** 这条 greeks 读数到本地多久了 (毫秒)。**本地钟**, 见 [[greeksAt]] —— 陈旧判断用它,
@@ -109,18 +108,16 @@ final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long
     event.as(Topics.Balance).foreach { balance =>
       if balance.asset == USDT then balances(balance.exchange) = balance.available
       // 所有币种余额都缓存一份，供 greeks delta 的现货修正使用 (ccy 即 asset)
-      cashBalances((balance.exchange, balance.asset)) = balance.available
+      wallets(balance.exchange) =
+        wallets.getOrElse(balance.exchange, WalletState.empty).withBalance(balance.asset, balance.available)
     }
     event.as(Topics.Wallet).foreach { wallet =>
-      // 全量快照 (只由启动对齐的 REST 产出, 见 hft.domain.Wallet): 该交易所此前记下的币种
-      // 整表替换 —— 快照里没有的币种余额就是 0, 留着旧值会让一个已经清空的现货仓位
-      // 继续参与 delta 修正。
-      cashBalances.filterInPlace((key, _) => key._1 != wallet.exchange)
-      wallet.balances.foreach((ccy, amount) => cashBalances((wallet.exchange, ccy)) = amount)
-      // 计价货币同样按全量解读: `foreach` 会在快照没有 USDT (即余额确实为 0) 时留着旧值,
-      // 那正是这份快照要消灭的"已清空却继续参与计算"。
+      // 全量快照 (只由启动对齐的 REST 产出, 见 hft.domain.Wallet)。整表替换的规则在
+      // WalletState 里, 这里不重写。
+      wallets(wallet.exchange) = wallets.getOrElse(wallet.exchange, WalletState.empty).withWallet(wallet.balances)
+      // 计价货币同样按全量解读: 快照里没有 USDT 就是余额为 0, 留着旧值正是这份快照要消灭的
+      // "已清空却继续参与计算"。
       balances(wallet.exchange) = wallet.balances.getOrElse(USDT, 0.0)
-      walletKnown += wallet.exchange
     }
     event.as(Topics.AccountInfo).foreach(info => accountInfos(info.exchange) = info)
     event.as(Topics.Greeks).foreach { g =>
