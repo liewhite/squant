@@ -1,5 +1,7 @@
 package hft.sim
 
+import hft.TestSim
+
 import hft.actor.ActorSystem
 import hft.domain.*
 import hft.engine.Engine
@@ -101,7 +103,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
       body(bus, upstream, sim, q)
 
   test("挂单成交判定: BBO 越过买单价 -> 成交于挂单价, 仓位增加"):
-    withCounter(SimConfig(0, 0, 10_000)) { (bus, upstream, sim, q) =>
+    withCounter(TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000)) { (bus, upstream, sim, q) =>
       upstream.emitBbo(50000, 50001, 1) // 现价
       bus.publish(limitIntent(Side.Long, 49995.0, TimeInForce.PostOnly, "buy-1"))
       eventually("买单应先挂出 (Pending)")(orderStatuses(q).contains(OrderStatus.Pending))
@@ -118,7 +120,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     }
 
   test("挂单成交判定: BBO 越过卖单价 -> 成交, 仓位转空"):
-    withCounter(SimConfig(0, 0, 10_000)) { (bus, upstream, sim, q) =>
+    withCounter(TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000)) { (bus, upstream, sim, q) =>
       upstream.emitBbo(50000, 50001, 1)
       bus.publish(limitIntent(Side.Short, 50010.0, TimeInForce.PostOnly, "sell-1"))
       eventually("卖单应先挂出")(orderStatuses(q).contains(OrderStatus.Pending))
@@ -130,7 +132,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     }
 
   test("PostOnly 到达时已可成交 -> 拒单 (不吃单, 不成交)"):
-    withCounter(SimConfig(0, 0, 10_000)) { (bus, upstream, sim, q) =>
+    withCounter(TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000)) { (bus, upstream, sim, q) =>
       upstream.emitBbo(50000, 50001, 1)
       // 等行情进入柜台 (撮合需先知道现价才能判定可成交性)
       eventually("行情应已转发")(q.asScala.exists(_.is(Topics.Bbo)))
@@ -142,7 +144,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     }
 
   test("撤单: resting 订单撤销后回报 Cancelled 并移出挂单簿"):
-    withCounter(SimConfig(0, 0, 10_000)) { (bus, upstream, sim, q) =>
+    withCounter(TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000)) { (bus, upstream, sim, q) =>
       upstream.emitBbo(50000, 50001, 1)
       bus.publish(limitIntent(Side.Long, 49995.0, TimeInForce.PostOnly, "buy-1"))
       eventually("买单应先挂出")(orderStatuses(q).contains(OrderStatus.Pending))
@@ -153,7 +155,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     }
 
   test("交易所->策略延迟: 成交回报延迟到达策略侧"):
-    withCounter(SimConfig(exchangeToStrategyDelayMs = 250, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000)) {
+    withCounter(TestSim.noFees.copy(exchangeToStrategyDelayMs = 250, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000)) {
       (bus, upstream, sim, q) =>
         upstream.emitBbo(50000, 50001, 1)
         bus.publish(limitIntent(Side.Long, 49995.0, TimeInForce.PostOnly, "buy-1"))
@@ -170,7 +172,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   test("端到端: 柜台与行情面都由替身扮演, 策略无感知地下单成交"):
     supervised:
       val upstream = FakeMarketFeed()
-      val sim = SimulatedExchange(upstream, metas, SimConfig(exchangeToStrategyDelayMs = 10, orderToExchangeDelayMs = 10, initialBalanceUsdt = 10_000), AccountId.Live)
+      val sim = SimulatedExchange(upstream, metas, TestSim.noFees.copy(exchangeToStrategyDelayMs = 10, orderToExchangeDelayMs = 10, initialBalanceUsdt = 10_000), AccountId.Live)
       // 时钟间隔调大, 避免测试期周期任务干扰
       Engine.run(plugins = Vector(sim), clockIntervalMs = 100_000) { engine =>
         // 替身同时接下单指令、对齐指令与行情订阅指令 —— 契约校验因此通过, 策略起得来
@@ -194,7 +196,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
       val mailbox = bus.subscribe(Set(Interest.All(CustomFeedSpec.Depth)))
       fork { mailbox.events.foreach(ev => ev.as(CustomFeedSpec.Depth).foreach(d => seen.add(d.value))) }
       val upstream = FakeMarketFeed()
-      ActorSystem(bus).spawn(SimulatedExchange(upstream, metas, SimConfig(0, 0, 10_000), AccountId.Live))
+      ActorSystem(bus).spawn(SimulatedExchange(upstream, metas, TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000), AccountId.Live))
 
       upstream.emitCustom(42.0, 1)
       eventually("自定义行情应被转发到主总线")(seen.asScala.toVector == Vector(42.0))
@@ -206,7 +208,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
       val mailbox = bus.subscribe(Set(Interest.All(Topics.Bbo)))
       fork { mailbox.events.foreach(event => if event.is(Topics.Bbo) then seen.add(event.exchangeTs)) }
       val upstream = FakeMarketFeed(publishOnConnect = true)
-      ActorSystem(bus).spawn(SimulatedExchange(upstream, metas, SimConfig(0, 0, 10_000), AccountId.Live))
+      ActorSystem(bus).spawn(SimulatedExchange(upstream, metas, TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000), AccountId.Live))
 
       eventually("首条行情应穿过已先建立的私有总线中继")(seen.asScala.toVector == Vector(1L))
 
@@ -216,7 +218,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       val upstream = FakeMarketFeed()
-      ActorSystem(bus).spawn(SimulatedExchange(upstream, metas, SimConfig(0, 0, 10_000), AccountId.Live))
+      ActorSystem(bus).spawn(SimulatedExchange(upstream, metas, TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000), AccountId.Live))
 
       val relayed = ConcurrentLinkedQueue[AnyEvent]()
       val mailbox = bus.subscribe(Set(Interest.Keyed(hft.event.Commands.MarketSubscription, Set(ex))))
@@ -233,7 +235,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     // 精度是交易所的事实, 影子盘也照此对齐 —— 否则它的成交量与实盘系统性地差一个取整,
     // 而它存在的全部理由就是预测实盘。
     val coarse = Map[Symbol, SymbolMeta](sym -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = 0.01))
-    withCounter(SimConfig(0, 0, 10_000), coarse) { (bus, upstream, sim, q) =>
+    withCounter(TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000), coarse) { (bus, upstream, sim, q) =>
       upstream.emitBbo(50000, 50001, 1)
       bus.publish(limitIntent(Side.Long, 49995.0, TimeInForce.PostOnly, "dust", qty = Coin(0.004))) // 0.4 张 < 1 张
       eventually("应以拒单回流")(orderStatuses(q).exists {

@@ -58,14 +58,10 @@ class FillRecorderSpec extends munit.FunSuite:
     assert(lines(2).endsWith(",40.0,40.0")) // 第二笔平仓累计利润 40
     assertEquals(rec.cumulativeRealizedPnl, 40.0)
 
-  test("打开文件失败不致命: 降级为仅内存累计, 不抛出"):
-    // 父目录不存在 -> openWriter 抛错, 应被吞掉、记录降级, run/消费均不抛
-    val rec = FillRecorder(java.nio.file.Path.of("/nonexistent-dir-xyz/sim-fills.csv"))
-    supervised:
-      val bus = EventBus()
-      rec.run(bus.subscribe(Set(Interest.All(Topics.Fill))).events) // 不应抛
-      bus.publish(Event.at(Topics.Fill, fill(Side.Long, 100.0, 2.0, 1), 1))
-      bus.publish(Event.at(Topics.Fill, fill(Side.Short, 120.0, 2.0, 2), 2))
-      Thread.sleep(150)
-    // 写盘禁用, 但内存累计照常推进
-    assertEquals(rec.cumulativeRealizedPnl, 40.0)
+  test("CSV 打不开即抛 —— 那是装配期配置错误, 不是运行期 IO 抖动"):
+    // 降级成"仅内存累计"的代价: 跑完一整天才发现 CSV 是空的, 而那份记录补不回来了。
+    // 运行期写入失败仍然吞 (真实仓位在手, 不值得为一行 CSV 停机), 两者不是一类。
+    val dir = Files.createTempDirectory("fill-recorder-spec")
+    val unwritable = dir.resolve("no-such-dir").resolve("fills.csv") // 父目录不存在
+    val e = intercept[IllegalStateException](FillRecorder(unwritable).open())
+    assert(e.getMessage.contains("打不开成交记录 CSV"), e.getMessage)

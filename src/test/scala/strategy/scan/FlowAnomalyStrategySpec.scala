@@ -1,5 +1,7 @@
 package strategy.scan
 
+import hft.TestSim
+
 import hft.TestUnits.given
 import hft.backtest.{BacktestEngine, MarketDataSource}
 import hft.domain.*
@@ -143,7 +145,7 @@ class FlowAnomalyStrategySpec extends munit.FunSuite:
       exchange = ex,
       source = source,
       runners = Seq(runner),
-      config = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0),
+      config = TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0),
       symbolMetas = metas,
       observers = Seq(ev => ev.as(FlowAnomalies).foreach(seen += _)),
     ).run()

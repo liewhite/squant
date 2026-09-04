@@ -1,5 +1,7 @@
 package hft.state
 
+import hft.TestSim
+
 import hft.actor.ActorSystem
 import hft.domain.*
 import hft.engine.Executor
@@ -24,7 +26,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
   private val inst = Instrument(ex, sym)
   private val paper: AccountId.Paper = AccountId.Paper(1)
   private val metas = Map[Symbol, SymbolMeta](sym -> SymbolMeta(ex, sym, 0.1, 0.001, 0.001, 1.0))
-  private val instant = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
+  private val instant = TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
 
   /** 挂一张买单；在成交回调与仓位回调里各记一次"此刻读到的仓位" */
   private class Recorder(atFill: ConcurrentLinkedQueue[Double], atPosition: ConcurrentLinkedQueue[Double]) extends Strategy:

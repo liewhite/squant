@@ -9,7 +9,6 @@ import hft.sim.{Counter, CounterInput, Delayed, SimConfig, SimState}
 import org.slf4j.LoggerFactory
 
 import scala.collection.mutable
-import scala.util.control.NonFatal
 
 /** 回测结果汇总。realizedPnl 为已实现盈亏 (= 账本现金增量)，finalEquity 含未实现。 */
 final case class BacktestResult(
@@ -49,7 +48,8 @@ final class BacktestEngine(
     exchange: Exchange,
     source: MarketDataSource,
     runners: Seq[StrategyRunner],
-    config: SimConfig = SimConfig(),
+    /** 延迟与费率。**无默认值** —— 手续费常常就是回测盈亏的量级, 见 [[SimConfig]] */
+    config: SimConfig,
     /** 合约规格：回测里引擎兼任柜台，据此把策略的币本位意图对齐到交易所精度 ——
       * 与实盘的柜台同一份判据 (见 [[hft.exchange.TradingGateway]])，否则回测的成交量会
       * 系统性地比实盘多出一个取整。
@@ -111,9 +111,18 @@ final class BacktestEngine(
     // 才在两条路径上都成立 (策略若在 prepare 里做了别的准备, 回测同样跑得到)。
     runners.foreach(_.prepare())
     val src = source.events().buffered
+    // **一条行情都没有 = 数据没加载上, 不是"这段行情里策略没交易"。**
+    //
+    // 从前这里 warn 一句就返回一份看着正常的结果: initial == final、fills = 0。调用方
+    // (策略对比、参数扫描) 拿到的是"这个策略在这段区间不交易"这个结论, 而真相是路径写错、
+    // 日期区间落空、或缓存没命中。批量扫参时它会安静地混在几十行结果里, 谁也看不出来。
+    //
+    // 回测是批处理作业, 没有任何理由容忍这一点: 立即失败, 把上下文抛给调用方。
     if !src.hasNext then
-      logger.warn("no market data; empty backtest")
-      return BacktestResult(config.initialBalanceUsdt, config.initialBalanceUsdt, 0.0, 0, 0, 0, Vector.empty, 0, 0)
+      throw IllegalStateException(
+        s"回测数据源一条行情都没有 (source=${source.getClass.getSimpleName}) —— " +
+          "这不是'策略没交易', 是数据没加载上; 请检查数据路径、日期区间与缓存"
+      )
 
     firstTs = src.head.exchangeTs
     now = firstTs
@@ -203,11 +212,13 @@ final class BacktestEngine(
   /** 把事件投递给观察者与各策略；策略产出的信号按下单延迟入队到达撮合。 */
   private def deliver(ev: AnyEvent): Unit =
     if ev.is(Topics.Fill) then fillCount += 1
-    // 旁路观察者隔离: 观察者 (出图/记录等) 自身异常绝不拖垮回测核心, 只 warn 后继续
-    observers.foreach { obs =>
-      try obs(ev)
-      catch case NonFatal(e) => logger.warn(s"backtest observer failed on event (ignored): ${e.getMessage}", e)
-    }
+    // 观察者异常**向上传播, 不吞**。
+    //
+    // 从前这里 warn 一句继续跑, 理由是"旁路观察者不该拖垮核心"。那条理由属于**实盘**:
+    // 真金白银的仓位在手, CSV 写不进去不值得把引擎停掉 (见 hft.sim.FillRecorder 的隔离契约)。
+    // 回测是批处理作业, 没有仓位要管, 失败的代价只是重跑一次 —— 而吞掉的代价是: 出图/记录
+    // 中途坏掉, 回测照样打印出一份完整的结果, 谁也看不出那份记录是残缺的。
+    observers.foreach(_(ev))
     runners.foreach { r =>
       if r.accepts(ev) then
         r.onEvent(ev, now).foreach { produced =>

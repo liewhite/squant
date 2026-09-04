@@ -57,8 +57,15 @@ class SimStateFeeSpec extends munit.FunSuite:
     assert(s3.resting.isEmpty)
     near(s3.ledger.cash, initCash)
 
-  test("零费率 (默认) 不扣费 -> 与历史行为一致"):
-    var s = SimState.empty(AccountId.Live, initCash) // 默认 maker/taker = 0
+  test("显式零费率 -> 不扣费"):
+    var s = SimState.empty(AccountId.Live, initCash, makerFeeRate = 0.0, takerFeeRate = 0.0) // 本用例特意不计费
     val (s1, _) = s.onMarket(ex, bboEv(100.0, 100.0, 1), 1)
     val (s2, _) = s1.onOrderArrived(ex, order(Side.Long, OrderType.Market, 2.0), "o1", 1)
     near(s2.ledger.cash, initCash) // 开仓无已实现、无费
+
+  test("SimConfig 的费率没有默认值, 且 maker 允许为负 (返佣真实存在)"):
+    // 默认 0 的失效形态: 每个忘了填的调用方都拿到一份偏乐观的结果, 而且没有任何症状 ——
+    // 回测越乐观越像"策略有效"。费率是交易所 + 该账户的事实 (VIP 档/返佣/抵扣), 框架不替人猜。
+    SimConfig(makerFeeRate = -0.00005, takerFeeRate = 0.0005) // maker 返佣: 合法
+    intercept[IllegalArgumentException](SimConfig(makerFeeRate = Double.NaN, takerFeeRate = 0.0005))
+    intercept[IllegalArgumentException](SimConfig(makerFeeRate = 0.0002, takerFeeRate = -0.0001))

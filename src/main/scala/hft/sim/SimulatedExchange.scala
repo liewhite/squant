@@ -17,11 +17,23 @@ final case class SimConfig(
     exchangeToStrategyDelayMs: Long = 50,
     orderToExchangeDelayMs: Long = 30,
     initialBalanceUsdt: Double = 10_000.0,
-    /** maker 手续费率 (resting 单被越价成交)，0.0002 = 0.02%。默认 0 = 不计费 */
-    makerFeeRate: Double = 0.0,
-    /** taker 手续费率 (到达即吃单成交)，0.0005 = 0.05%。默认 0 = 不计费 */
-    takerFeeRate: Double = 0.0,
-)
+    /** maker 手续费率 (resting 单被越价成交)，`0.0002` = 0.02%。 */
+    makerFeeRate: Double,
+    /** taker 手续费率 (到达即吃单成交)，`0.0005` = 0.05%。 */
+    takerFeeRate: Double,
+):
+  // **两个费率没有默认值。**
+  //
+  // 从前默认 0 = 不计费。手续费不是"可选的细节": 高频挂撤的策略里它常常就是全部盈亏的量级,
+  // 而 maker/taker 的差别正是 MakerHedgeStrategy、网格这类策略的立身之本。默认 0 的失效形态是
+  // **每个忘了填的调用方都拿到一份偏乐观的结果, 且没有任何症状** —— 回测越乐观越像"策略有效"。
+  //
+  // 也不给"币安永续默认费率"这类常量: 费率是**交易所 + 该账户**的事实 (VIP 档、返佣、
+  // BNB 抵扣都会改它), 框架替调用方猜一个, 猜出来的仍是一份没有依据的数字。
+  //
+  // maker 允许为负 (返佣是真实存在的), 所以只校验有限性与 taker 不为负。
+  require(!makerFeeRate.isNaN && !makerFeeRate.isInfinite, s"makerFeeRate 必须是有限数, 实际 $makerFeeRate")
+  require(takerFeeRate >= 0.0 && !takerFeeRate.isInfinite, s"takerFeeRate 须 >= 0 且有限, 实际 $takerFeeRate")
 
 /** 上游行情抵达柜台 —— 从私有总线的消费线程串行化回 actor 线程的那一跳。
   *
@@ -64,7 +76,8 @@ final class SimulatedExchange(
     upstream: MarketFeed,
     /** 本所合约规格：撮合前按交易所精度对齐，与真实柜台同一份判据 */
     metas: Map[Symbol, SymbolMeta],
-    config: SimConfig = SimConfig(),
+    /** 延迟与费率。**无默认值** —— 费率是交易所+账户的事实, 见 [[SimConfig]] */
+    config: SimConfig,
     /** 本柜台服务的账户。作为实盘替身时是 [[AccountId.Live]] (策略对真假无感知)。
       * 无默认值，理由同 [[hft.exchange.TradingGateway.account]] */
     override val account: AccountId,

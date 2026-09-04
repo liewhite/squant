@@ -12,7 +12,7 @@ class SimStateSpec extends munit.FunSuite:
 
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private def empty = SimState.empty(AccountId.Live, 10_000.0)
+  private def empty = SimState.empty(AccountId.Live, 10_000.0, makerFeeRate = 0.0, takerFeeRate = 0.0)
 
   private def bbo(bid: Price, ask: Price, ts: Timestamp = 1): BBO = BBO(ex, sym, bid, Coin(1.0), ask, Coin(1.0), ts)
   private def marketEv(b: BBO): AnyEvent = Event.at(Topics.Bbo, b, b.timestamp)
@@ -137,3 +137,22 @@ class SimStateSpec extends munit.FunSuite:
       case u if u.status == OrderStatus.Filled => (u.clientOrderId, u.filledQuantity.value)
     }
     assertEquals(filledOf, Vector((Some("early"), 0.002), (Some("late"), 0.001)))
+
+  test("没有盘口的限价单一律拒单 —— 不能挂到一张从没见过的簿上"):
+    // 从前 GTC/PostOnly 会 resting、IOC 报一条正常的 Cancelled: 撮合宣称了一件它不知道的事,
+    // 而那张单之后会被 BBO 穿越判定成交, 成交价来自它挂单时并不存在的价格基准。
+    // 市价单这条路径一直是拒单的, 限价单没有理由不同。
+    // 可达: 多标的策略看到 ETH 的盘口就给 BTC 下单, 而 BTC 的第一条行情还没到。
+    for tif <- Vector(TimeInForce.GTC, TimeInForce.PostOnly, TimeInForce.IOC, TimeInForce.FOK) do
+      val (s1, evs) = empty.onOrderArrived(ex, limit(Side.Long, 50000, tif, "b1"), "1", 1)
+      assert(statuses(evs).exists(_.isInstanceOf[OrderStatus.Rejected]), s"$tif 应拒单, 实际 ${statuses(evs)}")
+      assert(s1.resting.isEmpty, s"$tif 不该进簿")
+      assert(fills(evs).isEmpty, s"$tif 不该成交")
+
+  test("有盘口但不可成交 -> 仍按 TIF 正常处理 (拒单只针对'没有盘口')"):
+    val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
+    val (rested, gtcEvs) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.GTC, "b1"), "1", 1)
+    assertEquals(statuses(gtcEvs), Vector(OrderStatus.Pending))
+    assert(rested.resting.contains("1"))
+    val (_, iocEvs) = s1.onOrderArrived(ex, limit(Side.Long, 49995, TimeInForce.IOC, "b2"), "2", 1)
+    assertEquals(statuses(iocEvs), Vector(OrderStatus.Cancelled))

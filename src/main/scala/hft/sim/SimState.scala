@@ -37,6 +37,21 @@ final case class RestingOrder(
   * 该 `now`——转移内**不读墙钟**，故同一输入必得同一结果，脱离线程/锁/延迟即可同步单测。
   * [[SimulatedExchange]] 仅作为单 actor 的薄壳：把命令串行喂给这些转移函数、并把回流事件按延迟投递给策略。
   *
+  * ## 如实声明的偏差：**不建模资金费**
+  *
+  * 账本只记成交与手续费。永续的资金费按各交易所自己的周期结算 (币安 8 小时、Hyperliquid
+  * 1 小时)，**这里一分不收也一分不付** ——
+  * 于是回测/影子盘的盈亏是"不含资金费"的盈亏，而这一项在两类策略上恰恰是决定性的：
+  *
+  *   - **持仓过夜的方向策略**：一个净持仓不动的策略，资金费常常就是它全部盈亏的量级；
+  *   - **跨所价差 / delta 对冲**：两条腿的资金费方向相反，净额才是真实收益，只算价差
+  *     会把一个稳定亏损的组合算成稳定盈利。
+  *
+  * 不悄悄补一个"典型费率"：资金费是逐个结算时点、逐个标的的真实数据 (`Topics.FundingRate`
+  * 已经在总线上)，拍一个平均值等于在结论里掺一个没有依据的数。要它就该按真实费率序列
+  * 逐笔结算；在那之前，**别把这里的盈亏当成可对账的收益**，尤其别用它比较持仓时长差异
+  * 很大的两个策略 —— 那个比较里，被忽略的那一项对两边并不对称。
+  *
   * @param restingSeq 下一张入簿挂单的到达序号，撮合按 (价格, 到达序) 优先级排序 (FIFO)。
   */
 final case class SimState(
@@ -47,8 +62,10 @@ final case class SimState(
     lastBbo: Map[Symbol, BBO],
     lastMark: Map[Symbol, Price],
     lastTrade: Map[Symbol, Price] = Map.empty,
-    makerFeeRate: Double = 0.0,
-    takerFeeRate: Double = 0.0,
+    /** 费率没有默认值, 理由见 [[hft.sim.SimConfig]] —— 默认 0 会让每个忘了填的调用方
+      * 拿到一份偏乐观且无症状的结果。 */
+    makerFeeRate: Double,
+    takerFeeRate: Double,
     restingSeq: Long = 0L,
 ):
   /** 估值价格：标记价 > BBO 中间价 > 最新成交价 (trade-only 行情用最新成交价估值)。
@@ -134,11 +151,32 @@ final case class SimState(
           case None =>
             (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected("no market data for market order"), Price.Zero, now)))
       case OrderType.Limit(limit, tif) =>
-        // 到达即可成交时的对手价 (None = 不可成交)。用 taker 判定 (价格重合即成交, 乐观侧),
-        // 与 resting 的严格穿越判定刻意不同 —— 见 [[Matcher]] 的"悲观间隙"说明。
+        // **没有盘口 ≠ 有盘口但不可成交。** 两者从前都落进下面的 `None` 分支: GTC/PostOnly
+        // 被"挂"到一张从没见过的簿上、IOC 报一条正常的 Cancelled。撮合于是宣称了一件它
+        // 根本不知道的事 —— 而这张单之后会被 BBO 穿越判定成交, 成交价来自它挂单时并不存在
+        // 的价格基准。市价单这条路径一直是拒单的, 限价单没有理由不同。
+        //
+        // 可达: 多标的策略看到 ETH 的盘口就给 BTC 下单, 而 BTC 的第一条行情还没到。
+        bboOpt match
+          case None =>
+            (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected(s"no market data for ${order.symbol}"), limit, now)))
+          case Some(bbo) => limitArrived(exchange, order, orderId, limit, tif, bbo, now)
+
+  /** 限价单到达且**已有盘口**: 按 TIF 决定 resting / 成交 / 拒单。 */
+  private def limitArrived(
+      exchange: Exchange,
+      order: Order,
+      orderId: OrderId,
+      limit: Price,
+      tif: TimeInForce,
+      bbo: BBO,
+      now: Timestamp,
+  ): (SimState, Vector[AnyEvent]) =
+        // 到达即可成交时的对手价 (None = 有盘口但不可成交)。用 taker 判定 (价格重合即成交,
+        // 乐观侧), 与 resting 的严格穿越判定刻意不同 —— 见 [[Matcher]] 的"悲观间隙"说明。
         // 价与可成交性同源 (都出自这张 bbo), 无需 .get
         val takerPrice: Option[Price] =
-          bboOpt.filter(Matcher.marketable(order.side, limit, _)).map(Matcher.touchPrice(order.side, _))
+          Option.when(Matcher.marketable(order.side, limit, bbo))(Matcher.touchPrice(order.side, bbo))
         def takerFill(price: Price) = fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, price, order.quantity, now, Liquidity.Taker, order.reduceOnly)
         tif match
           case TimeInForce.PostOnly =>
@@ -237,7 +275,7 @@ object SimState:
   def empty(
       account: AccountId,
       cash: Double,
-      makerFeeRate: Double = 0.0,
-      takerFeeRate: Double = 0.0,
+      makerFeeRate: Double,
+      takerFeeRate: Double,
   ): SimState =
     SimState(account, Ledger.empty(account, cash), Map.empty, Map.empty, Map.empty, Map.empty, makerFeeRate, takerFeeRate)

@@ -18,8 +18,13 @@ import scala.util.control.NonFatal
   * 利润核算复用 [[Ledger]] (同向加仓均价、反向平仓实现盈亏)，初始现金置 0，故 `ledger.cash`
   * 即为跨 symbol 的累计已实现盈亏。消费在单一 fork 内串行进行，无需同步。
   *
-  * **隔离契约**：作为旁路观察者，记录器绝不因自身 IO 失败 (打开/写入/关闭) 影响核心——
-  * 一切异常只打错误日志、就地吞掉，内存累计照常推进 (写盘失败时丢的是该行 CSV，账本不丢)。
+  * **隔离契约**：作为旁路观察者，记录器绝不因**运行期**的 IO 失败 (写入/关闭) 影响核心——
+  * 那类异常只打错误日志、就地吞掉，内存累计照常推进 (丢的是该行 CSV，账本不丢)。真实仓位在手时，
+  * 一次写盘失败不值得把引擎停掉。
+  *
+  * **打开失败不在此列**：路径不存在、没有写权限，是**装配期的配置错误**，在第一笔成交之前就已成立,
+  * 且整轮运行一行都不会落盘。把它降级成"仅内存累计"的代价是：跑完一整天才发现 CSV 是空的,
+  * 而那份记录已经不可能补回来了。所以 [[open]] 失败即抛 —— 配置错误该在启动时大声失败。
   */
 final class FillRecorder(csvPath: Path):
   private val logger = LoggerFactory.getLogger(classOf[FillRecorder])
@@ -30,15 +35,14 @@ final class FillRecorder(csvPath: Path):
   /** 累计已实现利润 (跨 symbol)。供外部观察/日志 */
   def cumulativeRealizedPnl: Double = ledger.cash
 
-  /** 打开 CSV writer (幂等)。打开失败不致命——记录降级为"仅内存累计"，绝不拖垮核心。 */
+  /** 打开 CSV writer (幂等)。**打开失败即抛** —— 那是装配期的配置错误，见类文档的隔离契约。 */
   def open(): Unit =
     if writer.isEmpty then
       writer =
         try Some(openWriter())
         catch
           case NonFatal(e) =>
-            logger.error(s"failed to open CSV $csvPath, recording to file disabled", e)
-            None
+            throw IllegalStateException(s"打不开成交记录 CSV $csvPath —— 检查路径与写权限", e)
       logger.info(s"FillRecorder started, writing to ${csvPath.toAbsolutePath}")
 
   /** 关闭 writer (幂等)。 */

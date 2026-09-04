@@ -1,5 +1,7 @@
 package hft.backtest
 
+import hft.TestSim
+
 import hft.domain.*
 import hft.engine.StrategyRunner
 import hft.event.{AnyEvent, Event, Interest, Topics}
@@ -44,13 +46,13 @@ class BacktestEngineSpec extends munit.FunSuite:
 
   private def runOnce(): BacktestResult =
     val runner = StrategyRunner.backtest(OneShotBuy())
-    BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0), metas).run()
+    BacktestEngine(ex, FixedSource(series), Seq(runner), TestSim.noFees.copy(initialBalanceUsdt = 10_000.0), metas).run()
 
   /** 跑一次并收集投递给观察者的全部事件 (含逐笔回报的 client_order_id 与时间戳)。 */
   private def runCollect(): Vector[AnyEvent] =
     val collected = Vector.newBuilder[AnyEvent]
     val runner = StrategyRunner.backtest(OneShotBuy())
-    BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0), metas, observers = Seq(collected += _)).run()
+    BacktestEngine(ex, FixedSource(series), Seq(runner), TestSim.noFees.copy(initialBalanceUsdt = 10_000.0), metas, observers = Seq(collected += _)).run()
     collected.result()
 
   test("挂单越价成交: 1 笔成交, 持仓 +1, 已实现盈亏 0"):
@@ -78,7 +80,7 @@ class BacktestEngineSpec extends munit.FunSuite:
   test("账户不一致的 runner 在装配期即被拒 (私有回报按账户路由, 不一致会静默饿死策略)"):
     val runner = StrategyRunner.backtest(OneShotBuy(), AccountId.Paper(1))
     val e = intercept[IllegalArgumentException](
-      BacktestEngine(ex, FixedSource(series), Seq(runner), SimConfig(), metas)
+      BacktestEngine(ex, FixedSource(series), Seq(runner), TestSim.noFees, metas)
     )
     assert(e.getMessage.contains("paper1"), e.getMessage)
 
@@ -86,7 +88,7 @@ class BacktestEngineSpec extends munit.FunSuite:
     // 第 2 条 BBO 的时间戳倒退回 1500 (< 已推进到的 2000), 引擎应钳制而非让时间回退
     val disordered = Vector(bboEv(100.0, 100.1, 1000), bboEv(99.8, 99.9, 2000), bboEv(99.7, 99.8, 1500))
     val runner = StrategyRunner.backtest(OneShotBuy())
-    val r = BacktestEngine(ex, FixedSource(disordered), Seq(runner), SimConfig(initialBalanceUsdt = 10_000.0), metas).run()
+    val r = BacktestEngine(ex, FixedSource(disordered), Seq(runner), TestSim.noFees.copy(initialBalanceUsdt = 10_000.0), metas).run()
     assertEquals(r.outOfOrderEvents, 1L)
     assertEquals(r.marketEvents, 3L)
     assert(r.lastTs >= 2000L, s"虚拟时间不得回退到乱序事件的时间戳, got ${r.lastTs}")
@@ -113,3 +115,23 @@ class BacktestEngineSpec extends munit.FunSuite:
     fillEvs.foreach { e =>
       assert(e.exchangeTs < 1_000_000L && e.localTs < 1_000_000L, s"回报时间戳应为虚拟时间, got $e")
     }
+
+  test("数据源一条行情都没有 -> 抛错, 不返回一份看着正常的零结果"):
+    // 从前 warn 一句就返回 initial == final、fills = 0 的结果。调用方 (策略对比、参数扫描)
+    // 读到的是"这个策略在这段区间不交易", 而真相是路径写错 / 日期区间落空 / 缓存没命中 ——
+    // 批量扫参时它会安静地混在几十行结果里。
+    val runner = StrategyRunner.backtest(OneShotBuy())
+    val e = intercept[IllegalStateException] {
+      BacktestEngine(ex, FixedSource(Vector.empty), Seq(runner), TestSim.noFees, metas).run()
+    }
+    assert(e.getMessage.contains("一条行情都没有"), e.getMessage)
+
+  test("观察者异常向上传播 —— 回测不会带着残缺的记录打印出完整结果"):
+    // 实盘里旁路观察者失败不该拖垮引擎 (有真金白银的仓位要管); 回测是批处理作业,
+    // 失败的代价只是重跑一次, 而吞掉的代价是一份看不出残缺的结果。
+    val runner = StrategyRunner.backtest(OneShotBuy())
+    val boom = new RuntimeException("observer exploded")
+    val thrown = intercept[RuntimeException] {
+      BacktestEngine(ex, FixedSource(series), Seq(runner), TestSim.noFees, metas, observers = Seq(_ => throw boom)).run()
+    }
+    assertEquals(thrown, boom)

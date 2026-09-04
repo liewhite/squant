@@ -1,5 +1,7 @@
 package hft.sim
 
+import hft.TestSim
+
 import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
@@ -16,7 +18,7 @@ class PaperCounterSpec extends munit.FunSuite:
   private val sym = "BTCUSDT"
   private val paper: AccountId.Paper = AccountId.Paper(1)
   /** 无延迟配置：断言不必等时钟 (延迟本身另有用例) */
-  private val instant = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
+  private val instant = TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
   /** contractSize = 1 的常规标的。影子柜台也按交易所精度对齐 —— 它存在的理由就是预测实盘 */
   private val metas = Map[Symbol, SymbolMeta](sym -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0))
 
@@ -123,7 +125,7 @@ class PaperCounterSpec extends munit.FunSuite:
       val bus = EventBus()
       val system = ActorSystem(bus)
       val fills = collect(bus, Set(Interest.All(Topics.Fill)))
-      val delayed = SimConfig(exchangeToStrategyDelayMs = 120, orderToExchangeDelayMs = 120, initialBalanceUsdt = 10_000.0)
+      val delayed = TestSim.noFees.copy(exchangeToStrategyDelayMs = 120, orderToExchangeDelayMs = 120, initialBalanceUsdt = 10_000.0)
       system.spawn(PaperCounter(paper, ex, delayed, metas))
 
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, buyLimit(99.0, 0.5, "c1"))))

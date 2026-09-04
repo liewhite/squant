@@ -1,5 +1,7 @@
 package hft.engine
 
+import hft.TestSim
+
 import hft.actor.ActorSystem
 import hft.domain.*
 import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
@@ -26,7 +28,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
   private val meta = SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
   private val metas = Map[Symbol, SymbolMeta](sym -> meta)
   private val paper: AccountId.Paper = AccountId.Paper(1)
-  private val instant = SimConfig(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
+  private val instant = TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
 
   /** 不推送任何东西的汇报面 —— 实盘成交只能来自真实推送, 本测试不造 */
   private object SilentFeed extends AccountFeed:
