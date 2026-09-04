@@ -1,0 +1,32 @@
+{
+  "port": 8123,
+  "host": "127.0.0.1",
+
+  "exchanges": [
+    {
+      "venue": "Binance",
+      "k": "填只读密钥",
+      "s": "填只读密钥",
+      "syms": ["BTCUSDT", "ETHUSDT"],
+      "mkt": true,
+      "poll": 3000
+    },
+    {
+      "venue": "Okx",
+      "k": "填只读密钥",
+      "s": "填只读密钥",
+      "passphrase": "OKX 才需要",
+      "syms": ["BTC-USDT-SWAP", "ETH-USDT-SWAP"],
+      "mkt": true,
+      "poll": 3000
+    },
+    {
+      "venue": "Bybit",
+      "k": "填只读密钥",
+      "s": "填只读密钥",
+      "syms": ["BTCUSDT"],
+      "mkt": false,
+      "poll": 5000
+    }
+  ]
+}

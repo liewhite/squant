@@ -75,6 +75,12 @@ private[engine] final class StrategySession(
     }
 
 private[engine] object StrategySession:
+  /** 对齐请求号的**唯一序列**。
+    *
+    * `Executor` 靠 requestId 认领"这是我那一轮对齐的应答" (见 `Executor.alignmentRequestId`),
+    * 所以只要有第二个发号的地方, 就必须共用这一个 —— 各自从 0 计数迟早撞上, 而撞上的后果是
+    * 某个策略**误以为自己的对齐已完成**并开始交易, 危险侧且没有任何症状。
+    * 目前只有本类发号 (只读监控走 `hft.exchange.AccountMonitor`, 不需要对齐)。 */
   private val sequence = AtomicLong(0L)
   private def nextRequestId(): Long = sequence.incrementAndGet()
 

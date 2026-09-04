@@ -32,7 +32,49 @@ Engine.run(plugins = Vector(gateway, marketFeed)) { engine =>
 sbt "demo/runMain demo.DashboardDemoLauncher 8123"
 ```
 
-已经接上的启动器：`StockSpreadLauncher`（三所股票永续价差监控，端口由第 4 个参数给，
+### 接实盘账户
+
+`LiveDashboardLauncher` —— 只读实盘看板：把配置里那几家交易所的账户接上，一个页面看仓位、
+挂单、净值、余额，以及（可选）它们的盘口与跨所比价。
+
+```
+cp conf/dashboard.example.json conf/dashboard.json
+chmod 600 conf/dashboard.json          # 里面是 API 密钥
+sbt "runMain strategy.monitor.LiveDashboardLauncher conf/dashboard.json"
+```
+
+每家装的是 `hft.exchange.AccountMonitor` —— 一个**只读**的轮询插件，不是柜台。它不注册任何
+命令处理能力，所以**下单指令在这个进程里连路由都没有**，那是结构保证而不是"这里没装策略所以
+没人会发"这种关于当前装配的话。
+
+**为什么不用柜台**（它也能产出这些读数，启动对齐时发一份）：柜台是为**执行**设计的，
+拿它来观察会撞上它自己的三处前提 ——
+
+| 柜台的前提 | 对只读监控的后果 |
+|---|---|
+| 每个标的都要有合约规格（`syncSnapshot` 入口 `symbols.foreach(metaOf)`） | 币安的 `symbolMetas` 只收 `TRADING`+`PERPETUAL`，账上**一张股票永续（`AAPLUSDT`）或季度交割合约就让整个只读进程启动失败**，报的还是"无法发单" |
+| 只管对齐过的标的（`PositionBook.manages`） | 启动后在手机上新开的仓位**永远不会出现**，而页面看起来是完整的 —— 假账比没有账更坏 |
+| 注册 `OrderIntent` 处理能力 | 只读进程不该有下单能力 |
+
+监控三条都不占：不问规格（它不发单）、不设范围（账上有什么就报什么）、不注册命令处理能力。
+
+**密钥仍建议用只读密钥** —— 那是另一道、也是更外的一道保证：三家都支持，而监控要做的事
+（查持仓／挂单／钱包／净值）只读密钥全都做得到。两道一起上。
+
+配置里 `symbols` 是"即使空仓我也要看见"的清单；账上实际持有的会自动出现，不必列全。
+`watchMarket` 逐家可配：true 才订阅盘口、看得到价格与跨所比价；false 则只看账户，少几条 WS 连接。
+`poll` 是轮询间隔（下限 1s —— 账户接口有权重限制）。
+
+**如实声明的偏差：它是轮询的。** 没有私有 WS 推送，所以成交与仓位变化在**一个轮询间隔之内**
+出现，不是即时。这个偏差是可见的 —— 页面上每个读数都带年龄，轮询源的年龄自然在 0 到 `poll`
+之间摆动。要即时就得接私有流，而那是柜台干的事。
+
+**不要与同账户的柜台共处一个进程。** 两者都发 `Topics.Position`：柜台发的是账本的仓位
+（经对账，权威），监控发的是 REST 读数。同一个 (账户, 交易所) 上两个发布者 = last-write-wins，
+策略可能读到监控那份更旧的值并据此定仓位 —— 危险侧且没有症状。这一条**没有做成结构保证**
+（框架里没有"我与谁互斥"的声明），所以只读看板应当单独一个进程跑。
+
+已经接上的其它启动器：`StockSpreadLauncher`（三所股票永续价差监控，端口由第 4 个参数给，
 默认 8123，给 `0` 表示不起）。
 
 | 路径 | 内容 |
@@ -218,14 +260,24 @@ logger 上打一条 ERROR、把服务器停掉，然后正常返回，`port` 变
 同理不做前端构建：换来的是"编译出来就能跑，没有第二套工具链"。页面复杂到需要构建工具的那天，
 它也该是另一个仓库。
 
-## 装配顺序：必须先于 `addStrategy`
+## 装配顺序：必须先于对齐
 
 全量 `Wallet` 与对齐时的初始仓位快照**只在启动对齐时发一次**（见 `TradingGateway.syncEvents`）。
-看板若在 `addStrategy` 之后才 `install`，就永远收不到它们：`walletKnown` 一直是 false、
-仓位一直显示 `—`，直到下一笔成交才有数。
+看板若在对齐之后才 `install`，就永远收不到它们：`walletKnown` 一直是 false、仓位一直显示 `—`，
+直到下一笔成交才有数。
 
 失效是**可见的**（页面如实标出"未收到全量钱包快照"），不会骗人，但装错顺序就白等。
-所以：先 `install(DashboardActor(...))`，再 `addStrategy(...)`。
+所以：先 `install(DashboardActor(...))`，再 `addStrategy(...)` / `watchAccount(...)`。
+
+### 只读监控不走对齐
+
+`AccountSync` 只有 `StrategySession` 会发，而 `AccountMonitor` 压根不需要它 —— 它自己按节拍
+把账户状态拉出来发，全量钱包每拍都发一遍。所以纯监控进程里没有"对齐"这一步，也就没有
+"装晚了就永远收不到那份一次性快照"的问题。
+
+> 这里曾经加过一个 `Engine.watchAccount`（与 `watchMarket` 对称，拉一次对齐但不交易不占标的），
+> 用来让"柜台 + 无策略"这个组合跑起来。换成 `AccountMonitor` 之后它没有消费者了，已删除 ——
+> 它存在的唯一理由是让一个错的架构能跑。
 
 ## 分层与测试
 
