@@ -40,7 +40,8 @@ final case class AccountRowView(
     lastFill: Option[FillView],
 )
 
-final case class SymbolRowView(
+/** 一个资产在**某一家交易所**上的情况。 */
+final case class VenueRowView(
     exchange: String,
     symbol: String,
     bbo: Option[Reading[BboView]],
@@ -49,6 +50,16 @@ final case class SymbolRowView(
     lastTradePrice: Option[Reading[Double]],
     accounts: Vector[AccountRowView],
 )
+
+/** 一个资产 —— 把它在各家交易所的情况并排放在一起。
+  *
+  * "哪些 symbol 是同一个资产"**不由看板判断**：各所的 symbol 串本就不同
+  * (`AAPLUSDT` / `AAPL` / `AAPL`)，靠去后缀之类的规则去猜，迟早在某个标的上猜错
+  * (`BTCUSDC`、`1000PEPEUSDT`、`ETH-USD-240329-3000-C` 都能把规则撞翻)，而且那是**第二份**
+  * 已经存在的知识 —— 建立标的宇宙的那个组件才知道正确答案 (crossspread 的
+  * `listings: Exchange -> (Ticker -> Symbol)`)。所以分组函数由装配方注入，见
+  * [[BoardView.of]] 的 `assetOf`。默认按 symbol 本身分组：本就同名的自然合并，不发明任何东西。 */
+final case class AssetRowView(asset: String, venues: Vector[VenueRowView])
 
 final case class BalanceView(currency: String, amount: Double, ageMs: Long)
 
@@ -73,7 +84,8 @@ final case class BoardView(
     generatedAtMs: Timestamp,
     eventsApplied: Long,
     lastEventAgeMs: Option[Long],
-    symbols: Vector[SymbolRowView],
+    /** 按资产分组的行；每行内含它在各家交易所上的情况。 */
+    assets: Vector[AssetRowView],
     accounts: Vector[AccountSummaryView],
 )
 
@@ -93,18 +105,34 @@ object BoardView:
   given sttp.tapir.Schema[FillView] = sttp.tapir.Schema.derived
   given readingSchema[A: sttp.tapir.Schema]: sttp.tapir.Schema[Reading[A]] = sttp.tapir.Schema.derived
   given sttp.tapir.Schema[AccountRowView] = sttp.tapir.Schema.derived
-  given sttp.tapir.Schema[SymbolRowView] = sttp.tapir.Schema.derived
+  given sttp.tapir.Schema[VenueRowView] = sttp.tapir.Schema.derived
+  given sttp.tapir.Schema[AssetRowView] = sttp.tapir.Schema.derived
   given sttp.tapir.Schema[BalanceView] = sttp.tapir.Schema.derived
   given sttp.tapir.Schema[AccountSummaryView] = sttp.tapir.Schema.derived
   given sttp.tapir.Schema[BoardView] = sttp.tapir.Schema.derived
 
-  /** 把快照投影成视图。**纯函数** —— `now` 由调用方给, 不读墙钟, 于是可单测。 */
-  def of(snapshot: BoardSnapshot, now: Timestamp): BoardView =
+  /** 把快照投影成视图。**纯函数** —— `now` 由调用方给, 不读墙钟, 于是可单测。
+    *
+    * @param assetOf 标的 -> **资产代码**。同一个资产在各家交易所上的行会被并到一行,
+    *                方便横向比价。看板自己判断不了这件事 (见 [[AssetRowView]]),
+    *                所以由装配方给; 默认按 symbol 本身分组。
+    */
+  def of(snapshot: BoardSnapshot, now: Timestamp, assetOf: Instrument => String = _.symbol): BoardView =
+    val rows = snapshot.symbols.toVector
+      .groupBy((instrument, _) => assetOf(instrument))
+      .toVector
+      .sortBy(_._1)
+      .map { (asset, entries) =>
+        AssetRowView(
+          asset,
+          entries.sortBy(kv => (kv._1.exchange.toString, kv._1.symbol)).map((_, board) => venueRow(board, now)),
+        )
+      }
     BoardView(
       generatedAtMs = now,
       eventsApplied = snapshot.eventsApplied,
       lastEventAgeMs = snapshot.lastEventAt.map(now - _),
-      symbols = snapshot.symbols.toVector.sortBy(kv => (kv._1.exchange.toString, kv._1.symbol)).map(kv => symbolRow(kv._2, now)),
+      assets = rows,
       accounts = snapshot.accounts.toVector
         .sortBy(kv => (kv._1.account.toString, kv._1.exchange.toString))
         .map((key, s) => summaryRow(key, s, now)),
@@ -113,8 +141,8 @@ object BoardView:
   private def reading[A, B](s: Option[Stamped[A]], now: Timestamp)(f: A => B): Option[Reading[B]] =
     s.map(st => Reading(f(st.value), st.ageMs(now)))
 
-  private def symbolRow(b: SymbolBoard, now: Timestamp): SymbolRowView =
-    SymbolRowView(
+  private def venueRow(b: SymbolBoard, now: Timestamp): VenueRowView =
+    VenueRowView(
       exchange = b.instrument.exchange.toString,
       symbol = b.instrument.symbol,
       bbo = reading(b.bbo, now)(q =>

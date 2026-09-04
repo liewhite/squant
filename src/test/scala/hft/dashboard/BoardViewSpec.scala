@@ -17,8 +17,8 @@ class BoardViewSpec extends munit.FunSuite:
 
   test("年龄相对读取时刻算, 同一份快照读两次给出不同的年龄"):
     // 年龄不能在折叠时算死: 那样页面上的"3s 前"会永远停在 3s。
-    assertEquals(BoardView.of(snapshot, t0 + 1000).symbols.head.bbo.get.ageMs, 1000L)
-    assertEquals(BoardView.of(snapshot, t0 + 9000).symbols.head.bbo.get.ageMs, 9000L)
+    assertEquals(BoardView.of(snapshot, t0 + 1000).assets.head.venues.head.bbo.get.ageMs, 1000L)
+    assertEquals(BoardView.of(snapshot, t0 + 9000).assets.head.venues.head.bbo.get.ageMs, 9000L)
 
   test("缺读数序列化成 null, 不是 0"):
     // 0 是一个合法的价格/仓位取值。把"还没有这条读数"写成 0, 页面就再也分不出
@@ -32,7 +32,7 @@ class BoardViewSpec extends munit.FunSuite:
     val v = BoardView.of(BoardSnapshot.empty, t0)
     assertEquals(v.eventsApplied, 0L)
     assertEquals(v.lastEventAgeMs, None)
-    assert(v.symbols.isEmpty && v.accounts.isEmpty)
+    assert(v.assets.isEmpty && v.accounts.isEmpty)
 
   test("行按 (交易所, 标的) 排序 —— 页面顺序不随 Map 的哈希序抖"):
     val s = Seq(("ETHUSDT", Exchange.Okx), ("AAAUSDT", Exchange.Binance), ("BBBUSDT", Exchange.Binance))
@@ -40,12 +40,12 @@ class BoardViewSpec extends munit.FunSuite:
         acc.apply(Event.stamped(Topics.Bbo, BBO(exch, sy, 1.0, Coin(1.0), 2.0, Coin(1.0), t0), t0, t0))
       }
     assertEquals(
-      BoardView.of(s, t0).symbols.map(r => (r.exchange, r.symbol)),
+      BoardView.of(s, t0).assets.flatMap(a => a.venues.map(v => (v.exchange, v.symbol))),
       Vector(("Binance", "AAAUSDT"), ("Binance", "BBBUSDT"), ("Okx", "ETHUSDT")),
     )
 
   test("单位在边界解包成裸数字 —— opaque type 是进程内的防线, 不出到线上"):
-    val row = BoardView.of(snapshot, t0).symbols.head
+    val row = BoardView.of(snapshot, t0).assets.head.venues.head
     assertEquals(row.bbo.get.value.mid, 50000.0)
     assertEquals(row.accounts.head.position.get.value, 0.5)
 
@@ -54,6 +54,41 @@ class BoardViewSpec extends munit.FunSuite:
     // 在 JS 那边又合并成同一件事, 而分开它们正是这份视图存在的理由;
     // 而且 `undefined.length` 直接抛 TypeError, 空看板会白屏。
     val json = writeToString(BoardView.of(BoardSnapshot.empty, t0))
-    assert(json.contains("\"symbols\":[]"), json)
+    assert(json.contains("\"assets\":[]"), json)
     assert(json.contains("\"accounts\":[]"), json)
     assert(json.contains("\"lastEventAgeMs\":null"), json)
+
+  test("同一资产在各家交易所并成一行 —— 分组由调用方给, 看板不猜"):
+    // 各所的 symbol 串本就不同 (AAPLUSDT / AAPL / AAPL)。靠去后缀之类的规则去猜, 迟早在
+    // BTCUSDC、1000PEPEUSDT、ETH-USD-240329-3000-C 上撞翻; 而且那是第二份已经存在的知识 ——
+    // 建立标的宇宙的那个组件 (crossspread 的 listings) 才知道正确答案。
+    val quotes = Vector(
+      (Exchange.Binance, "AAPLUSDT", 328.34, 328.35),
+      (Exchange.Okx, "AAPL", 328.39, 328.40),
+      (Exchange.Hyperliquid, "AAPL", 328.02, 328.03),
+      (Exchange.Binance, "NVDAUSDT", 230.72, 230.73),
+    )
+    val snap = quotes.foldLeft(BoardSnapshot.empty) { case (acc, (exch, sy, bid, ask)) =>
+      acc.apply(Event.stamped(Topics.Bbo, BBO(exch, sy, bid, Coin(1.0), ask, Coin(1.0), t0), t0, t0))
+    }
+    // 装配方给的权威映射 (crossspread 就是这么反建的)
+    val assetOf: Instrument => String = i => if i.symbol.startsWith("AAPL") then "AAPL" else "NVDA"
+    val view = BoardView.of(snap, t0, assetOf)
+    assertEquals(view.assets.map(_.asset), Vector("AAPL", "NVDA"))
+    assertEquals(
+      view.assets.head.venues.map(v => (v.exchange, v.symbol)),
+      Vector(("Binance", "AAPLUSDT"), ("Hyperliquid", "AAPL"), ("Okx", "AAPL")),
+      "组内按 (交易所, 标的) 排序, 顺序不随 Map 哈希序抖",
+    )
+    assertEquals(view.assets(1).venues.map(_.symbol), Vector("NVDAUSDT"))
+
+  test("默认按 symbol 本身分组 —— 不发明任何知识"):
+    // 默认行为下, 只有本就同名的 symbol 才会合并; AAPLUSDT 与 AAPL 各自成行。
+    val snap = Vector((Exchange.Binance, "AAPLUSDT"), (Exchange.Okx, "AAPL"), (Exchange.Hyperliquid, "AAPL"))
+      .foldLeft(BoardSnapshot.empty) { case (acc, (exch, sy)) =>
+        acc.apply(Event.stamped(Topics.Bbo, BBO(exch, sy, 1.0, Coin(1.0), 2.0, Coin(1.0), t0), t0, t0))
+      }
+    val view = BoardView.of(snap, t0)
+    assertEquals(view.assets.map(_.asset), Vector("AAPL", "AAPLUSDT"))
+    assertEquals(view.assets.head.venues.map(_.exchange), Vector("Hyperliquid", "Okx"), "本就同名的自然合并")
+    assertEquals(view.assets(1).venues.map(_.exchange), Vector("Binance"))

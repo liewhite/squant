@@ -35,6 +35,15 @@ import strategy.strategies.crossspread.logic.*
   * 注意预热：默认 `sampleMs=1000 × minSamples=300` 即 **5 分钟**之后才会有第一条信号，
   * 之前所有价差对都在攒中枢 (宁可不报，也不拿几十个样本估出来的中枢去判"偏离")。
   */
+/** 由各所清单反建 (交易所, Symbol) -> 标的代码。认不出的标的退回它自己的 symbol ——
+  * 那只可能是看板收到了不在本次宇宙里的行情, 如实按 symbol 单独成行即可。 */
+private def tickerOf(listings: Map[Exchange, Map[Ticker, Symbol]]): Instrument => Ticker =
+  val index: Map[Instrument, Ticker] =
+    listings.iterator.flatMap((exchange, bySymbol) =>
+      bySymbol.iterator.map((ticker, symbol) => Instrument(exchange, symbol) -> ticker)
+    ).toMap
+  instrument => index.getOrElse(instrument, instrument.symbol)
+
 @main def StockSpreadLauncher(args: String*): Unit =
   val logger = LoggerFactory.getLogger("StockSpreadLauncher")
   val minZ = args.lift(0).map(_.toDouble).getOrElse(5.0)
@@ -88,7 +97,11 @@ import strategy.strategies.crossspread.logic.*
       engine.install(monitor)
       // 0 = 不起看板。端口被占时它会在装配期抛 (见 DashboardActor) —— 那通常说明
       // 上一个进程还活着, 而两个进程同时盯同一批标的只会让日志更难读。
-      if dashboardPort > 0 then engine.install(DashboardActor(dashboardPort))
+      //
+      // 把 listings 反过来喂给看板: 各所的 symbol 串本就不同 (AAPLUSDT / AAPL / AAPL),
+      // 而"哪两个是同一个资产"的**权威答案就在这张表里** —— 它是从三家交易所的清单建出来的。
+      // 让看板自己去猜 (去掉 USDT 后缀之类) 等于把这份知识抄第二遍, 而且是会猜错的那种抄法。
+      if dashboardPort > 0 then engine.install(DashboardActor(dashboardPort, assetOf = tickerOf(listings)))
       // 不占标的、不做启动对齐: 这些标的谁都可以拿去交易, 监控器只是在看
       engine.watchMarket(detector.instruments, Set(Topics.Bbo))
 

@@ -1,7 +1,7 @@
 package hft.dashboard
 
 import hft.actor.{Actor, ActorContext}
-import hft.domain.{Timestamp, nowMs}
+import hft.domain.{Instrument, Timestamp, nowMs}
 import hft.event.{AnyEvent, Interest}
 import io.helidon.webserver.WebServer
 import org.slf4j.LoggerFactory
@@ -40,8 +40,17 @@ import java.util.concurrent.atomic.AtomicReference
   * @param port  监听端口
   * @param host  绑定地址。默认只绑回环: 看板**没有任何鉴权**, 而它把仓位、挂单、净值全都
   *              摊开在页面上。要从别的机器看, 请走 SSH 端口转发, 不要图省事绑 0.0.0.0。
+  * @param assetOf 标的 -> **资产代码**: 同一个资产在各家交易所上的行会并成一行, 方便横向比价。
+  *                各所的 symbol 串本就不同 (`AAPLUSDT` / `AAPL`), 而"哪些是同一个资产"是
+  *                **建立标的宇宙的那个组件**才知道的事 (如 crossspread 的 listings 表) ——
+  *                看板去猜等于凭空造一份会猜错的知识, 所以由装配方注入。
+  *                默认按 symbol 本身分组: 本就同名的自然合并, 不发明任何东西。
   */
-final class DashboardActor(port: Int, host: String = "127.0.0.1") extends Actor:
+final class DashboardActor(
+    port: Int,
+    host: String = "127.0.0.1",
+    assetOf: Instrument => String = _.symbol,
+) extends Actor:
   private val logger = LoggerFactory.getLogger(classOf[DashboardActor])
 
   /** actor 线程是唯一写者; HTTP 线程只读。 */
@@ -54,7 +63,7 @@ final class DashboardActor(port: Int, host: String = "127.0.0.1") extends Actor:
   override def interests: Set[Interest] = BoardSnapshot.topics.map(Interest.All(_))
 
   /** 当前视图。`now` 取读取时刻的本地墙钟 —— 年龄要与事件的 `localTs` 同钟相减。 */
-  def view(now: Timestamp = nowMs): BoardView = BoardView.of(snapshot.get, now)
+  def view(now: Timestamp = nowMs): BoardView = BoardView.of(snapshot.get, now, assetOf)
 
   override def onStart(ctx: ActorContext): Unit =
     val handler = NimaServerInterpreter().toHandler(DashboardApi(() => view()).all)

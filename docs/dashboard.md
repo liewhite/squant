@@ -1,6 +1,7 @@
 # 实时看板
 
 一个只读的 Web 看板：各标的的行情、仓位、挂单，以及各账户的净值与余额。
+**同一资产在不同交易所上的行并排放在一起**，方便横向比价。
 
 ```
 总线 ──> DashboardActor.onEvent (actor 线程, 唯一写者)
@@ -40,7 +41,7 @@ sbt "demo/runMain demo.DashboardDemoLauncher 8123"
 | `/api/board` | JSON |
 | `/docs` | Swagger UI |
 
-## 三条设计判断
+## 四条设计判断
 
 ### 1. 它是观察者，不去读 StateManager
 
@@ -104,7 +105,30 @@ sbt "demo/runMain demo.DashboardDemoLauncher 8123"
 `walletKnown = false` 时页面会标出"未收到全量钱包快照，未列出 ≠ 0"：那份全量只来自启动对齐的
 一次 REST 钱包查询，没到之前，"某币不在表里"不能读成余额为 0（依据见 `hft.domain.Wallet`）。
 
-### 3. 只读，且默认只绑回环
+### 3. 同一资产并排，但"哪些是同一个资产"不由看板判断
+
+各所的 symbol 串本就不同：`AAPLUSDT` / `AAPL` / `AAPL`。靠"去掉 USDT 后缀"之类的规则去猜，
+迟早在某个标的上猜错 —— `BTCUSDC`、`1000PEPEUSDT`、`ETH-USD-240329-3000-C` 都能把规则撞翻；
+而且那是**第二份已经存在的知识**：建立标的宇宙的那个组件才知道正确答案。
+
+所以分组函数由装配方注入：
+
+```scala
+// crossspread: listings 就是从三家交易所的清单建出来的权威对应表, 反建即可
+engine.install(DashboardActor(port, assetOf = tickerOf(listings)))
+```
+
+默认是 `_.symbol` —— 本就同名的自然合并（OKX 与 Hyperliquid 都叫 `AAPL`），不发明任何东西。
+
+**跨所极差**（各所中价的 max−min，单位 bp）只用**新鲜**的报价算，不足两家新鲜就显示 `—`：
+拿一家的现价去比另一家 5 分钟前的价，差出来的是时间不是价差，而全量宇宙里确实有标的在某家所
+几分钟不报价。
+
+> 这一列**不是策略的异动判断**。后者要看这一对自己的中枢与 z 值（`SpreadDislocations`）——
+> 持续存在的价差是结构性的（资金费、参与者、上市时间差），照着它开仓等来的不是回归。
+> 别把这一列当信号。
+
+### 4. 只读，且默认只绑回环
 
 没有任何写接口。看板是观察者，不是操作台 —— 一个能下单/停机的 HTTP 面意味着交易系统多了
 一条不经过总线、不经过 `ActorSystem` 生命周期的旁路控制通道。真要做运维接口，那是另一个组件的事，
@@ -165,7 +189,7 @@ logger 上打一条 ERROR、把服务器停掉，然后正常返回，`port` 变
 全量宇宙下心跳 1ms 意味着折叠在实时跟上、邮箱没有积压，无滞后告警。真到了扛不住那天，
 滞后告警会先说话 —— 到那时再谈采样，而不是现在凭空加一个旋钮。
 
-一个已知的**页面**问题（不是总线问题）：376 个标的就是 376 行，且每秒序列化一次完整 JSON。
+一个已知的**页面**问题（不是总线问题）：376 个标的分组后仍有上百组、三四百行，且每秒序列化一次完整 JSON。
 再大一个量级就该按交易所/关键字筛选或分页了。若同进程还跑全市场 `Trade` 源，
 `Interest.All(Topics.Trade)` 会让行数再涨一截 —— 那时应把 `Trade` 从默认订阅里拿掉。
 
@@ -191,7 +215,7 @@ logger 上打一条 ERROR、把服务器停掉，然后正常返回，`port` 变
 | 文件 | 职责 | 测试 |
 |---|---|---|
 | `BoardSnapshot` | 纯折叠 `(快照, 事件) => 快照`，不读墙钟、不做 IO；**订阅列表由折叠表派生** | `BoardSnapshotSpec` |
-| `BoardView` | 快照 -> 线格式，年龄按传入的 `now` 算 | `BoardViewSpec` |
+| `BoardView` | 快照 -> 线格式，按资产分组，年龄按传入的 `now` 算 | `BoardViewSpec` |
 | `DashboardApi` | tapir endpoint + Host 白名单，只依赖 `() => BoardView` | `DashboardActorSpec`（Host 头用裸 socket 测） |
 | `DashboardPage` | 自包含 HTML | `DashboardActorSpec`（断言不含外部地址） |
 | `DashboardActor` | 订阅、引用替换、HTTP 生命周期 | `DashboardActorSpec`（端到端 + 端口释放 + 绑定失败） |

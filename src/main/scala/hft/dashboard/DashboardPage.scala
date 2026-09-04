@@ -47,6 +47,8 @@ object DashboardPage:
   .age.dead { color:var(--short); font-weight:600; }
   .sub { color:var(--dim); font-size:11px; }
   .empty { color:var(--dim); padding:20px 0; }
+  td.asset { font-weight:600; border-bottom:1px solid var(--line); }
+  tr.grp td { border-top:1px solid var(--line); }
   .pill { display:inline-block; padding:0 6px; border-radius:3px; background:var(--panel);
           border:1px solid var(--line); font-size:11px; margin-right:4px; }
 </style>
@@ -59,7 +61,7 @@ object DashboardPage:
   <span class="meta" id="events"></span>
 </header>
 <section>
-  <h2>标的</h2>
+  <h2>资产（同一资产的各家交易所并排）</h2>
   <div id="symbols"></div>
 </section>
 <section>
@@ -110,23 +112,50 @@ function reading(r, fmt) { return r ? fmt(r.value) + ' ' + ageCell(r.ageMs) : da
 
 function sideCls(v) { return v > 0 ? 'long' : v < 0 ? 'short' : 'none'; }
 
-function symbolsTable(rows) {
+/** 跨所极差 = 各所中价的 (max − min) / min，单位 bp。
+ *
+ * **只用新鲜的报价算**：拿一家的现价去比另一家 5 分钟前的价，差出来的是时间不是价差 ——
+ * 全量宇宙里确实有标的在某家所几分钟不报价（实测最老到过 5 分钟）。不足两家新鲜就给"—"。
+ *
+ * 这只是把页面上已经并排显示的几个数做一次减法，**不是策略的异动判断**：后者要看这一对
+ * 自己的中枢与 z 值（见 crossspread 的 SpreadDislocations），持续存在的价差是结构性的，
+ * 照着它开仓等来的不是回归。别把这一列当信号。
+ */
+function crossVenueBps(venues) {
+  const mids = venues.filter(v => v.bbo && v.bbo.ageMs <= WARN_MS).map(v => v.bbo.value.mid);
+  if (mids.length < 2) return null;
+  const lo = Math.min(...mids), hi = Math.max(...mids);
+  return lo > 0 ? (hi - lo) / lo * 10000 : null;
+}
+
+function assetsTable(rows) {
   if (!rows.length) return '<div class="empty">还没有任何标的的数据。行情源连上了吗？</div>';
-  let h = '<table><tr><th>交易所</th><th>标的</th><th class="num">买一</th><th class="num">卖一</th>'
-        + '<th class="num">中价</th><th class="num">价差</th><th class="num">标记价</th>'
-        + '<th class="num">资金费</th><th>账户</th></tr>';
+  let h = '<table><tr><th>资产</th><th>交易所</th><th>标的</th><th class="num">买一</th>'
+        + '<th class="num">卖一</th><th class="num">中价</th><th class="num">价差</th>'
+        + '<th class="num">标记价</th><th class="num">资金费</th><th>账户</th></tr>';
   for (const r of rows) {
-    const b = r.bbo;
-    h += '<tr>'
-      + '<td>' + esc(r.exchange) + '</td><td>' + esc(r.symbol) + '</td>'
-      + '<td class="num">' + (b ? num(b.value.bid) : dash) + '</td>'
-      + '<td class="num">' + (b ? num(b.value.ask) : dash) + '</td>'
-      + '<td class="num">' + (b ? num(b.value.mid) + ' ' + ageCell(b.ageMs) : dash) + '</td>'
-      + '<td class="num">' + (b ? num(b.value.spread, 4) : dash) + '</td>'
-      + '<td class="num">' + reading(r.markPrice, v => num(v)) + '</td>'
-      + '<td class="num">' + (r.funding ? (r.funding.value.rate * 100).toFixed(4) + '%' : dash) + '</td>'
-      + '<td>' + accountsCell(r.accounts) + '</td>'
-      + '</tr>';
+    const bps = crossVenueBps(r.venues);
+    r.venues.forEach((v, i) => {
+      const b = v.bbo;
+      // 资产名只在该资产的第一行出现，跨所极差同理 —— 它是整组的属性，不是某一家的。
+      const head = i === 0
+        ? '<td rowspan="' + r.venues.length + '" class="asset">' + esc(r.asset)
+          + (bps === null
+              ? '<div class="sub none">跨所极差 —</div>'
+              : '<div class="sub">跨所极差 ' + bps.toFixed(1) + 'bp</div>')
+          + '</td>'
+        : '';
+      h += '<tr class="' + (i === 0 ? 'grp' : '') + '">' + head
+        + '<td>' + esc(v.exchange) + '</td><td>' + esc(v.symbol) + '</td>'
+        + '<td class="num">' + (b ? num(b.value.bid) : dash) + '</td>'
+        + '<td class="num">' + (b ? num(b.value.ask) : dash) + '</td>'
+        + '<td class="num">' + (b ? num(b.value.mid) + ' ' + ageCell(b.ageMs) : dash) + '</td>'
+        + '<td class="num">' + (b ? num(b.value.spread, 4) : dash) + '</td>'
+        + '<td class="num">' + reading(v.markPrice, x => num(x)) + '</td>'
+        + '<td class="num">' + (v.funding ? (v.funding.value.rate * 100).toFixed(4) + '%' : dash) + '</td>'
+        + '<td>' + accountsCell(v.accounts) + '</td>'
+        + '</tr>';
+    });
   }
   return h + '</table>';
 }
@@ -191,7 +220,7 @@ async function tick() {
       hb.textContent = '最后一条事件 ' + s + 's 前';
       hb.className = d.lastEventAgeMs > DEAD_MS ? 'meta bad' : d.lastEventAgeMs > WARN_MS ? 'meta warn' : 'meta';
     }
-    document.getElementById('symbols').innerHTML = symbolsTable(d.symbols);
+    document.getElementById('symbols').innerHTML = assetsTable(d.assets);
     document.getElementById('accounts').innerHTML = accountsTable(d.accounts);
   } catch (e) {
     const st = document.getElementById('status');
