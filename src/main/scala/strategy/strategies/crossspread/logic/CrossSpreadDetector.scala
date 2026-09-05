@@ -131,7 +131,7 @@ final class CrossSpreadDetector(
         val state = states(pair)
         if !state.rejected then
           freshQuotes(pair, now).foreach { (quoteA, quoteB) =>
-            val spreadBps = logRatioBps(quoteA.mid, quoteB.mid)
+            val spreadBps = CrossSpreadDetector.logRatioBps(quoteA.mid, quoteB.mid)
             if math.abs(spreadBps) > config.maxSpreadBps then
               // 超限的样本不入窗: 它不是一次可用的测量, 放进去会把中枢整个拖走。
               // 攒够连续 minSamples 条才认定配错 —— 理由见 PairRejection
@@ -204,16 +204,13 @@ final class CrossSpreadDetector(
       deviationBps = sign * verdict.deviationBps,
       z = sign * verdict.z,
       // 卖贵的一边成交在它的买一, 买便宜的一边成交在它的卖一
-      crossEdgeBps = logRatioBps(richQuote.bid, cheapQuote.ask),
+      crossEdgeBps = CrossSpreadDetector.logRatioBps(richQuote.bid, cheapQuote.ask),
       richMid = richQuote.mid,
       cheapMid = cheapQuote.mid,
       samples = baseline.samples,
       quoteAgeMs = math.max(now - richQuote.timestamp, now - cheapQuote.timestamp),
       timestamp = now,
     )
-
-  private def logRatioBps(numerator: Price, denominator: Price): Double =
-    1e4 * math.log(numerator.ratioTo(denominator))
 
   /** 观测用快照：报价条数、跟踪/就绪/被拒的对数、累计报警数。
     * 就绪数用来区分"还没到点"与"接线错了" —— 预热未完成前一条都不会报。 */
@@ -227,4 +224,15 @@ final class CrossSpreadDetector(
     )
 
 object CrossSpreadDetector:
+  /** 价差的**唯一算法**: 1e4 × ln(a / b)。
+    *
+    * 取对数比而不是 (a−b)/b: 对数比是**反对称**的 (ln(a/b) = −ln(b/a)), 于是"A 贵于 B"
+    * 与"B 便宜于 A"给出同一个绝对值 —— 而百分比差不是, 它随谁做分母而变。价差要进均线与
+    * 标准差, 分母一变整个中枢就偏了。
+    *
+    * `private[crossspread]` 而不是私有: 对敲策略要用**此刻**的盘口重算这个量
+    * (见 `ArbPlan.edgeBps`), 而两处各写一遍的结果是同一段行情算出两个价差, 且不会有编译错误。 */
+  private[crossspread] def logRatioBps(numerator: Price, denominator: Price): Double =
+    1e4 * math.log(numerator.ratioTo(denominator))
+
   final case class Stats(quotesSeen: Long, pairsTracked: Int, pairsReady: Int, pairsRejected: Int, alertsEmitted: Long)
