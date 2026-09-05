@@ -50,6 +50,12 @@ object ArbPlan:
       /** 两腿报价的最大年龄 (ms)：超过它这两个价不可比 —— 一边现价配另一边几十秒前的价,
         * 差出来的里面掺着这段时间对方走过的路。 */
       maxQuoteAgeMs: Long,
+      /** 单腿仓位上限 (币本位)。**没有默认值。**
+        *
+        * 本策略**只开仓不平仓**, 而检测器的冷却默认 60s —— 一次持续 30 分钟的偏离能开出几十份,
+        * 每份付两腿 taker 费, 且没有任何退出路径。上限是这个缺口唯一的刹车, 所以它必须由
+        * 调用方明说, 而不是给一个"看着安全"的默认值。 */
+      maxPositionPerLeg: Coin,
       /** **false = 只算不下单。** 真实下单必须由配置显式开启 —— 与本仓库其它实盘策略同一姿态。 */
       enableOrders: Boolean = false,
   ):
@@ -58,6 +64,7 @@ object ArbPlan:
       require(roundTripCostBps >= 0, s"roundTripCostBps 须 >= 0, 实为 $roundTripCostBps")
       require(minProfitBps > 0, s"minProfitBps 须为正 —— 0 意味着'刚好打平也做', 那是白担腿风险")
       require(qtyPerLeg > Coin.Zero, s"qtyPerLeg 须为正, 实为 $qtyPerLeg")
+      require(maxPositionPerLeg >= qtyPerLeg, s"maxPositionPerLeg ($maxPositionPerLeg) 至少要能装下一份 ($qtyPerLeg)")
       require(maxQuoteAgeMs > 0, s"maxQuoteAgeMs 须为正, 实为 $maxQuoteAgeMs")
       this
 
@@ -72,6 +79,11 @@ object ArbPlan:
   enum Skip:
     /** 这一对上还有未配平的量 —— 先把它处理掉, 不能在裸敞口上再叠一层。 */
     case Unbalanced(excess: Coin, on: Instrument)
+    /** 信号里的腿不属于本实例 —— 检测器按 ticker 的**全部两两组合**出信号, 三家所就有三对,
+      * 而本实例只声明了其中一些腿。在没声明的标的上下单会拿不到回报, 也没做过启动对齐。 */
+    case ForeignLeg(leg: Instrument)
+    /** 已经到单腿仓位上限。 */
+    case AtPositionLimit(held: Coin, limit: Coin)
     /** 上一轮的两条 IOC 还没都回来。 */
     case InFlight
     case DeviationTooSmall(deviationBps: Double, required: Double)
@@ -83,6 +95,8 @@ object ArbPlan:
 
     def describe: String = this match
       case Unbalanced(excess, on)          => f"上一轮未配平 (${excess.value}%.6f 裸在 $on), 先处理它"
+      case ForeignLeg(leg)                 => s"信号里的 $leg 不属于本实例声明的腿"
+      case AtPositionLimit(held, limit)    => f"单腿仓位 ${held.value}%.6f 已到上限 ${limit.value}%.6f"
       case InFlight                        => "上一轮的 IOC 还没都回来"
       case DeviationTooSmall(dev, req)     => f"偏离 $dev%.1fbp 未到门槛 $req%.1fbp"
       case EdgeBelowCost(edge, req)        => f"可执行边 $edge%.1fbp 盖不住来回成本+利润门槛 $req%.1fbp"
@@ -91,8 +105,13 @@ object ArbPlan:
       case OrdersDisabled(edge)            => f"enableOrders=false: 本该对敲 (边 $edge%.1fbp), 只记录不下单"
 
   /** 决定要下的两条腿。 */
-  final case class Legs(sell: Order, buy: Order, sellPrice: Price, buyPrice: Price, edgeBps: Double, qty: Coin):
+  final case class Legs(sell: Order, buy: Order, edgeBps: Double):
     def orders: Vector[Order] = Vector(sell, buy)
+    def qty: Coin = sell.quantity
+    /** 日志用 —— 价格就在 Order 里, 不另存一份。 */
+    def priceOf(order: Order): Price = order.orderType match
+      case OrderType.Limit(px, _) => px
+      case OrderType.Market       => Price.Zero
 
   /** 可执行的边 (bp) = 1e4 × ln(卖腿买一 / 买腿卖一)。
     *
@@ -101,19 +120,44 @@ object ArbPlan:
   def edgeBps(sell: LegQuote, buy: LegQuote): Double =
     CrossSpreadDetector.logRatioBps(sell.bid, buy.ask)
 
-  /** 决策。`held` 是这一对上尚未配平的量 (None = 已配平)。 */
+  /** 决策。
+    *
+    * @param positionOf       某条腿的**当前仓位** (来自框架的账本, 空头为负)。配平与仓位上限都
+    *                         从它派生 —— 不在策略内存里另记一本: 那本账重启就没了, 而裸仓位
+    *                         还在交易所, 于是重启后会在裸敞口上继续开新仓。
+    *
+    *                         传函数而不是值: 未声明的腿上读仓位会被框架直接拒
+    *                         (`SymbolState.positionSize` 对未声明交易所抛错 —— 那道守卫是对的),
+    *                         所以必须**先过腿校验再读**。
+    * @param minOrderOf       某条腿的**最小可发量**。容差取它: 比它还小的残量在交易所根本发不出去,
+    *                         判成"未配平"只会让平腿单被精度拒, 然后策略卡死在那里。
+    */
   def plan(
       cfg: Config,
       signal: SpreadDislocation,
+      declaredLegs: Set[Instrument],
       richQuote: Option[LegQuote],
       cheapQuote: Option[LegQuote],
-      unbalanced: Option[(Coin, Instrument)],
+      positionOf: Instrument => Coin,
       inFlight: Boolean,
-      newClientOrderId: Exchange => String,
+      minOrderOf: Instrument => Coin,
   ): Either[Skip, Legs] =
     for
-      _ <- unbalanced.toLeft(()).left.map((excess, on) => Skip.Unbalanced(excess, on))
+      // **腿校验必须最先做**: 后面每一步都要读这两条腿的仓位, 而未声明的腿上读仓位会被框架拒。
+      _ <- Either.cond(declaredLegs.contains(signal.rich), (), Skip.ForeignLeg(signal.rich))
+      _ <- Either.cond(declaredLegs.contains(signal.cheap), (), Skip.ForeignLeg(signal.cheap))
       _ <- Either.cond(!inFlight, (), Skip.InFlight)
+      richPos = positionOf(signal.rich)
+      cheapPos = positionOf(signal.cheap)
+      _ <- netExposure(signal.rich, richPos, signal.cheap, cheapPos, minOrderOf)
+        .toLeft(())
+        .left
+        .map(naked => Skip.Unbalanced(naked.excess, naked.leg))
+      _ <- Either.cond(
+        richPos.abs + cfg.qtyPerLeg <= cfg.maxPositionPerLeg && cheapPos.abs + cfg.qtyPerLeg <= cfg.maxPositionPerLeg,
+        (),
+        Skip.AtPositionLimit(Coin(math.max(richPos.abs.value, cheapPos.abs.value)), cfg.maxPositionPerLeg),
+      )
       _ <- Either.cond(
         signal.deviationBps >= cfg.minDeviationBps,
         (),
@@ -131,21 +175,12 @@ object ArbPlan:
       _ <- Either.cond(cfg.enableOrders, (), Skip.OrdersDisabled(edge))
     yield Legs(
       // 卖贵的一边: IOC 限价挂在它的买一 —— 主动吃单, 价内即成, 不留挂单。
-      sell = ioc(sellLeg.instrument, Side.Short, sellLeg.bid, cfg.qtyPerLeg, newClientOrderId),
-      buy = ioc(buyLeg.instrument, Side.Long, buyLeg.ask, cfg.qtyPerLeg, newClientOrderId),
-      sellPrice = sellLeg.bid,
-      buyPrice = buyLeg.ask,
+      sell = ioc(sellLeg.instrument, Side.Short, sellLeg.bid, cfg.qtyPerLeg),
+      buy = ioc(buyLeg.instrument, Side.Long, buyLeg.ask, cfg.qtyPerLeg),
       edgeBps = edge,
-      qty = cfg.qtyPerLeg,
     )
 
-  private def ioc(
-      instrument: Instrument,
-      side: Side,
-      price: Price,
-      qty: Coin,
-      newClientOrderId: Exchange => String,
-  ): Order =
+  private def ioc(instrument: Instrument, side: Side, price: Price, qty: Coin): Order =
     Order(
       id = "",
       exchange = instrument.exchange,
@@ -156,39 +191,40 @@ object ArbPlan:
       orderType = OrderType.Limit(price, TimeInForce.IOC),
       quantity = qty,
       reduceOnly = false,
-      clientOrderId = newClientOrderId(instrument.exchange),
+      // **空串** —— clientOrderId 由 `StrategyRunner.prepareIntent` 统一分配, 策略这里填什么都会被
+      // 覆写。曾经在这里自己生成并拿它关联回报, 后果是一条回报都匹配不上: 策略永久卡在
+      // "上一轮还在途", 而腿不平的检测与平腿代码一次都跑不到。
+      clientOrderId = "",
     )
 
-  /** 两腿都终态之后的结果。 */
-  enum Outcome:
-    /** 两腿成交量在容差内一致 —— 这才是想要的形态。 */
-    case Balanced(qty: Coin)
-    /** **一条腿成得比另一条多**: 多出来的那部分是裸方向敞口, 必须平掉。
-      *
-      * 这不是边角情况, 而是这类策略的主要风险: 两条腿是两次独立的 REST 往返, 中间那个窗口
-      * 里对手盘会动, IOC 于是可能一条全成、一条部分成或整单取消。 */
-    case Naked(excess: Coin, on: Instrument, closeSide: Side)
-    /** 两腿都没成交 —— IOC 没吃到, 没有敞口, 什么都不用做。 */
-    case Missed
-
-  /** 对账: 两腿各成交了多少, 得出要不要平、平哪边、平多少。
+  /** 两腿仓位不抵消的部分 —— **裸方向敞口**。
     *
-    * @param tolerance 视为"配平"的容差。取两腿的最小下单步长即可 —— 比它还小的残量在交易所
-    *                  也发不出去, 追着平会陷入"发不出去 -> 还是不平 -> 再发"的循环。
+    * @param excess    要平掉多少
+    * @param leg       在哪条腿上平 (取绝对仓位大的那条 —— 平它才是真正在减敞口)
+    * @param closeSide 平仓方向
     */
-  def reconcile(
-      sellLeg: Instrument,
-      sellFilled: Coin,
-      buyLeg: Instrument,
-      buyFilled: Coin,
-      tolerance: Coin,
-  ): Outcome =
-    require(sellFilled >= Coin.Zero && buyFilled >= Coin.Zero, s"成交量不能为负: $sellFilled / $buyFilled")
-    require(tolerance > Coin.Zero, s"容差须为正, 实为 $tolerance")
-    val diff = sellFilled - buyFilled
-    if sellFilled.isZero && buyFilled.isZero then Outcome.Missed
-    else if diff.abs <= tolerance then Outcome.Balanced(Coin(math.min(sellFilled.value, buyFilled.value)))
-    // 卖腿成得多 -> 净空 -> 买回来平掉多出的部分
-    else if diff > Coin.Zero then Outcome.Naked(diff, sellLeg, Side.Long)
-    // 买腿成得多 -> 净多 -> 卖掉多出的部分
-    else Outcome.Naked(diff.abs, buyLeg, Side.Short)
+  final case class Naked(excess: Coin, leg: Instrument, closeSide: Side)
+
+  /** 由两腿的**当前仓位**算裸敞口。配平 = 短 rich 与长 cheap 相互抵消, 净额为零。
+    *
+    * 这是"有没有配平"的**唯一判据**, 不在策略内存里另记一本: 那本账重启就没了, 而裸仓位还在
+    * 交易所。它同时天然覆盖"人工干预过"这种情形。
+    *
+    * 容差取**要平的那条腿的最小可发量**: 比它还小的残量在交易所根本发不出去, 判成未配平只会让
+    * 平腿单被精度拒, 然后策略卡死。注意不是两腿步长的较小者 —— 那个方向是反的。
+    */
+  def netExposure(
+      rich: Instrument,
+      richPos: Coin,
+      cheap: Instrument,
+      cheapPos: Coin,
+      minOrderOf: Instrument => Coin,
+  ): Option[Naked] =
+    val net = richPos + cheapPos
+    // 平绝对仓位大的那条 —— 平小的那条是在**加**敞口
+    val leg = if richPos.abs >= cheapPos.abs then rich else cheap
+    val legPos = if richPos.abs >= cheapPos.abs then richPos else cheapPos
+    val tolerance = minOrderOf(leg)
+    require(tolerance > Coin.Zero, s"$leg 的最小可发量必须为正, 实为 $tolerance")
+    if net.abs < tolerance then None
+    else Some(Naked(net.abs, leg, if legPos > Coin.Zero then Side.Short else Side.Long))

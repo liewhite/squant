@@ -66,6 +66,8 @@ object DashboardApi:
     *
     * 缺 Host 头的请求不放行: HTTP/1.1 要求必须带, 缺了说明不是浏览器发的正常请求。 */
   def isLocalHost(host: Option[String]): Boolean =
-    host
-      .map(_.takeWhile(_ != ':').toLowerCase)
-      .exists(h => h == "127.0.0.1" || h == "localhost" || h == "[::1]" || h == "::1")
+    // 只认 IPv4 回环与 localhost。**IPv6 回环 `[::1]` 走不到这里**: `takeWhile(_ != ':')`
+    // 对 `[::1]:8123` 得到 `"["`。从前还写着 `h == "[::1]"` 两个分支, 那是死代码 ——
+    // 它们在声称一件不成立的事。方向是 fail-closed (拒掉), 而看板默认绑 127.0.0.1,
+    // 浏览器访问 localhost 也解析到它, 所以这不影响正常使用。
+    host.map(_.takeWhile(_ != ':').toLowerCase).exists(h => h == "127.0.0.1" || h == "localhost")

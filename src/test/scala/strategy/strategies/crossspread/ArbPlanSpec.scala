@@ -16,6 +16,7 @@ class ArbPlanSpec extends munit.FunSuite:
     minProfitBps = 2.0,
     qtyPerLeg = Coin(1.0),
     maxQuoteAgeMs = 2000,
+    maxPositionPerLeg = Coin(5.0),
     enableOrders = true,
   ).validated
 
@@ -30,16 +31,21 @@ class ArbPlanSpec extends munit.FunSuite:
   private def quotes(sellBid: Double, buyAsk: Double) =
     (Some(ArbPlan.LegQuote(rich, sellBid, sellBid + 0.01)), Some(ArbPlan.LegQuote(cheap, buyAsk - 0.01, buyAsk)))
 
+  private val minOrder: Instrument => Coin = _ => Coin(0.001)
+
   private def plan(
       sellBid: Double = 100.5,
       buyAsk: Double = 100.0,
       sig: SpreadDislocation = signal(),
-      unbalanced: Option[(Coin, Instrument)] = None,
+      richPos: Coin = Coin.Zero,
+      cheapPos: Coin = Coin.Zero,
       inFlight: Boolean = false,
       c: ArbPlan.Config = cfg,
+      declared: Set[Instrument] = Set(rich, cheap),
   ) =
     val (rq, cq) = quotes(sellBid, buyAsk)
-    ArbPlan.plan(c, sig, rq, cq, unbalanced, inFlight, _ => "cid")
+    val pos: Instrument => Coin = i => if i == rich then richPos else cheapPos
+    ArbPlan.plan(c, sig, declared, rq, cq, pos, inFlight, minOrder)
 
   test("边用 bid/ask 算, 不是中价 —— 中价系统性高估两边价差的均值"):
     // 中价差在决策边界上恰好是最要紧的地方: 高估的那一截可能正好就是利润门槛。
@@ -67,9 +73,23 @@ class ArbPlanSpec extends munit.FunSuite:
     val Left(skip) = plan(sig = signal(quoteAgeMs = 30_000)): @unchecked
     assertEquals(skip, ArbPlan.Skip.QuotesTooOld(30_000, 2000))
 
-  test("上一轮还没配平 -> 不在裸敞口上再叠一层"):
-    val Left(skip) = plan(unbalanced = Some((Coin(0.5), rich))): @unchecked
-    assertEquals(skip, ArbPlan.Skip.Unbalanced(Coin(0.5), rich))
+  test("上一轮还没配平 -> 不在裸敞口上再叠一层 (配平由**仓位**派生, 不是内存里另记一本)"):
+    // 内存那本账重启就没了, 而裸仓位还在交易所 —— 于是重启后会在裸敞口上继续开新仓。
+    val Left(skip) = plan(richPos = Coin(-1.0), cheapPos = Coin(0.4)): @unchecked
+    assert(skip.isInstanceOf[ArbPlan.Skip.Unbalanced], skip.toString)
+
+  test("信号里的腿不属于本实例 -> 拒绝, 不在未声明的标的上下单"):
+    // 检测器按 ticker 的全部两两组合出信号, 三家所就有三对。在没声明的标的上下单会拿不到回报
+    // (own 的路由键只含已声明标的), 也没做过启动对齐。
+    val Left(skip) = plan(declared = Set(cheap)): @unchecked
+    assertEquals(skip, ArbPlan.Skip.ForeignLeg(rich))
+
+  test("到单腿仓位上限 -> 不再加仓"):
+    // 本策略只开仓不平仓, 而检测器冷却默认 60s —— 没有上限的话一次持续偏离能开出几十份。
+    val Left(skip) = plan(richPos = Coin(-4.5), cheapPos = Coin(4.5), c = cfg.copy(maxPositionPerLeg = Coin(5.0))): @unchecked
+    assert(skip.isInstanceOf[ArbPlan.Skip.AtPositionLimit], skip.toString)
+    // 装得下就放行
+    assert(plan(richPos = Coin(-1.0), cheapPos = Coin(1.0)).isRight)
 
   test("上一轮的 IOC 还在途 -> 等它"):
     assertEquals(plan(inFlight = true), Left(ArbPlan.Skip.InFlight))
@@ -88,6 +108,9 @@ class ArbPlanSpec extends munit.FunSuite:
     assertEquals(legs.buy.side, Side.Long)
     assertEquals(legs.buy.orderType, OrderType.Limit(Price(100.0), TimeInForce.IOC))
     assert(legs.orders.forall(!_.reduceOnly), "开仓不是 reduceOnly")
+    // clientOrderId 必须留空: StrategyRunner 会统一覆写。自己生成并拿它关联回报的后果是
+    // 一条回报都匹配不上, 策略永久卡在"上一轮还在途"。
+    assert(legs.orders.forall(_.clientOrderId.isEmpty), "clientOrderId 由框架分配, 策略留空")
 
   test("IOC 而不是市价 —— 限价把最差成交价钉死"):
     // 这笔交易全部利润只有几个 bp, 市价在薄盘上一次穿档就连本带利吃掉。
@@ -102,33 +125,39 @@ class ArbPlanSpec extends munit.FunSuite:
     intercept[IllegalArgumentException](cfg.copy(minProfitBps = 0.0).validated)
     intercept[IllegalArgumentException](cfg.copy(minDeviationBps = 0.0).validated)
     intercept[IllegalArgumentException](cfg.copy(qtyPerLeg = Coin.Zero).validated)
+    intercept[IllegalArgumentException](cfg.copy(maxPositionPerLeg = Coin(0.5)).validated) // 装不下一份
     assertEquals(cfg.requiredEdgeBps, 12.0, "门槛 = 来回成本 + 利润下限")
 
-  // ==================== 对账: 腿不平是常态, 不是异常 ====================
+  // ==================== 裸敞口: 由仓位派生 ====================
 
-  private def reconcile(sellFilled: Double, buyFilled: Double) =
-    ArbPlan.reconcile(rich, Coin(sellFilled), cheap, Coin(buyFilled), tolerance = Coin(0.001))
+  private def naked(richPos: Double, cheapPos: Double, minOrderSize: Double = 0.001) =
+    ArbPlan.netExposure(rich, Coin(richPos), cheap, Coin(cheapPos), _ => Coin(minOrderSize))
 
-  test("两腿都成 -> 配平"):
-    assertEquals(reconcile(1.0, 1.0), ArbPlan.Outcome.Balanced(Coin(1.0)))
+  test("短 rich 与长 cheap 相互抵消 -> 配平"):
+    assertEquals(naked(-1.0, 1.0), None)
 
-  test("两腿都没成 -> 没有敞口, 什么都不用做"):
-    assertEquals(reconcile(0.0, 0.0), ArbPlan.Outcome.Missed)
+  test("两腿都空 -> 配平 (没有仓位就没有敞口)"):
+    assertEquals(naked(0.0, 0.0), None)
 
-  test("卖腿成得多 -> 净空, 买回多出的部分"):
+  test("卖腿成得多 -> 净空, 在 rich 上买回多出的部分"):
     // 两条腿是两次独立的 REST 往返, 中间对手盘会动 —— IOC 一条全成一条部分成是常态。
-    assertEquals(reconcile(1.0, 0.4), ArbPlan.Outcome.Naked(Coin(0.6), rich, Side.Long))
+    assertEquals(naked(-1.0, 0.4), Some(ArbPlan.Naked(Coin(0.6), rich, Side.Long)))
 
-  test("买腿成得多 -> 净多, 卖掉多出的部分"):
-    assertEquals(reconcile(0.3, 1.0), ArbPlan.Outcome.Naked(Coin(0.7), cheap, Side.Short))
+  test("买腿成得多 -> 净多, 在 cheap 上卖掉多出的部分"):
+    assertEquals(naked(-0.3, 1.0), Some(ArbPlan.Naked(Coin(0.7), cheap, Side.Short)))
 
   test("只成一条腿 -> 整条都是裸的"):
-    assertEquals(reconcile(1.0, 0.0), ArbPlan.Outcome.Naked(Coin(1.0), rich, Side.Long))
+    assertEquals(naked(-1.0, 0.0), Some(ArbPlan.Naked(Coin(1.0), rich, Side.Long)))
 
-  test("残量在容差内视为配平 —— 比最小步长还小的量在交易所也发不出去"):
-    // 追着平会陷入"发不出去 -> 还是不平 -> 再发"的循环。
-    assertEquals(reconcile(1.0, 0.9995), ArbPlan.Outcome.Balanced(Coin(0.9995)))
+  test("平的是**绝对仓位大的**那条 —— 平小的那条是在加敞口"):
+    assertEquals(naked(-2.0, 0.5).map(_.leg), Some(rich))
+    assertEquals(naked(-0.5, 2.0).map(_.leg), Some(cheap))
 
-  test("成交量为负 / 容差非正即抛 —— 那不是一次可用的对账输入"):
-    intercept[IllegalArgumentException](ArbPlan.reconcile(rich, Coin(-1.0), cheap, Coin(1.0), Coin(0.001)))
-    intercept[IllegalArgumentException](ArbPlan.reconcile(rich, Coin(1.0), cheap, Coin(1.0), Coin.Zero))
+  test("残量小于**要平那条腿的最小可发量**时视为配平"):
+    // 判据不是两腿步长的较小者 —— 那个方向是反的: 残量落在两者之间时会判成未配平,
+    // 而平腿单随即被交易所按精度拒, 策略就卡死在那里。
+    assertEquals(naked(-1.0, 0.9995, minOrderSize = 0.001), None)
+    assert(naked(-1.0, 0.9985, minOrderSize = 0.001).isDefined, "超过最小可发量就该平")
+
+  test("最小可发量非正即抛 —— 那不是一次可用的判据"):
+    intercept[IllegalArgumentException](ArbPlan.netExposure(rich, Coin(1.0), cheap, Coin.Zero, _ => Coin.Zero))

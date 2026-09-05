@@ -46,7 +46,8 @@ object DashboardActor:
   * 而不是让引擎带着一个打不开的看板跑起来)。**这确实意味着看板起不来就不能交易**: 这是有意的,
   * 因为端口冲突通常说明上一个进程还活着, 而两个进程同时管同一批仓位比没有看板危险得多。
   *
-  * 运行期 HTTP 请求里的异常由 Nima 处理, 不会回到 actor 线程 —— actor 线程上只跑
+  * 运行期 HTTP 请求 (含 SSE 推送) 里的异常由 Helidon 处理, **不会回到 actor 线程** ——
+  * handler 跑在 Helidon 自己的线程上, 不在 ox 作用域里。actor 线程上只跑
   * [[BoardSnapshot.apply]] 那个纯折叠。
   *
   * @param port  监听端口
@@ -150,8 +151,15 @@ final class DashboardActor(
             seen = current
             Thread.sleep(DashboardActor.MinPushIntervalMs) // 合并: 推完静默一小段
         catch
-          // 浏览器关页面 = 写失败, 这是**正常结束**不是故障。让它穿出去会级联停掉整个引擎。
-          case _: Exception => logger.debug("SSE 连接结束")
+          // 浏览器关页面 = 写失败, 这是**正常结束**不是故障, 所以只捕获写失败与中断。
+          //
+          // 从前这里是 `case _: Exception`, 顺手吞掉了 view()/序列化本身的异常 (某个 require
+          // 失败、codec bug)。那时的表现是: 每条连接立刻断、EventSource 自动重连、再断,
+          // 页面顶上反复闪红, 而真正的原因只在 DEBUG 里。别的异常交给 Helidon ——
+          // 它会记 error 并关掉这条响应, **不会碰到引擎** (handler 跑在 Helidon 线程上,
+          // 不在 ox 作用域内)。
+          case _: java.io.IOException | _: java.io.UncheckedIOException | _: InterruptedException =>
+            logger.debug("SSE 连接结束")
         finally sink.close()
 
   /** 纯折叠, 不产出任何事件 —— 看板是观察者, 总线上不该因为它多一条消息。 */

@@ -40,8 +40,9 @@ final class CrossArbStrategy(
     /** 这个 ticker 在各家所的腿。至少两条，否则无所谓跨所。 */
     legs: Set[Instrument],
     cfg: ArbPlan.Config,
-    /** 各腿的最小下单步长 —— 对账容差取它，见 [[ArbPlan.reconcile]]。 */
-    stepOf: Instrument => Coin,
+    /** 各腿的**最小可发量** (币本位) —— 配平容差取它。比它还小的残量在交易所根本发不出去,
+      * 判成"未配平"只会让平腿单被精度拒, 然后策略卡死。见 [[ArbPlan.netExposure]]。 */
+    minOrderOf: Instrument => Coin,
     override val orderTimeoutMs: Long,
 ) extends Strategy:
   require(legs.sizeIs >= 2, s"$ticker 至少要两条腿才谈得上跨所, 实为 ${legs.size}")
@@ -50,17 +51,20 @@ final class CrossArbStrategy(
   private val logger = LoggerFactory.getLogger(classOf[CrossArbStrategy])
   private val checked = cfg.validated
 
-  /** 本轮的两条腿及其 clientOrderId。 */
-  private final case class Round(sell: Instrument, sellCid: String, buy: Instrument, buyCid: String)
+  /** 策略此刻在做什么。
+    *
+    * **不记"成交了多少"** —— 那本账在框架的柜台里 (经启动对齐、经账本对账)，策略再记一份
+    * 只会在重启后丢失，而裸仓位还在交易所。配平与否一律由 [[ArbPlan.netExposure]] 从
+    * `positionSize` 派生。这里只记"我发出去的单回来了没有"。
+    */
+  private enum Phase:
+    case Idle
+    /** 两条 IOC 已发，`pending` 是还没到终态的腿。 */
+    case Opening(rich: Instrument, cheap: Instrument, pending: Set[Instrument])
+    /** 正在平掉裸敞口。 */
+    case Unwinding(leg: Instrument, rich: Instrument, cheap: Instrument)
 
-  /** 本轮 —— 空 = 不在途。 */
-  private var round: Option[Round] = None
-  /** 还没到终态的 clientOrderId。空且 round 非空 = 可以结算了。 */
-  private var pending: Set[String] = Set.empty
-  /** 各腿的已成交量: 终态回报的 `filledQuantity` 是权威值 (不自己累加 Fill —— 那是第二本账)。 */
-  private var filled: Map[String, Coin] = Map.empty
-  /** 尚未配平的裸量 —— **非空就不再开新仓**。 */
-  private var unbalanced: Option[(Coin, Instrument)] = None
+  private var phase: Phase = Phase.Idle
 
   override def handlers: StrategyHandlers =
     StrategyHandlers.empty
@@ -77,73 +81,97 @@ final class CrossArbStrategy(
       if bbo.bidPrice.value > 0 && bbo.askPrice.value > 0
     yield ArbPlan.LegQuote(instrument, bbo.bidPrice, bbo.askPrice)
 
+  /** 某条腿的当前仓位 —— **框架的账本**, 不是策略自己记的。 */
+  private def positionOf(instrument: Instrument, ctx: StrategyContext): Coin =
+    ctx.state.symbolState(instrument.symbol).map(_.positionSize(instrument.exchange)).getOrElse(Coin.Zero)
+
   private def onSignal(signal: SpreadDislocation, ctx: StrategyContext) =
     ArbPlan.plan(
       checked,
       signal,
+      declaredLegs = legs,
       richQuote = quoteOf(signal.rich, ctx),
       cheapQuote = quoteOf(signal.cheap, ctx),
-      unbalanced = unbalanced,
-      inFlight = round.nonEmpty,
-      newClientOrderId = _.newClientOrderId,
+      positionOf = positionOf(_, ctx),
+      inFlight = phase != Phase.Idle,
+      minOrderOf = minOrderOf,
     ) match
-      case Left(skip) =>
-        // 每一个不开仓的理由都说出口 —— 否则一个"从来不开仓"的策略你查不出它卡在哪一步
-        logger.info(s"[对敲 $ticker] 不动手: ${skip.describe}")
+      case Left(reason) =>
+        // 每一个不开仓的理由都说出口 —— 否则一个"从来不开仓"的策略你查不出它卡在哪一步。
+        // 未配平与在途要用 warn: 它们持续出现意味着**策略已经停摆**, 那不是 INFO 级的事。
+        reason match
+          case _: ArbPlan.Skip.Unbalanced | ArbPlan.Skip.InFlight | _: ArbPlan.Skip.AtPositionLimit =>
+            logger.warn(s"[对敲 $ticker] 停摆中: ${reason.describe}")
+          case _ => logger.info(s"[对敲 $ticker] 不动手: ${reason.describe}")
         Vector.empty
       case Right(legsToPlace) =>
-        round = Some(Round(
-          signal.rich, legsToPlace.sell.clientOrderId,
-          signal.cheap, legsToPlace.buy.clientOrderId,
-        ))
-        pending = Set(legsToPlace.sell.clientOrderId, legsToPlace.buy.clientOrderId)
-        filled = Map.empty
+        phase = Phase.Opening(signal.rich, signal.cheap, Set(signal.rich, signal.cheap))
         logger.warn(
-          f"[对敲 $ticker] 卖 ${signal.rich} @${legsToPlace.sellPrice.value}%.6f / " +
-            f"买 ${signal.cheap} @${legsToPlace.buyPrice.value}%.6f " +
+          f"[对敲 $ticker] 卖 ${signal.rich} @${legsToPlace.priceOf(legsToPlace.sell).value}%.6f / " +
+            f"买 ${signal.cheap} @${legsToPlace.priceOf(legsToPlace.buy).value}%.6f " +
             f"量=${legsToPlace.qty.value}%.6f 边=${legsToPlace.edgeBps}%.1fbp 偏离=${signal.deviationBps}%.1fbp"
         )
         // 一次 place 传两条: 框架按交易所拆成两条下单意图 (跨所决策不能挤在一条里)
         ctx.place(legsToPlace.orders, f"cross_arb_open | edge=${legsToPlace.edgeBps}%.1fbp")
 
+  /** 回报按 **(交易所, 标的)** 认领, 不按 clientOrderId。
+    *
+    * clientOrderId 由 `StrategyRunner.prepareIntent` 在处理器返回之后统一分配, 策略这边看到的
+    * 是覆写前的值 —— 拿它去匹配回报, 一条都匹配不上。按腿认领成立的前提是**同一条腿上同一时刻
+    * 只有一张在途单**, 而这由 [[Phase]] 保证 (非 Idle 不开新仓)。
+    */
   private def onOrderUpdate(update: OrderUpdate, ctx: StrategyContext) =
-    update.clientOrderId.filter(pending.contains) match
-      case None => Vector.empty // 不是本轮在途的腿 (人工单、上一轮的残留回报、平仓单的回报)
-      case Some(cid) if !update.status.isTerminal => Vector.empty
-      case Some(cid) =>
-        filled += cid -> update.filledQuantity
-        pending -= cid
-        if pending.nonEmpty then Vector.empty // 还有一条没回来, 等它
-        else settle(ctx)
+    val leg = Instrument(update.exchange, update.symbol)
+    if !update.status.isTerminal then Vector.empty
+    else
+      phase match
+        case Phase.Opening(rich, cheap, pending) if pending.contains(leg) =>
+          val rest = pending - leg
+          if rest.nonEmpty then
+            phase = Phase.Opening(rich, cheap, rest)
+            Vector.empty
+          else settle(rich, cheap, ctx)
+        case Phase.Unwinding(unwound, rich, cheap) if unwound == leg =>
+          // 平腿单回来了 —— **必须复查**。平成功了才回 Idle; 没平掉就不能装作没事。
+          settleUnwind(rich, cheap, ctx)
+        case _ => Vector.empty // 不是本策略此刻在等的回报
 
-  /** 两条 IOC 都到终态 —— 结算这一轮。 */
-  private def settle(ctx: StrategyContext) =
-    val r = round.getOrElse(
-      // round 与 pending 的生命周期错开了, 那是本类自己的 bug。不静默返回:
-      // 那会让一个真实的裸敞口无人处理。
-      throw IllegalStateException(s"[对敲 $ticker] 两腿都终态了却没有本轮记录 —— 状态机 bug")
-    )
-    val sellFilled = filled.getOrElse(r.sellCid, Coin.Zero)
-    val buyFilled = filled.getOrElse(r.buyCid, Coin.Zero)
-    round = None
-    filled = Map.empty
-    val tolerance = Coin(math.min(stepOf(r.sell).value, stepOf(r.buy).value))
-    ArbPlan.reconcile(r.sell, sellFilled, r.buy, buyFilled, tolerance) match
-      case ArbPlan.Outcome.Missed =>
-        logger.info(s"[对敲 $ticker] 两腿都没成交 (IOC 没吃到), 无敞口")
-        Vector.empty
-      case ArbPlan.Outcome.Balanced(qty) =>
-        logger.warn(f"[对敲 $ticker] 两腿配平, 各 ${qty.value}%.6f —— 已持有价差仓位, **平仓需人工**")
-        Vector.empty
-      case ArbPlan.Outcome.Naked(excess, on, closeSide) =>
-        // 立刻市价平掉多出来的那部分: 此刻是裸方向敞口, "少赚"远好过"敞着"。
-        unbalanced = Some((excess, on))
-        logger.error(
-          f"!!! [对敲 $ticker] 腿不平: $on 多出 ${excess.value}%.6f " +
-            f"(卖腿成 ${sellFilled.value}%.6f / 买腿成 ${buyFilled.value}%.6f) -> 市价平掉"
+  /** 两条 IOC 都到终态 —— 按**框架的仓位**看有没有配平。 */
+  private def settle(rich: Instrument, cheap: Instrument, ctx: StrategyContext) =
+    ArbPlan.netExposure(rich, positionOf(rich, ctx), cheap, positionOf(cheap, ctx), minOrderOf) match
+      case None =>
+        phase = Phase.Idle
+        logger.warn(
+          f"[对敲 $ticker] 两腿配平 (${positionOf(rich, ctx).value}%.6f / ${positionOf(cheap, ctx).value}%.6f) " +
+            "—— 已持有价差仓位, **平仓需人工**"
         )
-        ctx.place(
-          Order("", on.exchange, on.symbol, closeSide, OrderType.Market, excess,
-            reduceOnly = true, on.exchange.newClientOrderId),
-          f"cross_arb_unwind | excess=${excess.value}%.6f",
+        Vector.empty
+      case Some(naked) => unwind(naked, rich, cheap, ctx)
+
+  /** 平掉裸敞口: **市价**。此刻手里是裸方向敞口, "少赚"远好过"敞着" —— 与开仓用 IOC 限价
+    * 钉死最差成交价的取向相反, 因为要害不同。 */
+  private def unwind(naked: ArbPlan.Naked, rich: Instrument, cheap: Instrument, ctx: StrategyContext) =
+    phase = Phase.Unwinding(naked.leg, rich, cheap)
+    logger.error(
+      f"!!! [对敲 $ticker] 腿不平: ${naked.leg} 上净敞口 ${naked.excess.value}%.6f -> 市价平掉 (${naked.closeSide})"
+    )
+    ctx.place(
+      Order("", naked.leg.exchange, naked.leg.symbol, naked.closeSide, OrderType.Market, naked.excess,
+        reduceOnly = true, clientOrderId = ""),
+      f"cross_arb_unwind | excess=${naked.excess.value}%.6f",
+    )
+
+  /** 平腿单终态之后复查。**平不掉就终止进程** —— 与本仓库的失败模型一致:
+    * 结果不确定/收拾不了就停下来, 由人处理, 而不是留一个软状态让策略在裸敞口上继续跑。
+    * 从前这里没有任何代码, 于是"平不掉就停住"只存在于类文档里。 */
+  private def settleUnwind(rich: Instrument, cheap: Instrument, ctx: StrategyContext) =
+    ArbPlan.netExposure(rich, positionOf(rich, ctx), cheap, positionOf(cheap, ctx), minOrderOf) match
+      case None =>
+        phase = Phase.Idle
+        logger.warn(s"[对敲 $ticker] 裸敞口已平掉, 恢复")
+        Vector.empty
+      case Some(still) =>
+        throw IllegalStateException(
+          f"[对敲 $ticker] 平腿之后仍有裸敞口 ${still.excess.value}%.6f 在 ${still.leg} —— " +
+            "平不掉的敞口不能靠策略自己扛着继续跑, 停机由人处理 (重启后启动对齐会看到真实仓位)"
         )
