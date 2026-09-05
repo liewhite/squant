@@ -7,7 +7,19 @@ import io.helidon.webserver.WebServer
 import org.slf4j.LoggerFactory
 import sttp.tapir.server.nima.NimaServerInterpreter
 
+import com.github.plokhotnyuk.jsoniter_scala.core.writeToString
 import java.util.concurrent.atomic.AtomicReference
+import BoardView.given
+
+object DashboardActor:
+  /** SSE 端点。 */
+  val StreamPath: String = "/api/stream"
+
+  /** 两次推送之间的最小间隔 —— 见 `streamHandler` 的"为什么要合并"。 */
+  val MinPushIntervalMs: Long = 150
+
+  /** 没有任何变化时也要发一下的间隔 (心跳)。 */
+  val HeartbeatMs: Long = 15_000
 
 /** 实时看板 —— 总线上的一个**只读观察者**, 外加一个 HTTP 面。
   *
@@ -56,6 +68,15 @@ final class DashboardActor(
   /** actor 线程是唯一写者; HTTP 线程只读。 */
   private val snapshot = AtomicReference(BoardSnapshot.empty)
 
+  /** 快照版本号 —— SSE 推送靠它判断"有没有变过", 而不是比对整份快照。
+    *
+    * 与 `snapshot` 分开一个变量是有意的: 两者不需要原子地一起读。SSE 线程先读版本、再读快照,
+    * 中间若又变了, 下一轮立刻会再推一次 —— 多推一次没有代价, 漏推才有。 */
+  private val version = java.util.concurrent.atomic.AtomicLong(0L)
+
+  /** 有新快照时叫醒等着的 SSE 线程。 */
+  private val changed = Object()
+
   override def name: String = s"dashboard@$port"
 
   /** 订阅由 [[BoardSnapshot.topics]] 派生 —— 订阅什么与怎么折叠是同一张表, 加一个 topic
@@ -70,6 +91,10 @@ final class DashboardActor(
     val server = WebServer
       .builder()
       .routing { builder =>
+        // SSE 在 tapir 的 catch-all 之前注册 —— 路由按注册顺序匹配。
+        // 走原生 Helidon 而不是 tapir: tapir 的 Nima 后端没有流式响应, 而 SSE 的全部意义
+        // 就是那条不关闭的流。
+        builder.get(DashboardActor.StreamPath, streamHandler)
         builder.any(handler)
         ()
       }
@@ -95,7 +120,57 @@ final class DashboardActor(
       )
     logger.info(s"看板已启动: http://$host:${server.port}  (API: /api/board, 文档: /docs)")
 
+  /** SSE: 有新快照就推一份, 没有就睡着等。
+    *
+    * ## 为什么要合并
+    *
+    * 实测三家所全量宇宙下总线上有 ~1000 事件/秒。**一条事件推一次是荒谬的** —— 浏览器渲染不过来,
+    * 网络也白烧。所以推完一份之后强制静默 [[DashboardActor.MinPushIntervalMs]], 期间攒下的
+    * 变化在下一次推送里一次性带走。看板要的是"看起来是活的", 不是每一条都不漏。
+    *
+    * ## 为什么不是把轮询调快
+    *
+    * 轮询在没有变化的时候也照发, 而行情安静的时段 (美股闭市) 恰恰是大多数时候。
+    * 事件驱动在那段时间里一个字节都不发, 只留心跳。
+    */
+  private def streamHandler: io.helidon.webserver.http.Handler =
+    (req: io.helidon.webserver.http.ServerRequest, res: io.helidon.webserver.http.ServerResponse) =>
+      // Host 白名单同样适用 —— SSE 走的是原生路由, 不经过 tapir 那层校验。
+      val hostOk = Option(req.headers().value(io.helidon.http.HeaderNames.HOST).orElse(null))
+      if !DashboardApi.isLocalHost(hostOk) then
+        res.status(io.helidon.http.Status.FORBIDDEN_403).send("看板只接受来自本机的请求")
+      else
+        val sink = res.sink(io.helidon.webserver.sse.SseSink.TYPE)
+        try
+          var seen = -1L
+          while true do
+            val current = awaitChange(seen, DashboardActor.HeartbeatMs)
+            // 版本没变也发 —— 那是心跳: 一条长时间静默的连接会被中间的代理掐掉。
+            sink.emit(io.helidon.http.sse.SseEvent.create(writeToString(view())))
+            seen = current
+            Thread.sleep(DashboardActor.MinPushIntervalMs) // 合并: 推完静默一小段
+        catch
+          // 浏览器关页面 = 写失败, 这是**正常结束**不是故障。让它穿出去会级联停掉整个引擎。
+          case _: Exception => logger.debug("SSE 连接结束")
+        finally sink.close()
+
   /** 纯折叠, 不产出任何事件 —— 看板是观察者, 总线上不该因为它多一条消息。 */
   override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
     snapshot.updateAndGet(_.apply(event)): Unit
+    version.incrementAndGet(): Unit
+    // 叫醒 SSE 线程。actor 线程在这里**不会阻塞**: notifyAll 只是把等待者移到就绪队列,
+    // 而等待者拿到锁之后要做的第一件事就是把锁放掉。
+    changed.synchronized(changed.notifyAll())
     Vector.empty
+
+  /** 阻塞到快照版本超过 `seen`，或超时。返回当前版本。
+    *
+    * **事件驱动而不是轮询**: 有变化就立刻返回, 没变化就一直睡着 (不烧 CPU)。
+    * 超时存在的意义是心跳 —— 一条长时间没有任何事件的连接也要定期发一个字节, 否则中间的
+    * 代理会把它当死连接掐掉, 而浏览器那边看起来就是"页面不动了"。
+    */
+  private[dashboard] def awaitChange(seen: Long, timeoutMs: Long): Long =
+    changed.synchronized {
+      if version.get <= seen then changed.wait(timeoutMs)
+      version.get
+    }

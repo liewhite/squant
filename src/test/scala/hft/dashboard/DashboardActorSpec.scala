@@ -86,6 +86,7 @@ class DashboardActorSpec extends munit.FunSuite:
         assertEquals(code, 200)
         assert(html.contains("squant 看板"), html.take(200))
         assert(!html.contains("http://") && !html.contains("https://"), "页面不该引用任何外部地址")
+        assert(html.contains("EventSource('/api/stream')"), "页面应走 SSE 推送而不是轮询")
         engine.requestShutdown("测试结束")
       }
 
@@ -161,5 +162,56 @@ class DashboardActorSpec extends munit.FunSuite:
         for i <- 0 until n do
           injector.publish(Event.stamped(Topics.Bbo, BBO(ex, sym, 100.0 + i % 10, Coin(1.0), 101.0 + i % 10, Coin(1.0), t0 + i), t0 + i, t0 + i))
         eventually(s"折叠完 $n 条")(board.view().eventsApplied >= n)
+        engine.requestShutdown("测试结束")
+      }
+
+  test("SSE: 有新事件就推, 没有就不推 —— 事件驱动而不是把轮询调快"):
+    val port = freePort()
+    supervised:
+      Engine.run(plugins = Vector.empty) { engine =>
+        val board = DashboardActor(port)
+        engine.install(board)
+        val injector = Injector()
+        engine.install(injector)
+
+        val sock = java.net.Socket("127.0.0.1", port)
+        try
+          sock.getOutputStream.write(
+            s"GET /api/stream HTTP/1.1\r\nHost: localhost:$port\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n".getBytes("UTF-8"))
+          sock.getOutputStream.flush()
+          sock.setSoTimeout(5000)
+          val in = java.io.BufferedReader(java.io.InputStreamReader(sock.getInputStream, "UTF-8"))
+          assert(in.readLine().contains("200"), "SSE 应返回 200")
+
+          injector.publish(Event.stamped(Topics.Bbo, BBO(ex, sym, 49999.0, Coin(1.0), 50001.0, Coin(2.0), t0), t0, t0))
+
+          // 连上就先推一份当前状态 (否则页面在第一条事件到来前是空白), 所以这里要一直读到
+          // 带上那条 BBO 的那一帧。
+          var payload = ""
+          val deadline = System.currentTimeMillis() + 5000
+          while !payload.contains("BTCUSDT") && System.currentTimeMillis() < deadline do
+            val line = in.readLine()
+            if line != null && line.startsWith("data:") then payload = line.drop(5).trim
+          assert(payload.contains("\"symbol\":\"BTCUSDT\""), s"推送的应是完整视图: ${payload.take(200)}")
+          assert(payload.contains("\"mid\":50000.0"), payload.take(300))
+        finally sock.close()
+        engine.requestShutdown("测试结束")
+      }
+
+  test("SSE 也受 Host 白名单管 —— 它走原生路由, 不经过 tapir 那层"):
+    // 两处各写一遍判据的结果是其中一条路被忘掉, 而那条路照样能读走全部仓位与净值。
+    val port = freePort()
+    supervised:
+      Engine.run(plugins = Vector.empty) { engine =>
+        engine.install(DashboardActor(port))
+        val sock = java.net.Socket("127.0.0.1", port)
+        try
+          sock.getOutputStream.write(
+            s"GET /api/stream HTTP/1.1\r\nHost: evil.example.com\r\nConnection: close\r\n\r\n".getBytes("UTF-8"))
+          sock.getOutputStream.flush()
+          sock.setSoTimeout(5000)
+          val status = java.io.BufferedReader(java.io.InputStreamReader(sock.getInputStream)).readLine()
+          assert(status.contains("403"), s"非本机 Host 应被拒: $status")
+        finally sock.close()
         engine.requestShutdown("测试结束")
       }

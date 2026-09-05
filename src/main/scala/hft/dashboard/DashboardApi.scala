@@ -28,9 +28,7 @@ final class DashboardApi(view: () => BoardView):
     * `/api/board`, 把仓位、挂单、净值整份拿走 —— 无鉴权本机服务的经典泄露路径。
     * 一个 Host 白名单就挡住, 且不影响 SSH 端口转发 (转发之后 Host 仍是 localhost)。
     */
-  private def localHost(host: Option[String]): Boolean =
-    // 缺 Host 头的请求不放行: HTTP/1.1 要求必须带, 缺了说明不是浏览器发的正常请求。
-    host.map(_.takeWhile(_ != ':').toLowerCase).exists(h => h == "127.0.0.1" || h == "localhost" || h == "[::1]" || h == "::1")
+  private def localHost(host: Option[String]): Boolean = DashboardApi.isLocalHost(host)
 
   private val guarded = endpoint
     .securityIn(header[Option[String]]("Host"))
@@ -61,3 +59,13 @@ final class DashboardApi(view: () => BoardView):
   val all: List[ServerEndpoint[Any, Identity]] =
     apiEndpoints ++ List(pageEndpoint, faviconEndpoint) ++
       SwaggerInterpreter().fromServerEndpoints[Identity](apiEndpoints, "squant-dashboard", "1.0.0")
+
+object DashboardApi:
+  /** Host 是否指向本机。**判据只有这一份** —— SSE 端点走原生 Helidon 路由、不经过 tapir 那层,
+    * 两处各写一遍的结果是其中一条路被忘掉, 而那条路照样能读走全部仓位与净值。
+    *
+    * 缺 Host 头的请求不放行: HTTP/1.1 要求必须带, 缺了说明不是浏览器发的正常请求。 */
+  def isLocalHost(host: Option[String]): Boolean =
+    host
+      .map(_.takeWhile(_ != ':').toLowerCase)
+      .exists(h => h == "127.0.0.1" || h == "localhost" || h == "[::1]" || h == "::1")

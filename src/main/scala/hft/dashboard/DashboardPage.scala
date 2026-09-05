@@ -47,8 +47,13 @@ object DashboardPage:
   .age.dead { color:var(--short); font-weight:600; }
   .sub { color:var(--dim); font-size:11px; }
   .empty { color:var(--dim); padding:20px 0; }
-  td.asset { font-weight:600; border-bottom:1px solid var(--line); }
-  tr.grp td { border-top:1px solid var(--line); }
+  td.asset { font-weight:600; }
+  .venue { display:inline-block; margin-right:18px; }
+  .venue .ex { color:var(--dim); font-size:11px; display:block; }
+  .venue .px { font-variant-numeric:tabular-nums; margin-right:5px; }
+  .venue .bidask { color:var(--dim); font-size:11px; display:block; font-variant-numeric:tabular-nums; }
+  .edge { font-size:15px; font-variant-numeric:tabular-nums; }
+  .accts { margin-top:4px; font-weight:400; }
   .pill { display:inline-block; padding:0 6px; border-radius:3px; background:var(--panel);
           border:1px solid var(--line); font-size:11px; margin-right:4px; }
 </style>
@@ -141,72 +146,68 @@ function sideCls(v) { return v > 0 ? 'long' : v < 0 ? 'short' : 'none'; }
  * 照着它开仓等来的不是回归。别把这一列当信号。
  */
 function crossVenueBps(venues) {
-  const mids = venues.filter(v => v.bbo).map(v => v.bbo.value.mid);
-  if (mids.length < 2) return null;
-  const lo = Math.min(...mids), hi = Math.max(...mids);
-  return lo > 0 ? (hi - lo) / lo * 10000 : null;
+  const bids = venues.filter(v => v.bbo).map(v => v.bbo.value.bid);
+  const asks = venues.filter(v => v.bbo).map(v => v.bbo.value.ask);
+  if (bids.length < 2) return null;
+  // **可执行**的边: 卖在最高的买一、买在最低的卖一。用中价算会系统性高估两边价差的均值 ——
+  // 而那一截恰好落在决策边界上 (见 ArbPlan)。可能是负数, 那说明此刻吃不动, 如实显示。
+  const lo = Math.min(...asks);
+  return lo > 0 ? (Math.max(...bids) - lo) / lo * 10000 : null;
 }
 
 function assetsTable(rows) {
   if (!rows.length) return '<div class="empty">还没有任何标的的数据。行情源连上了吗？</div>';
-  let h = '<table><tr><th>资产</th><th>交易所</th><th>标的</th><th class="num">买一</th>'
-        + '<th class="num">卖一</th><th class="num">中价</th><th class="num">价差</th>'
-        + '<th class="num">标记价</th><th class="num">资金费</th><th>账户</th></tr>';
+  let h = '<table><tr><th>标的</th><th>各交易所价格</th><th class="num">最大价差</th></tr>';
   for (const r of rows) {
-    const bps = crossVenueBps(r.venues);
-    const skew = r.quoteSkewMs;
     const ages = r.venues.filter(v => v.bbo).map(v => v.bbo.ageMs);
     const freshest = ages.length ? Math.min(...ages) : 0;
-    r.venues.forEach((v, i) => {
+
+    // 第二列: 各家并排。每家一小块 —— 交易所 / 中价 / 年龄, 以及它自己的买卖一。
+    const prices = r.venues.map(v => {
       const b = v.bbo;
-      // 资产名只在该资产的第一行出现，跨所极差同理 —— 它是整组的属性，不是某一家的。
-      // skew 大 = 各家报价不同时刻，这时的极差里掺着时间，标出来让人自己判断。
-      const skewNote = skew === null || skew === undefined
-        ? ''
-        : ' <span class="' + (skew > SKEW_WARN_MS ? 'warn' : 'sub') + '">skew ' + fmtAge(skew) + '</span>';
-      const head = i === 0
-        ? '<td rowspan="' + r.venues.length + '" class="asset">' + esc(r.asset)
-          + (bps === null
-              ? '<div class="sub none">跨所极差 —</div>'
-              : '<div class="sub">跨所极差 ' + bps.toFixed(1) + 'bp' + skewNote + '</div>')
-          + '</td>'
-        : '';
-      h += '<tr class="' + (i === 0 ? 'grp' : '') + '">' + head
-        + '<td>' + esc(v.exchange) + '</td><td>' + esc(v.symbol) + '</td>'
-        + '<td class="num">' + (b ? num(b.value.bid) : dash) + '</td>'
-        + '<td class="num">' + (b ? num(b.value.ask) : dash) + '</td>'
-        + '<td class="num">' + (b ? num(b.value.mid) + ' ' + laggingCell(b.ageMs, freshest) : dash) + '</td>'
-        + '<td class="num">' + (b ? num(b.value.spread, 4) : dash) + '</td>'
-        + '<td class="num">' + reading(v.markPrice, x => num(x)) + '</td>'
-        + '<td class="num">' + (v.funding ? (v.funding.value.rate * 100).toFixed(4) + '%' : dash) + '</td>'
-        + '<td>' + accountsCell(v.accounts) + '</td>'
-        + '</tr>';
-    });
+      if (!b) return '<span class="venue"><span class="ex">' + esc(v.exchange) + '</span>' + dash + '</span>';
+      return '<span class="venue"><span class="ex">' + esc(v.exchange) + '</span>'
+        + '<span class="px">' + num(b.value.mid) + '</span>'
+        + laggingCell(b.ageMs, freshest)
+        + '<span class="bidask">' + num(b.value.bid) + ' / ' + num(b.value.ask) + '</span>'
+        + '</span>';
+    }).join('');
+
+    // 第三列: 最大价差。**可执行**的那个 —— 见 crossVenueBps。
+    const edge = crossVenueBps(r.venues);
+    const skew = r.quoteSkewMs;
+    const skewNote = skew === null || skew === undefined ? ''
+      : '<div class="sub' + (skew > SKEW_WARN_MS ? ' warn' : '') + '">skew ' + fmtAge(skew) + '</div>';
+    const spread = edge === null
+      ? dash
+      : '<span class="edge">' + edge.toFixed(1) + 'bp</span>' + skewNote;
+
+    // 账户信息挂在标的名下面 —— 它不是这三列的主角, 但没地方放会丢掉
+    const accounts = accountsCell(r.venues.flatMap(v => v.accounts.map(a => [v, a])));
+
+    h += '<tr>'
+      + '<td class="asset">' + esc(r.asset) + accounts + '</td>'
+      + '<td>' + prices + '</td>'
+      + '<td class="num">' + spread + '</td>'
+      + '</tr>';
   }
   return h + '</table>';
 }
 
-function accountsCell(accs) {
-  if (!accs || !accs.length) return dash;
-  return accs.map(a => {
-    // 仓位是变更驱动的: 柜台只在成交入账与启动对齐时推。一个不动的仓位年龄会一直涨,
-    // 那是正常的, 不该染成红色。
+function accountsCell(pairs) {
+  if (!pairs.length) return '';
+  return '<div class="accts">' + pairs.map(([v, a]) => {
     const pos = a.position
+      // 仓位是变更驱动的: 不动的仓位年龄会一直涨, 那是正常的, 不该染色。
       ? '<span class="' + sideCls(a.position.value) + '">' + num(a.position.value, 4) + '</span> ' + sinceCell(a.position.ageMs)
       : dash;
-    let s = '<div><span class="pill">' + esc(a.account) + '</span>仓位 ' + pos;
+    let s = '<div class="sub"><span class="pill">' + esc(a.account) + '@' + esc(v.exchange) + '</span>' + pos;
     if (a.pendingOrders.length) {
-      s += '<div class="sub">挂单 ' + a.pendingOrders.map(o =>
-        esc(o.side) + ' ' + num(o.quantity, 4) + '@' + num(o.price) +
-        (o.reduceOnly ? ' <span class="pill">RO</span>' : '') +
-        ' <span class="sub">' + esc(o.status) + '</span>').join(' · ') + '</div>';
-    }
-    if (a.lastFill) {
-      s += '<div class="sub">最近成交 ' + esc(a.lastFill.side) + ' ' + num(a.lastFill.size, 4)
-         + '@' + num(a.lastFill.price) + ' ' + sinceCell(a.lastFill.ageMs) + '</div>';
+      s += ' 挂单 ' + a.pendingOrders.map(o =>
+        esc(o.side) + ' ' + num(o.quantity, 4) + '@' + num(o.price) + (o.reduceOnly ? '(RO)' : '')).join(' · ');
     }
     return s + '</div>';
-  }).join('');
+  }).join('') + '</div>';
 }
 
 function accountsTable(rows) {
@@ -228,42 +229,91 @@ function accountsTable(rows) {
   return h + '</table>';
 }
 
-async function tick() {
-  try {
-    const res = await fetch('/api/board', { cache: 'no-store' });
-    if (!res.ok) throw new Error('HTTP ' + res.status);
-    const d = await res.json();
-    document.getElementById('status').textContent = '已连接';
-    document.getElementById('status').className = 'meta';
-    document.getElementById('events').textContent = '事件 ' + d.eventsApplied;
-    // eventsApplied === 0 不是"无事发生", 是看板压根没接上总线。两者必须分得开。
-    const hb = document.getElementById('heartbeat');
-    if (d.eventsApplied === 0) {
-      hb.textContent = '总线上一条事件都没来过';
-      hb.className = 'meta bad';
-    } else if (d.lastEventAgeMs !== null && d.lastEventAgeMs !== undefined) {
-      const s = (d.lastEventAgeMs / 1000).toFixed(1);
-      hb.textContent = '最后一条事件 ' + s + 's 前';
-      hb.className = d.lastEventAgeMs > VENUE_DEAD_MS ? 'meta bad' : 'meta';
-    }
-    // 各家交易所的心跳 —— "这一家的流还活着吗"唯一靠得住的读数。某个标的不报价可能只是
-    // 没人交易; 一整家所都没有任何事件, 才说明那家卡住了。
-    document.getElementById('venues').innerHTML = (d.venues || []).map(v =>
-      '<span class="pill' + (v.ageMs > VENUE_DEAD_MS ? ' bad' : '') + '">' + esc(v.exchange) + ' ' + fmtAge(v.ageMs) + '</span>'
-    ).join('');
-    document.getElementById('symbols').innerHTML = assetsTable(d.assets);
-    document.getElementById('accounts').innerHTML = accountsTable(d.accounts);
-  } catch (e) {
-    const st = document.getElementById('status');
-    st.textContent = '连接失败: ' + e.message;
-    st.className = 'meta bad';
-    // 页面上的数字**留在原地不清空**, 但顶上的状态是红的 —— 清空会让人以为"仓位没了",
-    // 而事实只是"看板取不到数了"。
+/** 把一份视图渲染上去。 */
+function render(d) {
+  document.getElementById('events').textContent = '事件 ' + d.eventsApplied;
+  const hb = document.getElementById('heartbeat');
+  // eventsApplied === 0 不是"无事发生", 是看板压根没接上总线。两者必须分得开。
+  if (d.eventsApplied === 0) {
+    hb.textContent = '总线上一条事件都没来过';
+    hb.className = 'meta bad';
+  } else if (d.lastEventAgeMs !== null && d.lastEventAgeMs !== undefined) {
+    hb.textContent = '最后一条事件 ' + (d.lastEventAgeMs / 1000).toFixed(1) + 's 前';
+    hb.className = d.lastEventAgeMs > VENUE_DEAD_MS ? 'meta bad' : 'meta';
   }
+  // 各家交易所的心跳 —— "这一家的流还活着吗"唯一靠得住的读数。某个标的不报价可能只是
+  // 没人交易; 一整家所都没有任何事件, 才说明那家卡住了。
+  document.getElementById('venues').innerHTML = (d.venues || []).map(v =>
+    '<span class="pill' + (v.ageMs > VENUE_DEAD_MS ? ' bad' : '') + '">' + esc(v.exchange) + ' ' + fmtAge(v.ageMs) + '</span>'
+  ).join('');
+  document.getElementById('symbols').innerHTML = assetsTable(d.assets);
+  document.getElementById('accounts').innerHTML = accountsTable(d.accounts);
 }
 
-tick();
-setInterval(tick, 1000);
+// **推送, 不是轮询。** 服务端有新快照才发 (并强制静默一小段合并) —— 行情安静的时段
+// (美股闭市) 一个字节都不发, 只留心跳。EventSource 自带断线重连。
+let last = null;
+const es = new EventSource('/api/stream');
+const status = document.getElementById('status');
+
+es.onopen = () => { status.textContent = '已连接 (实时推送)'; status.className = 'meta'; };
+
+es.onmessage = ev => {
+  try {
+    const d = JSON.parse(ev.data);
+    d.receivedAt = Date.now();
+    last = d;
+    render(d);
+  } catch (e) {
+    status.textContent = '渲染失败: ' + e.message;
+    status.className = 'meta bad';
+  }
+};
+
+es.onerror = () => {
+  // **页面上的数字留在原地不清空**, 只把顶上标红: 清空会让人以为"仓位没了",
+  // 而事实只是"看板取不到数了"。EventSource 会自己重连, 连上后 onopen 会把状态改回去。
+  status.textContent = '连接断开, 重连中…';
+  status.className = 'meta bad';
+};
+
+// 年龄要自己走 —— 两次推送之间页面上的"3s 前"不该冻住。只重画年龄那几处代价太大,
+// 所以整份重画: 数据在本地, 一秒一次的 DOM 重建对几百行是可接受的。
+setInterval(() => {
+  if (!last) return;
+  // 本地推进时钟: 服务端给的 ageMs 是生成那一刻的, 这里补上从那时到现在的差。
+  const drift = Date.now() - last.receivedAt;
+  if (drift > 900) render(agedBy(last, drift));
+}, 1000);
+
+/** 把一份视图里所有 ageMs 往前推 `ms` —— 纯函数, 不改原对象。 */
+function agedBy(d, ms) {
+  const bump = r => r ? { ...r, ageMs: r.ageMs + ms } : r;
+  return {
+    ...d,
+    lastEventAgeMs: d.lastEventAgeMs === null || d.lastEventAgeMs === undefined ? d.lastEventAgeMs : d.lastEventAgeMs + ms,
+    venues: (d.venues || []).map(v => ({ ...v, ageMs: v.ageMs + ms })),
+    assets: (d.assets || []).map(a => ({
+      ...a,
+      venues: a.venues.map(v => ({
+        ...v,
+        bbo: bump(v.bbo), markPrice: bump(v.markPrice), funding: bump(v.funding), lastTradePrice: bump(v.lastTradePrice),
+        accounts: v.accounts.map(x => ({
+          ...x,
+          position: bump(x.position),
+          pendingOrders: x.pendingOrders.map(o => ({ ...o, ageMs: o.ageMs + ms })),
+          lastFill: x.lastFill ? { ...x.lastFill, ageMs: x.lastFill.ageMs + ms } : x.lastFill,
+        })),
+      })),
+    })),
+    accounts: (d.accounts || []).map(a => ({
+      ...a,
+      equity: bump(a.equity),
+      balances: a.balances.map(b => ({ ...b, ageMs: b.ageMs + ms })),
+    })),
+  };
+}
+
 </script>
 </body>
 </html>

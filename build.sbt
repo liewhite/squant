@@ -32,6 +32,9 @@ lazy val root = (project in file("."))
       "com.softwaremill.sttp.tapir" %% "tapir-nima-server" % "1.13.20",
       "com.softwaremill.sttp.tapir" %% "tapir-jsoniter-scala" % "1.13.20",
       "com.softwaremill.sttp.tapir" %% "tapir-swagger-ui-bundle" % "1.13.20",
+      // SSE: 看板的实时推送。协议本身只有几行 (`data: ...\n\n`), 但它是标准协议,
+      // 用官方模块而不是自己拼字节 —— 分块编码、心跳、Content-Type 都在里面。
+      "io.helidon.webserver" % "helidon-webserver-sse" % "4.0.10",
     ),
   )
 
