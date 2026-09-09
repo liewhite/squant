@@ -16,14 +16,17 @@ import hft.strategy.{Strategy, StrategyContext}
   * (见 [[hft.exchange.TradingGateway]])。策略这一侧从头到尾只有币本位，
   * 收不下的单由柜台以拒单回流，与"交易所明确拒绝"走同一条清理路径。
   *
-  * @param clientOrderIdGen client_order_id 生成器 (按交易所格式)。实盘默认用 UUID 保唯一；
+  * @param orderConfirmationTimeoutMs 下单请求等待交易所确认的上限。由驱动层按运行模式决定：
+  *   实盘为严格正值；回测由确定性队列驱动，不存在网络结果不确定，因此以 0 关闭该项校验。
+  * @param clientOrderIdGen client_order_id 生成器 (按交易所格式)。实盘用 UUID 保唯一；
   *   回测注入确定性自增计数 (见 [[StrategyRunner.backtest]])，使逐笔回报/CSV 跨运行可复现。
   */
-final class StrategyRunner(
+final class StrategyRunner private (
     strategy: Strategy,
     /** 本实例绑定的账户 —— 装配期决定，策略自己不知道。无默认值，理由同 [[Executor]] */
     val account: AccountId,
-    clientOrderIdGen: Exchange => String = _.newClientOrderId,
+    orderConfirmationTimeoutMs: Long,
+    clientOrderIdGen: Exchange => String,
 ):
   /** 策略声明的处理器，账户已绑定 */
   // 只取一次：handlers 是 def，业务策略在里面捕获自身可变状态构造闭包，两次调用得到两个实例
@@ -32,7 +35,7 @@ final class StrategyRunner(
   /** 策略实际的订阅范围 = 处理器派生的声明 + 框架补齐 (见 [[StrategyRunner.subscriptionFor]]) */
   val subscription: Subscription = StrategyRunner.subscriptionFor(handlers.interests, account)
 
-  val state: StateManager = StateManager(subscription.instruments, strategy.orderTimeoutMs)
+  val state: StateManager = StateManager(subscription.instruments, orderConfirmationTimeoutMs)
 
   /** 让策略把自己准备好 —— 见 [[Strategy.prepare]]。**允许阻塞**。
     *
@@ -102,6 +105,15 @@ final class StrategyRunner(
       .toVector
 
 object StrategyRunner:
+  /** 实盘逻辑核心。确认超时属于执行环境，由 [[Executor]] 注入，不由策略选择。 */
+  private[engine] def live(
+      strategy: Strategy,
+      account: AccountId,
+      orderConfirmationTimeoutMs: Long,
+  ): StrategyRunner =
+    require(orderConfirmationTimeoutMs > 0, s"实盘订单确认超时必须为正数，实为 $orderConfirmationTimeoutMs")
+    new StrategyRunner(strategy, account, orderConfirmationTimeoutMs, _.newClientOrderId)
+
   /** 策略声明 + 框架补齐 = 策略实际的订阅范围。
     *
     * 补齐的三类订阅**不该由策略选择**，因此不留给策略声明 —— 漏订一条持仓或订单回报，
@@ -145,4 +157,9 @@ object StrategyRunner:
     * 引擎在装配期校验这一点，此处保留参数是为了不把"回测只能有一个账户"焊死。
     */
   def backtest(strategy: Strategy, account: AccountId = AccountId.Live): StrategyRunner =
-    StrategyRunner(strategy, account, deterministicIdGen())
+    new StrategyRunner(
+      strategy,
+      account,
+      orderConfirmationTimeoutMs = 0L,
+      clientOrderIdGen = deterministicIdGen(),
+    )

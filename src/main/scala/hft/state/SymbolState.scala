@@ -79,8 +79,8 @@ final class SymbolState(val symbol: Symbol, val declaredExchanges: Set[Exchange]
     * 已确认挂单 (Pending/PartiallyFilled) 由策略决定何时撤单，不参与校验。
     */
   def failOnTimedOutOrders(now: Timestamp, timeoutMs: Long): Unit =
-    // 0 = 关闭 (回测/单测: 下单确认是同步的, 不存在"结果不确定")。这条语义写在
-    // Strategy.orderTimeoutMs 的契约里, 实盘装配路径由 Executor.apply 拒绝 0。
+    // 0 = 关闭（回测由确定性队列驱动，不存在网络造成的“结果不确定”）；
+    // 实盘超时由 Executor 固定注入，策略不能关闭或改写。
     if timeoutMs > 0 then
       _pendingOrders.find((_, p) => p.status == OrderStatus.Created && now - p.createdAt > timeoutMs).foreach {
         (clientId, p) =>

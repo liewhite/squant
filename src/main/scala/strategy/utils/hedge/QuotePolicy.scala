@@ -10,14 +10,10 @@ trait QuotePolicy:
   /** @param efficiencyRatio 效率比 ER（见 `hft.indicator.EfficiencyRatio`）；None = 预热不足 */
   def styleFor(efficiencyRatio: Option[Double]): QuoteStyle
 
-  /** 可能挂出的最长存活时间 —— 框架的订单超时必须比它宽，否则正常挂单会被当成丢单清理 */
-  def maxTtlMs: Long
-
 object QuotePolicy:
   /** 恒用一种方式（价格轴对冲策略的既有行为：一直被动挂） */
   def fixed(style: QuoteStyle): QuotePolicy = new QuotePolicy:
     def styleFor(efficiencyRatio: Option[Double]): QuoteStyle = style
-    def maxTtlMs: Long = style.ttlMs
 
   /** ER < `trendThreshold` 用 `calm`，否则用 `trending`。
     *
@@ -33,4 +29,3 @@ object QuotePolicy:
         efficiencyRatio match
           case Some(er) if er < trendThreshold => calm
           case _                               => trending // 含预热不足: 宁可多付手续费也不裸着
-      def maxTtlMs: Long = math.max(calm.ttlMs, trending.ttlMs)

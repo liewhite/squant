@@ -43,7 +43,6 @@ final class CrossArbStrategy(
     /** 各腿的**最小可发量** (币本位) —— 配平容差取它。比它还小的残量在交易所根本发不出去,
       * 判成"未配平"只会让平腿单被精度拒, 然后策略卡死。见 [[ArbPlan.netExposure]]。 */
     minOrderOf: Instrument => Coin,
-    override val orderTimeoutMs: Long,
 ) extends Strategy:
   require(legs.sizeIs >= 2, s"$ticker 至少要两条腿才谈得上跨所, 实为 ${legs.size}")
   require(legs.map(_.exchange).sizeIs == legs.size, s"$ticker 的腿必须分属不同交易所: $legs")

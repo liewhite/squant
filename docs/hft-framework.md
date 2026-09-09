@@ -353,8 +353,10 @@ def handlers = StrategyHandlers.empty
   判据是 `ExchangeError` 的语义 (`Rejected` / `RateLimited` / 其余)，**不是 HTTP 状态码**：
   三家表达业务拒单的形状各不相同 (Binance 是 HTTP 4xx，OKX 是 200+`sCode`，Bybit 是
   200+`retCode`)，各交易所在自己的边界把数字翻译成语义，共享层只认语义。
-  REST 超时 (`RestTransport.ReadTimeout` = 3s) 必须小于订单超时 (orderTimeoutMs)，使
-  Created 订单超时未确认成为"不可能事件"——一旦发生即假设被破坏，终止。
+  REST 超时 (`RestTransport.ReadTimeout` = 3s) 必须小于框架固定的订单确认超时 (15s)，使
+  Created 订单超时未确认成为“不可能事件”——一旦发生即假设被破坏，终止。这个时限属于
+  实盘执行机制，策略不能改写；回测由确定性队列驱动，不存在网络造成的结果不确定，因此
+  显式关闭该检查。
 - **配置错误即终止**: 缺 SymbolMeta、缺 client/connector、启动对齐失败 (除"未配置
   凭证"这一确定安全的例外) 都在装配/首次使用时抛错。
 
@@ -465,8 +467,8 @@ fork，离开这个块必然被中断并 join；而有序停机写在它的 `fin
    `Fill` 由成交推送独立产出，不参与记账）。仓位排第一是硬要求 —— 订单终态会让本地
    挂单登记消失，此刻仓位若还没更新，策略会认为自己既没单也没仓位而**再下一单**。
    撤单终态同样以私有流推送为准，框架不合成确认事件
-5. Clock 事件驱动超时校验: `Created` 状态超过 `orderTimeoutMs` 未获确认 = 结果不确定，
-   抛错终止 (REST 超时更短，正常情况下到不了这里)
+5. Clock 事件驱动超时校验：`Created` 状态超过框架订单确认超时仍未获确认 = 结果不确定，
+   抛错终止（REST 超时更短，正常情况下到不了这里）
 
 ### 启动顺序：一条因果链，不是一串调用顺序
 

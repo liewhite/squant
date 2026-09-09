@@ -99,7 +99,6 @@ class EngineContractSpec extends munit.FunSuite:
 
   /** 只声明订阅、不做任何事的策略 */
   private class Watcher extends Strategy:
-    def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
     def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (_, _, _) => Vector.empty }
 
   /** 记录收到哪些订阅指令的假行情插件 */

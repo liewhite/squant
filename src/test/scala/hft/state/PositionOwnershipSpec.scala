@@ -31,7 +31,6 @@ class PositionOwnershipSpec extends munit.FunSuite:
   /** 挂一张买单；在成交回调与仓位回调里各记一次"此刻读到的仓位" */
   private class Recorder(atFill: ConcurrentLinkedQueue[Double], atPosition: ConcurrentLinkedQueue[Double]) extends Strategy:
     private var placed = false
-    def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
     def handlers = StrategyHandlers.empty
       .market(Topics.Bbo, inst) { (b, ctx, _) =>
         if placed then Vector.empty
@@ -79,7 +78,6 @@ class PositionOwnershipSpec extends munit.FunSuite:
 
       class NoFill extends Strategy:
         private var placed = false
-        def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
         def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (b, ctx, _) =>
           seen.add(ctx.state.symbolState(sym).get.positionSize(ex).value)
           if placed then Vector.empty
@@ -143,7 +141,6 @@ class PositionOwnershipSpec extends munit.FunSuite:
 
       class Checker extends Strategy:
         private var placed = false
-        def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
         def handlers = StrategyHandlers.empty
           .market(Topics.Bbo, inst) { (b, ctx, _) =>
             if placed then Vector.empty
@@ -195,7 +192,6 @@ class PositionOwnershipSpec extends munit.FunSuite:
 
       /** 每收到一条行情就记一次"此刻看到的仓位" */
       class Peeker extends Strategy:
-        def orderTimeoutMs: Long = 60_000L // 走实盘装配路径, 0 (关闭校验) 只允许在回测/单测里
         def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (_, ctx, _) =>
           decisions.add(ctx.state.symbolState(sym).get.positionSize(ex).value)
           Vector.empty

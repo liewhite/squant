@@ -29,7 +29,7 @@ final class Executor private (
       * 它会按"仓位为零"做第一次决策。见 [[awaiting]] 与 plugin-bus 架构文档 §7.3。 */
     alignmentRequestId: Option[Long],
 ) extends Actor:
-  private val runner = StrategyRunner(strategy, account)
+  private val runner = StrategyRunner.live(strategy, account, Executor.OrderConfirmationTimeoutMs)
 
   /** 还没等到对齐的那些 (账户, 交易所)。空集之前，策略只观察、不动作。
     *
@@ -117,24 +117,21 @@ final class Executor private (
   override def onStop(now: Timestamp): Vector[AnyEvent] = runner.pendingCancels(now)
 
 object Executor:
+  /** 下单请求发出后等待交易所确认的上限。它是实盘执行机制，不是策略参数。 */
+  private val OrderConfirmationTimeoutMs: Long = 15_000L
+
+  require(
+    OrderConfirmationTimeoutMs > RestTransport.ReadTimeout.toMillis,
+    s"框架订单确认超时 ${OrderConfirmationTimeoutMs}ms 必须大于 REST 读超时 " +
+      s"${RestTransport.ReadTimeout.toMillis}ms",
+  )
+
   /** 装进引擎的执行器 —— **自带对齐闸门**：初始仓位落地之前只观察、不动作。
     *
     * 闸门在构造时就位，不靠装配方记得调一下 —— spawn 之后事件循环立即开跑，
     * 那种"必须在某步之前调用"的约定迟早有人漏掉。
     */
   def apply(strategy: Strategy, account: AccountId, alignmentRequestId: Long): Executor =
-    // 实盘装配是**唯一知道"这是实盘"的位置**, 所以那条不变量落在这里:
-    //   REST 读超时 < orderTimeoutMs
-    // 它此前只写在文档里 (hft-framework.md 与 RestTransport 的注释), 没有一处代码承载。
-    // 反了会怎样: 本地等得比策略的订单超时还久 -> 策略先判定"订单结果不确定"并终止,
-    // 而那次 REST 其实还在路上。0 (关闭校验) 更是把唯一能发现"结果不确定"的机制关掉,
-    // 它的合法用途只有回测与单测 (确认是同步的), 那两条路走 readyToTrade。
-    require(
-      strategy.orderTimeoutMs > RestTransport.ReadTimeout.toMillis,
-      s"${strategy.getClass.getSimpleName} 的 orderTimeoutMs=${strategy.orderTimeoutMs}ms 必须大于 " +
-        s"REST 读超时 ${RestTransport.ReadTimeout.toMillis}ms —— 实盘装配不接受 " +
-        "(0 = 关闭校验, 只允许在回测/单测里使用)",
-    )
     new Executor(strategy, account, Some(alignmentRequestId))
 
   /** 世界已经就绪的执行器 —— **不等对齐**。

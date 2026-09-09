@@ -17,7 +17,6 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
   /** 收到首个 BBO 就挂一张限价单 */
   private class OneShotMaker extends Strategy:
     private var placed = false
-    def orderTimeoutMs: Long = 0L
     def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument(ex, sym)) { (b, ctx, _) =>
       if placed then Vector.empty
       else
@@ -37,7 +36,6 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       val trace = java.util.concurrent.ConcurrentLinkedQueue[String]()
 
       class Warming extends Strategy:
-        def orderTimeoutMs: Long = 0L
         override def prepare(): Unit =
           Thread.sleep(50) // 就绪需要时间 —— 阻塞是允许的
           trace.add("prepare")

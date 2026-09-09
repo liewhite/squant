@@ -64,7 +64,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
 
   /** 起一个 runner 并把盘口喂上 (盘口是挂单价与 requote 时钟的来源) */
   private def runnerWith(s: DeltaHedgeStrategy): StrategyRunner =
-    val r = StrategyRunner(s, AccountId.Live)
+    val r = StrategyRunner.backtest(s, AccountId.Live)
     feed(r, bbo(3000.0, 0))
     r
 
@@ -236,18 +236,6 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
     assertEquals(tifOf(placed(feed(chopping, exposure(2.0, 10, gamma = 0.0)))), TimeInForce.PostOnly,
       "预热带来的就绪状态直接决定首单的报价方式")
 
-  test("orderTimeoutMs 衡量的是'下单到确认', 与挂单存活时间无关"):
-    // 这条用例从前断言 `orderTimeoutMs > maxTtlMs`, 依据是一句**写错的契约**
-    // ("否则正常挂单会被当丢单清理")。实际上 failOnTimedOutOrders 只检查 OrderStatus.Created
-    // —— 已确认的 resting 单本来就豁免, 挂多久都不受它影响。
-    // 真正被强制的关系是 orderTimeoutMs > REST 读超时, 由实盘装配路径 (Executor.apply) 校验。
-    val s = strat(Fixed(0.1, 0.1), quotes = byEr)
-    assertEquals(s.orderTimeoutMs, hft.strategy.Strategy.RecommendedOrderTimeoutMs)
-    assert(
-      s.orderTimeoutMs > hft.exchange.RestTransport.ReadTimeout.toMillis,
-      s"orderTimeoutMs=${s.orderTimeoutMs} 必须大于 REST 读超时",
-    )
-
   // ---------- 阈值随预测波动范围走 (ER 已退出死区) ----------
 
   private def volBand = DeltaBand.volScaled(
@@ -299,4 +287,3 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
       fastBarMs = minute, erPeriodBars = 3, rvBars = 100, macdBarMs = 3_600_000L, // RV 远未就绪
       quotes = QuotePolicy.fixed(QuoteStyle.passive(0.01, 5000)))
     assert(feed(runnerWith(st), exposure(0.5, 10, gamma = -0.05)).nonEmpty, "下限 0.001 -> 必然对冲")
-

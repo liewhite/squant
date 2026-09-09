@@ -26,8 +26,8 @@ class CrossArbStrategySpec extends munit.FunSuite:
   )
 
   private def runner(enable: Boolean = true, maxPos: Double = 5.0) =
-    StrategyRunner(
-      CrossArbStrategy("AAPL", Set(rich, cheap), cfg(enable, maxPos), _ => minOrder, orderTimeoutMs = 15_000),
+    StrategyRunner.backtest(
+      CrossArbStrategy("AAPL", Set(rich, cheap), cfg(enable, maxPos), _ => minOrder),
       AccountId.Live,
     )
 

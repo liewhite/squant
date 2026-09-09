@@ -43,14 +43,6 @@ final class MacdGridStrategy(
   private var unitQty = 0.0     // 一份币数 (空仓时按权益刷新, 持仓期冻结)
   private val cancelling = mutable.Set.empty[OrderId] // 已发撤单、等 Cancelled 确认 (防重复撤)
 
-  /** 下单请求的**确认**超时 —— 与"挂单能挂多久"无关。
-    *
-    * 从前这里取 1 年, 注释写"不让框架按超时自动失效"。那是照着一句错的契约配的:
-    * `failOnTimedOutOrders` 只检查 `OrderStatus.Created` (**还没拿到交易所确认**的在途单),
-    * 已确认的 resting 单本来就豁免 —— 网格单常驻 GTC 从来不受它影响。
-    * 1 年的实际效果是把"订单结果不确定"的唯一探测器对这条实盘策略关掉了。 */
-  override def orderTimeoutMs: Long = Strategy.RecommendedOrderTimeoutMs
-
   override def handlers: StrategyHandlers = StrategyHandlers.empty
     .market(Topics.Trade, Instrument(exchange, symbol)) { (t, ctx, _) =>
       k.update(t.timestamp, t.price.value, t.qty.value)

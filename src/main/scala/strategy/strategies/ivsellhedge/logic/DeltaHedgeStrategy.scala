@@ -164,10 +164,6 @@ final class DeltaHedgeStrategy(
       series.update(t, h); series.update(t, l); series.update(t, c)
     }
 
-  // **不是**"挂单能挂多久": 已确认的 resting 单豁免这项校验, 它只管"下单到确认"这一跳。
-  // 从前按 TTL 的 3 倍配, 依据是一份写错的契约 (见 Strategy.RecommendedOrderTimeoutMs)。
-  override def orderTimeoutMs: Long = Strategy.RecommendedOrderTimeoutMs
-
   override def handlers: StrategyHandlers = StrategyHandlers.empty
     .own(Topics.OrderUpdate) { (u, _, now) =>
       leg.onOrderUpdate(u, now) // 成交价对敞口轴判据没有意义 (判据是敞口本身), 故不用它重置任何东西

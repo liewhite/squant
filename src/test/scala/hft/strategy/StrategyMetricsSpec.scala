@@ -29,7 +29,6 @@ class StrategyMetricsSpec extends munit.FunSuite:
 
   /** 一边看行情一边把自己的价差指标发出去 */
   private class Quoting extends Strategy:
-    def orderTimeoutMs: Long = 0L
     def handlers: StrategyHandlers = StrategyHandlers.empty
       .market(Topics.Bbo, inst) { (b, ctx, _) =>
         val bps = (b.askPrice - b.bidPrice).value / b.midPrice.value * 10_000
@@ -63,7 +62,6 @@ class StrategyMetricsSpec extends munit.FunSuite:
       val seen = ConcurrentLinkedQueue[Double]()
 
       class Consumer extends Strategy:
-        def orderTimeoutMs: Long = 0L
         def handlers: StrategyHandlers = StrategyHandlers.empty
           .custom(SpreadMetric, Set(inst)) { (s, _, _) => seen.add(s.bps); Vector.empty }
 

@@ -33,7 +33,7 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
   private val metas = Map((ex, sym) -> SymbolMeta(ex, sym, 0.01, 0.0001, 0.0001, 1.0))
 
   private def warm(band: HedgeBand, rawDelta: Double): StrategyRunner =
-    val runner = StrategyRunner(strat(band), AccountId.Live)
+    val runner = StrategyRunner.backtest(strat(band), AccountId.Live)
     feed(runner, Event.stamped(Topics.Balance, Balance(AccountId.Live, ex, ccy, 0.0, 0), 0, 0))
     feed(runner, Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, rawDelta, 0.01, -0.5, 1.0, 0), 0, 0))
     (0 to 7).foreach(i => feed(runner, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
@@ -75,7 +75,7 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
     assertEquals(feed(runner, bbo(105.04, 9 * hour)), Vector.empty) // dev=0 -> 不下单
 
   test("对冲量超 maxHedgeQty 硬上限 -> 不下单 (防 delta/gamma bug)"):
-    val runner = StrategyRunner(MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
+    val runner = StrategyRunner.backtest(MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
       atrPeriodBars = 5, rvShortWindowBars = 3, rvLongWindowBars = 6, maSmaPeriod = 5, maxHedgeQty = 0.3, barIntervalMs = hour, minHedgeQty = 0.001), AccountId.Live)
     feed(runner, Event.stamped(Topics.Balance, Balance(AccountId.Live, ex, ccy, 0.0, 0), 0, 0))
     feed(runner, Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, 0.5, 0.01, -0.5, 1.0, 0), 0, 0))
@@ -83,14 +83,14 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
     assertEquals(feed(runner, bbo(104.0, 8 * hour)), Vector.empty) // netDelta 0.5 > maxHedge 0.3 -> 不下
 
   test("无 ccy 余额 -> greeks()=None -> 不对冲 (实盘由 OptionGreeksFeed 同步兜底余额)"):
-    val runner = StrategyRunner(strat(ConstantBand(2.0, 2.0)), AccountId.Live)
+    val runner = StrategyRunner.backtest(strat(ConstantBand(2.0, 2.0)), AccountId.Live)
     // 只 greeks, 无 Balance
     feed(runner, Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, 0.5, 0.01, -0.5, 1.0, 0), 0, 0))
     (0 to 7).foreach(i => feed(runner, bbo(if i % 2 == 0 then 100.0 else 101.0, i.toLong * hour)))
     assertEquals(feed(runner, bbo(104.0, 8 * hour)), Vector.empty) // 越带但 greeks()=None -> 不挂
 
   test("greeks 陈旧超 maxGreeksStaleMs -> 暂停对冲"):
-    val runner = StrategyRunner(MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
+    val runner = StrategyRunner.backtest(MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
       atrPeriodBars = 5, rvShortWindowBars = 3, rvLongWindowBars = 6, maSmaPeriod = 5, maxGreeksStaleMs = 1000, barIntervalMs = hour, minHedgeQty = 0.001), AccountId.Live)
     feed(runner, Event.stamped(Topics.Balance, Balance(AccountId.Live, ex, ccy, 0.0, 0), 0, 0))
     feed(runner, Event.stamped(Topics.Greeks, Greeks(AccountId.Live, ex, ccy, 0.5, 0.01, -0.5, 1.0, 0), 0, 0)) // ts=0 (旧)
@@ -99,7 +99,7 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
 
   test("gammaAdjust: 两次 greeks 间用 gamma×价差修正净 delta"):
     // greeks: delta=0.0, gamma=0.1; greeksRefMid=100 (greeks 更新时); 现价 104 -> 修正 delta = 0.1×(104-100)=0.4
-    val runner = StrategyRunner(MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
+    val runner = StrategyRunner.backtest(MakerHedgeStrategy(ex, sym, ccy, ConstantBand(2.0, 2.0), offsetPct = 0.01, requoteMs = 5000,
         atrPeriodBars = 5, rvShortWindowBars = 3, rvLongWindowBars = 6, maSmaPeriod = 5, gammaAdjust = true,
         barIntervalMs = hour, minHedgeQty = 0.001),
       AccountId.Live,

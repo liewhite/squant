@@ -51,7 +51,6 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   /** 测试用极简策略: 收到首个 BBO 即在买一下方 offset 处挂一张 PostOnly 限价买单 */
   private class OneShotMakerStrategy(offsetRatio: Double, orderSize: Coin) extends Strategy:
     private var placed = false
-    override def orderTimeoutMs: Long = 60_000
     override def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument(ex, sym)) { (b, ctx, _) =>
       if placed then Vector.empty
       else

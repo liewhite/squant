@@ -54,8 +54,6 @@ final class FlowAnomalyStrategy(
   private val detector = TakerFlowDetector(exchange, config, rule)
   private val instruments: Set[Instrument] = universe.map(Instrument(exchange, _))
 
-  override def orderTimeoutMs: Long = 10_000
-
   override def handlers: StrategyHandlers = StrategyHandlers.empty
     .market(Topics.Trade, instruments) { (t, _, _) =>
       detector.onTrade(t)

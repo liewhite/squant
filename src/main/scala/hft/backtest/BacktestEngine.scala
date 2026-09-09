@@ -40,9 +40,9 @@ final case class BacktestResult(
   * 账户净值：周期性 (clockIntervalMs) 由当前账本计算账户信息事件投递给策略 (等价实盘
   * Engine 的 accountRefresh)，并在首个事件时先投递一次初始净值，否则依赖净值的策略不会动作。
   *
-  * 时间一致性：撮合回报与 pending order 的 createdAt 一律取虚拟时间 `now` (不读墙钟)，故
-  * 逐笔回报时间戳、订单超时检测 (failOnTimedOutOrders) 在回测中与虚拟时间一致——同一输入
-  * 必得同一结果。
+  * 时间一致性：撮合回报与 pending order 的 createdAt 一律取虚拟时间 `now`（不读墙钟），
+  * 撮合及回报延迟也全部进入确定性队列。回测不存在网络造成的订单结果不确定，因此关闭实盘的
+  * 订单确认超时检查；同一输入仍必得同一结果。
   */
 final class BacktestEngine(
     exchange: Exchange,

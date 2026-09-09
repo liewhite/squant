@@ -14,7 +14,6 @@ import hft.TestUnits.given
 class ExecutorFlowSpec extends munit.FunSuite:
   /** Clock 触发即下单的 stub 策略 */
   private class ClockOrderStrategy extends Strategy:
-    override def orderTimeoutMs: Long = 5000
     override def handlers: StrategyHandlers = StrategyHandlers.empty
       // 声明标的以获得订阅范围与 SymbolMeta 校验；下单由时钟触发
       .market(Topics.Bbo, Instrument(Exchange.Binance, "BTCUSDT")) { (_, _, _) => Vector.empty }
