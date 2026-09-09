@@ -54,8 +54,19 @@ final class StrategyContext private[hft] (
 
   def place(order: Order, comment: String): Vector[AnyEvent] = place(Vector(order), comment)
 
-  /** 撤单。撤单终态以私有流推送为准，框架不合成确认事件 */
+  /** 撤销本策略已登记的挂单。撤单终态以私有流推送为准，框架不合成确认事件。 */
   def cancel(exchange: Exchange, symbol: Symbol, ref: OrderRef): AnyEvent =
+    val owned = state.symbolState(symbol).exists(_.pendingOrders.exists { pending =>
+      val order = pending.order
+      order.exchange == exchange && (ref match
+        case OrderRef.ByExchangeId(id) => id.nonEmpty && order.id == id
+        case OrderRef.ByClientId(id)   => id.nonEmpty && order.clientOrderId == id
+      )
+    })
+    require(
+      owned,
+      s"只能撤销本策略已登记的挂单: exchange=$exchange symbol=$symbol ref=$ref",
+    )
     Event.stamped(OrderIntent, AccountOutcome(account, OutcomeEvent.CancelOrder(exchange, symbol, ref)), now, now)
 
   /** 发一条自定义事件 —— 策略自己的指标、信号、给别的组件的提示。
