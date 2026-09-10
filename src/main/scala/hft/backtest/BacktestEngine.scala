@@ -54,7 +54,7 @@ final class BacktestEngine(
       * 与实盘的柜台同一份判据 (见 [[hft.exchange.TradingGateway]])，否则回测的成交量会
       * 系统性地比实盘多出一个取整。
       * 无默认值 —— 缺了它任何订单都对齐不了，与其在首笔下单时炸，不如装配期就写清楚。 */
-    symbolMetas: Map[(Exchange, Symbol), SymbolMeta],
+    symbolMetas: Map[Instrument, SymbolMeta],
     observers: Seq[AnyEvent => Unit] = Nil,
     clockIntervalMs: Long = 1000,
     /** 本次回测的账户。撮合发出的回报标它，策略的私有回报订阅也按它路由 —— 两边必须一致，
@@ -249,8 +249,8 @@ final class BacktestEngine(
   /** 缺规格即策略引用了未装配的标的, 是装配错误, 立即终止 */
   private def metaOf(order: Order): SymbolMeta =
     symbolMetas.getOrElse(
-      (order.exchange, order.symbol),
-      sys.error(s"回测缺少 ${order.exchange} ${order.symbol} 的合约规格, 无法对齐订单"),
+      order.instrument,
+      sys.error(s"回测缺少 ${order.instrument} 的合约规格, 无法对齐订单"),
     )
 
   private def accountInfoEvent(ts: Timestamp): AnyEvent =

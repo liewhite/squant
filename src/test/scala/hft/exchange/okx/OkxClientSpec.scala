@@ -1,5 +1,6 @@
 package hft.exchange.okx
 
+import hft.domain.InstrumentKind
 import sttp.client4.testing.SyncBackendStub
 
 /** OKX 签名单测：HMAC-SHA256 + Base64 编码、WS 登录签名串拼装。
@@ -44,7 +45,7 @@ class OkxClientSpec extends munit.FunSuite:
     ]}"""
 
   private def instrumentsFrom(body: String) =
-    OkxClient.public(SyncBackendStub.whenAnyRequest.thenRespondAdjust(body)).fetchAllSymbolMetas()
+    OkxClient.public(SyncBackendStub.whenAnyRequest.thenRespondAdjust(body)).fetchMetas(InstrumentKind.LinearPerp)
 
   test("排除尚未上市的合约: 它的规格字段是空串, 读它就是崩溃"):
     assert(!instrumentsFrom(instrumentsBody).map(_.map(_.symbol)).exists(_.contains("JP225")))

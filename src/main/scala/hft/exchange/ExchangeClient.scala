@@ -10,23 +10,71 @@ import hft.domain.*
 trait ExchangeClient:
   def exchange: Exchange
 
-  /** 获取所有交易对元数据 */
-  def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]]
+  /** 拉取**某一品种**的全部合约规格。
+    *
+    * 按品种而不是"全部"：三家的规格端点本来就按品种分口
+    * （Bybit 的 `category`、OKX 的 `instType`、Binance 的 USDⓈ-M 与期权是两套 API），
+    * 一个不分品种的 `fetchAll` 只能定死在其中一种上 —— 从前它就定死在永续上，
+    * 于是期权的规格根本无处可取。
+    *
+    * 本所不支持该品种时返回 `Left` 而不是空 —— "这个所没有期权"与"我没接期权"是两件事，
+    * 空集把它们混成同一个读数。
+    */
+  def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]]
 
-  /** 按 symbol 索引的合约规格 —— **进程内只拉一次**。
+  /** 按标的索引的合约规格 —— 进程内**共享的一份**，可增量补充。
     *
     * 一个交易所的接入有三处要它：行情源把盘口数量从张换成币、汇报面把回报换回币、
-    * 柜台把下单意图对齐到交易所精度。三处各拉一次就是同一事实的三份副本
-    * （合约规格在进程生命周期内不变，但两次拉取之间交易所上了新合约的话它们就不一致了），
-    * 而且启动时白打两次 REST。
+    * 柜台把下单意图对齐到交易所精度。三处各拉一次就是同一事实的三份副本，
+    * 启动时还白打两次 REST。所以它在客户端上，三处共用同一个实例。
     *
-    * `final`：各家客户端不该再各写一份索引方式。
+    * ## 键是标的而不是交易对
     *
-    * 失败即抛：缺规格就发不出单、换不了算，与其在首笔下单时炸，不如装配期就失败。
+    * 同一个 symbol 底下可能有 U 本位永续、币本位永续、几十个期权合约，而它们的
+    * `contractSize` 完全不同（OKX 的 `ETH-USD-SWAP` 是 10 USD/张，`ETH-USDT-SWAP` 是
+    * 0.1 ETH/张）。按 symbol 索引的话后写入的那条会静默覆盖前一条，之后所有张↔币换算
+    * 都按错的乘数走 —— 数字看着都合理。
+    *
+    * ## 为什么可以增量补充
+    *
+    * 期权链每周滚动：新的到期日不断上市，旧的到期消失。一次性快照装不下"下周才有的合约"，
+    * 而"一个合约一个策略实例"的用法要求运行中能装上新合约。[[loadMetas]] 因此是可以再调的。
     */
-  final lazy val symbolMetas: Map[Symbol, SymbolMeta] = fetchAllSymbolMetas() match
-    case Right(metas) => metas.map(m => m.symbol -> m).toMap
-    case Left(e)      => throw IllegalStateException(s"$exchange 预加载合约规格失败: ${e.message}")
+  private val metaCache: java.util.concurrent.atomic.AtomicReference[Map[Instrument, SymbolMeta]] =
+    java.util.concurrent.atomic.AtomicReference(Map.empty)
+
+  /** 已知的合约规格快照 (只读) */
+  final def knownMetas: Map[Instrument, SymbolMeta] = metaCache.get()
+
+  /** 这个标的的规格 —— **纯查表，缺失即抛**。
+    *
+    * 不在这里补拉：它在热路径上（每条订单回报都要拿它把张换回币），而补拉是一次网络往返。
+    * 谁需要新标的的规格，谁在冷路径上先 [[loadMetas]] —— 柜台在启动对齐入口做这件事
+    * （见 `RestTradingGateway.syncSnapshot`），那是标的进入柜台视野的唯一路径，
+    * 因此"记得先加载"不是一条要靠人记住的约定。
+    */
+  final def metaOf(instrument: Instrument): SymbolMeta =
+    metaCache
+      .get()
+      .getOrElse(
+        instrument,
+        sys.error(s"$exchange 没有 $instrument 的合约规格 —— 该品种尚未加载 (见 ExchangeClient.loadMetas)"),
+      )
+
+  /** 拉一个品种的规格并**合并**进表；返回新增/更新的条目数。
+    *
+    * **合并而不是整表替换**：规格是合约的静态事实，到期不会改变它。整表替换会在到期日
+    * 当天把一个仍持有仓位的合约的规格抹掉，于是记账路径上的 `metaOf` 抛错、进程终止。
+    * 表只增不减，进程重启即清空。
+    *
+    * 幂等：重复调用只是再合并一次同样的内容。并发调用经 CAS 合并，不会互相丢失。
+    */
+  final def loadMetas(kind: InstrumentKind): Either[ExchangeError, Int] =
+    fetchMetas(kind).map { fetched =>
+      val added = fetched.map(m => m.instrument -> m).toMap
+      metaCache.updateAndGet(_ ++ added)
+      added.size
+    }
 
 /** 私有 REST —— **拿到这个类型本身就意味着凭证已经具备**。
   *

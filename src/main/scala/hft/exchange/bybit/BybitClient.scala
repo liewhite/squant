@@ -98,7 +98,14 @@ class BybitPublicClient protected[bybit] (
 
   // ==================== ExchangeClient ====================
 
-  override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
+  /** Bybit v5 的规格端点按 `category` 分口。目前只接 linear —— 期权 (`category=option`)
+    * 的端点形状相同, 但响应侧 (私有流 category=option) 还没接, 见 `linearSymbol`。 */
+  override def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
+    if kind != InstrumentKind.LinearPerp then
+      Left(ExchangeError.Rejected("unsupported", s"Bybit 适配层尚未接入 $kind 的规格与响应侧"))
+    else fetchLinearMetas()
+
+  private def fetchLinearMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
     // instruments-info 为公共端点 (免签)，分页跟进 nextPageCursor
     def loop(cursor: Option[String], acc: Vector[SymbolMeta]): Either[ExchangeError, Vector[SymbolMeta]] =
       val query =

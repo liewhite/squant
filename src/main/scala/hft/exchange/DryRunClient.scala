@@ -26,7 +26,7 @@ final class DryRunClient(delegate: TradingClient) extends TradingClient:
 
   // ==================== 只读：透传 ====================
 
-  override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] = delegate.fetchAllSymbolMetas()
+  override def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] = delegate.fetchMetas(kind)
   override def fetchPendingOrders(instrument: Instrument): Either[ExchangeError, Vector[OrderUpdate]] = delegate.fetchPendingOrders(instrument)
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] = delegate.fetchAccountInfo()
   override def fetchWallet(): Either[ExchangeError, Map[String, Double]] = delegate.fetchWallet()

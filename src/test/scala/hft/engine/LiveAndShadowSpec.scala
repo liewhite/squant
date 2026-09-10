@@ -26,7 +26,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
   private val sym = "BTCUSDT"
   private val inst = Instrument.perp(ex, sym)
   private val meta = SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
-  private val metas = Map[Symbol, SymbolMeta](sym -> meta)
+  private val metas = Map(Instrument.perp(ex, sym) -> meta)
   private val paper: AccountId.Paper = AccountId.Paper(1)
   private val instant = TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
 
@@ -41,7 +41,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
     override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
       placed.add(order); Right(s"live-${placed.size}")
     override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
-    override def fetchAllSymbolMetas() = Right(Vector(meta))
+    override def fetchMetas(kind: InstrumentKind) = Right(Vector(meta))
     override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 10_000.0))
     override def fetchWallet() = Right(Map("USDT" -> 10_000.0))
@@ -75,7 +75,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
       ox.forkDiscard { while true do fillMailbox.events.receive().as(Topics.Fill).foreach(fills.add) }
 
       // 两个柜台：真实交易所 (Live) 与虚拟柜台 (Paper(1))
-      system.spawn(RestTradingGateway(RecordingClient(livePlaced), SilentFeed, AccountId.Live, metas))
+      system.spawn(RestTradingGateway(RecordingClient(livePlaced), SilentFeed, AccountId.Live))
       system.spawn(PaperCounter(paper, ex, instant, metas))
 
       // 同一份策略逻辑, 两个账户各一个实例

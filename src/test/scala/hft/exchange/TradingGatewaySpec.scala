@@ -17,7 +17,7 @@ import hft.TestUnits.given
   */
 class TradingGatewaySpec extends munit.FunSuite:
   private val meta = SymbolMeta(Exchange.Binance, "BTCUSDT", tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
-  private val metas = Map[Symbol, SymbolMeta]("BTCUSDT" -> meta)
+  private val metas = Map(Instrument.perp(Exchange.Binance, "BTCUSDT") -> meta)
 
   /** 不推送任何东西的汇报面 —— 本测试只关心执行 */
   private object SilentFeed extends AccountFeed:
@@ -35,7 +35,7 @@ class TradingGatewaySpec extends munit.FunSuite:
   private class QuietClient extends TradingClient:
     override def exchange: Exchange = Exchange.Binance
     override def placeOrder(order: ExchangeOrder) = Right("ignored")
-    override def fetchAllSymbolMetas() = Right(Vector(meta))
+    override def fetchMetas(kind: InstrumentKind) = Right(Vector(meta))
     override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
     override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, Exchange.Binance, 10_000.0))
@@ -60,7 +60,7 @@ class TradingGatewaySpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       val feed = ManualFeed()
-      ActorSystem(bus).spawn(RestTradingGateway(QuietClient(), feed, AccountId.Live, metas))
+      ActorSystem(bus).spawn(RestTradingGateway(QuietClient(), feed, AccountId.Live))
       align(bus)
       // 对齐之后才开始收 —— 对齐本身会推一条零仓快照, 那不是本测试的对象
       val seen = ConcurrentLinkedQueue[AnyEvent]()
@@ -146,7 +146,7 @@ class TradingGatewaySpec extends munit.FunSuite:
       val bus = EventBus()
       val feed = ManualFeed()
       val system = ActorSystem(bus, failureSink = e => { failure.set(e); failed.countDown() })
-      system.spawn(RestTradingGateway(QuietClient(), feed, AccountId.Live, metas))
+      system.spawn(RestTradingGateway(QuietClient(), feed, AccountId.Live))
       align(bus)
       val seen = ConcurrentLinkedQueue[AnyEvent]()
       val mailbox = bus.subscribe(Set(Interest.All(Topics.Position), Interest.All(Topics.Fill)))
@@ -184,7 +184,10 @@ class TradingGatewaySpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       val feed = ManualFeed()
-      ActorSystem(bus).spawn(RestTradingGateway(QuietClient(), feed, AccountId.Live, Map("BTCUSDT" -> coarse)))
+      // 规格由客户端给 —— 柜台在对齐入口自己加载 (见 RestTradingGateway.syncSnapshot)
+      class CoarseClient extends QuietClient:
+        override def fetchMetas(kind: InstrumentKind) = Right(Vector(coarse))
+      ActorSystem(bus).spawn(RestTradingGateway(CoarseClient(), feed, AccountId.Live))
       align(bus)
       val seen = ConcurrentLinkedQueue[AnyEvent]()
       val mailbox = bus.subscribe(Set(Interest.All(Topics.Position)))
@@ -220,7 +223,7 @@ class TradingGatewaySpec extends munit.FunSuite:
           OrderUpdate(AccountId.Live, "o1", Some("c1"), Exchange.Binance, "BTCUSDT", Side.Long,
             OrderStatus.PartiallyFilled(Coin(0.3)), Price(100.0), Coin(1.0), Coin(0.3), false, 1L)
         ))
-      ActorSystem(bus).spawn(RestTradingGateway(PartialClient(), feed, AccountId.Live, metas))
+      ActorSystem(bus).spawn(RestTradingGateway(PartialClient(), feed, AccountId.Live))
       align(bus)
 
       val seen = ConcurrentLinkedQueue[AnyEvent]()
@@ -243,10 +246,12 @@ class TradingGatewaySpec extends munit.FunSuite:
       val eth = "ETHUSDT"
       val ethMeta = SymbolMeta(Exchange.Binance, eth, 0.1, 0.001, 0.001, 1.0)
       class TwoSymbolClient extends QuietClient:
+        // 规格端点返回本所全部合约, 柜台按需查 —— 两批标的都要在里面
+        override def fetchMetas(kind: InstrumentKind) = Right(Vector(meta, ethMeta))
         override def fetchPositions() = Right(Vector(
           Position(AccountId.Live, Exchange.Binance, "BTCUSDT", Coin(0.5))
         ))
-      ActorSystem(bus).spawn(RestTradingGateway(TwoSymbolClient(), feed, AccountId.Live, metas + (eth -> ethMeta)))
+      ActorSystem(bus).spawn(RestTradingGateway(TwoSymbolClient(), feed, AccountId.Live))
 
       align(bus, Set(Instrument.perp(Exchange.Binance, "BTCUSDT")))          // 第一批: BTC, 拉到 0.5
       align(bus, Set(Instrument.perp(Exchange.Binance, eth)))                // 第二批: ETH, 交易所没返回它 -> 零仓
@@ -299,17 +304,21 @@ class TradingGatewaySpec extends munit.FunSuite:
     }
 
 
-  /** 只实现 placeOrder 的 stub，其余方法不应被触达 */
+  /** 只实现 placeOrder 与规格加载的 stub，其余方法不应被触达。
+    *
+    * `fetchMetas` 现在**必须**实现: 柜台在启动对齐入口自己加载规格 (见
+    * `RestTradingGateway.syncSnapshot`)，而不再由构造方传入一份快照。 */
   private class StubClient(placeResult: Either[ExchangeError, OrderId]) extends TradingClient:
     override def exchange: Exchange = Exchange.Binance
     override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] = placeResult
-    override def fetchAllSymbolMetas() = fail("unexpected call")
+    override def fetchMetas(kind: InstrumentKind) = Right(Vector(meta))
     override def cancelOrder(instrument: Instrument, ref: OrderRef) = fail("unexpected call")
-    override def fetchPendingOrders(instrument: Instrument) = fail("unexpected call")
+    // 对齐要读它们 —— 空账户是本组用例的前提 (它们只关心下单回流)
+    override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
     // 柜台启动即周期刷净值 —— 给一个固定读数, 免得测试依赖网络
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, Exchange.Binance, 10_000.0))
     override def fetchWallet() = Right(Map("USDT" -> 10_000.0))
-    override def fetchPositions() = fail("unexpected call")
+    override def fetchPositions() = Right(Vector.empty)
 
   private def orderOf(quantity: Coin) = Order(
     id = "",
@@ -337,7 +346,10 @@ class TradingGatewaySpec extends munit.FunSuite:
       val bus = EventBus()
       val incomes = bus.subscribe(Set(Interest.All(Topics.OrderUpdate)))
       val system = ActorSystem(bus)
-      system.spawn(RestTradingGateway(client, SilentFeed, AccountId.Live, metas))
+      system.spawn(RestTradingGateway(client, SilentFeed, AccountId.Live))
+      // 先对齐 —— 柜台的合约规格在对齐入口加载 (见 RestTradingGateway.syncSnapshot),
+      // 而实盘链路上柜台也总是先对齐再收下单意图 (引擎的闸门保证)。
+      align(bus)
       body(bus, incomes.events, system)
 
   test("dry-run (DryRunClient): 信号以 OrderUpdate(Error) 回流清理 pending"):
@@ -367,7 +379,7 @@ class TradingGatewaySpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus, failureSink = _ => failed.countDown())
-      system.spawn(RestTradingGateway(StubClient(Left(ExchangeError.RateLimited("HTTP 429"))), SilentFeed, AccountId.Live, metas))
+      system.spawn(RestTradingGateway(StubClient(Left(ExchangeError.RateLimited("HTTP 429"))), SilentFeed, AccountId.Live))
       bus.publish(intentOf(orderOf(0.001)))
       assert(failed.await(2, TimeUnit.SECONDS), "限频必须触发全系统停机")
 
@@ -377,7 +389,7 @@ class TradingGatewaySpec extends munit.FunSuite:
     supervised:
       val bus = EventBus()
       val system = ActorSystem(bus, failureSink = _ => failed.countDown())
-      system.spawn(RestTradingGateway(StubClient(Left(ExchangeError.Other("OKX API error: code=50013"))), SilentFeed, AccountId.Live, metas))
+      system.spawn(RestTradingGateway(StubClient(Left(ExchangeError.Other("OKX API error: code=50013"))), SilentFeed, AccountId.Live))
       bus.publish(intentOf(orderOf(0.001)))
       assert(failed.await(2, TimeUnit.SECONDS), "结果不确定必须终止")
 

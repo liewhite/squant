@@ -120,7 +120,7 @@ abstract class TradingGateway extends Actor:
     case OutcomeEvent.PlaceOrders(orders, comment) =>
       // 关联订单独立并行下单：IOC 订单本身接受部分成交，敞口由策略层 rebalance 兜底
       orders.foreach { order =>
-        OrderConversion.alignToExchange(order, metaOf(order.symbol)) match
+        OrderConversion.alignToExchange(order, metaOf(order.instrument)) match
           case Right(aligned) =>
             gatewayLogger.info(s"下单: ${describe(aligned)} signal=$comment")
             placeAligned(aligned, now)
@@ -178,7 +178,7 @@ abstract class TradingGateway extends Actor:
     * 缺失即发单方引用了本所没有的标的，是装配错误，实现方应立即终止而不是跳过：
     * 跳过的表现是这张单凭空消失。
     */
-  protected def metaOf(symbol: Symbol): SymbolMeta
+  protected def metaOf(instrument: Instrument): SymbolMeta
 
   /** 下发一张**已对齐到交易所精度**的订单 (仍是币本位；换成张数是实现方的最后一步)。
     *

@@ -25,7 +25,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
   private val sym = "BTCUSDT"
   private val inst = Instrument.perp(ex, sym)
   private val paper: AccountId.Paper = AccountId.Paper(1)
-  private val metas = Map[Symbol, SymbolMeta](sym -> SymbolMeta(ex, sym, 0.1, 0.001, 0.001, 1.0))
+  private val metas = Map(Instrument.perp(ex, sym) -> SymbolMeta(ex, sym, 0.1, 0.001, 0.001, 1.0))
   private val instant = TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
 
   /** 挂一张买单；在成交回调与仓位回调里各记一次"此刻读到的仓位" */
@@ -119,7 +119,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
   private class AcceptingClient extends TradingClient:
     override def exchange: Exchange = ex
     override def placeOrder(order: ExchangeOrder) = Right("ex-1")
-    override def fetchAllSymbolMetas() = Right(Vector(metas(sym)))
+    override def fetchMetas(kind: InstrumentKind) = Right(Vector(metas(Instrument.perp(ex, sym))))
     override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
     override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 10_000.0))
@@ -158,7 +158,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
           }
 
       val feed = ManualFeed()
-      system.spawn(RestTradingGateway(AcceptingClient(), feed, AccountId.Live, metas))
+      system.spawn(RestTradingGateway(AcceptingClient(), feed, AccountId.Live))
       // 柜台在对齐之前忽略一切报告 —— 那时它还不知道自己管哪些标的
       val synced = bus.subscribe(Set(Interest.All(AccountSynced)))
       bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 1L, Set(Instrument.perp(ex, sym)))))
@@ -201,7 +201,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
       class HoldingClient extends AcceptingClient:
         override def fetchPositions() =
           Right(Vector(Position(AccountId.Live, ex, sym, Coin(0.7))))
-      system.spawn(RestTradingGateway(HoldingClient(), ManualFeed(), AccountId.Live, metas))
+      system.spawn(RestTradingGateway(HoldingClient(), ManualFeed(), AccountId.Live))
       system.spawn(hft.TestCommandSink("market-sink", MarketSubscription, Set(ex)))
 
       // 行情先流起来 —— 模拟"这个标的早就有别的组件在看"

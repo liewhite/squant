@@ -7,8 +7,8 @@ import hft.TestUnits.given
 /** 撮合状态转移的纯单测：无线程、无延迟、无 sleep，直接断言 (新状态, 回流事件)。 */
 class SimStateSpec extends munit.FunSuite:
   /** contractSize = 1：撮合入口的币本位还原对这些用例是恒等变换 */
-  private val metasOf: Map[(Exchange, Symbol), SymbolMeta] =
-    Map((Exchange.Binance, "BTCUSDT") -> SymbolMeta(Exchange.Binance, "BTCUSDT", 0.1, 0.001, 0.001, 1.0))
+  private val metasOf: Map[Instrument, SymbolMeta] =
+    Map(Instrument.perp(Exchange.Binance, "BTCUSDT") -> SymbolMeta(Exchange.Binance, "BTCUSDT", 0.1, 0.001, 0.001, 1.0))
 
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"

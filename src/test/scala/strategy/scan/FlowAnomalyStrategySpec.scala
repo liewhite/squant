@@ -17,8 +17,8 @@ import scala.collection.mutable
 class FlowAnomalyStrategySpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val universe = (1 to 10).map(i => s"SYM${i}USDT").toSet
-  private val metas: Map[(Exchange, Symbol), SymbolMeta] =
-    universe.map(s => (ex, s) -> SymbolMeta(ex, s, tickSize = 0.01, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)).toMap
+  private val metas: Map[Instrument, SymbolMeta] =
+    universe.map(s => Instrument.perp(ex, s) -> SymbolMeta(ex, s, tickSize = 0.01, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)).toMap
 
   private val cfg = FlowScanConfig(bucketMs = 1000, windowBuckets = 3, baselineSamples = 20, cooldownMs = 10_000)
   private val rule = CrossSectionalMedianRule(residualZ = 4.0, minWindowNotional = 1_000.0, minSymbols = 5)

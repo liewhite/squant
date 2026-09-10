@@ -71,7 +71,13 @@ class BinancePublicClient protected[binance] (
 
   // ==================== ExchangeClient ====================
 
-  override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
+  /** 本客户端接的是 USDⓈ-M 永续。币安的期权是另一套 API (eapi), 框架没接。 */
+  override def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
+    if kind != InstrumentKind.LinearPerp then
+      Left(ExchangeError.Rejected("unsupported", s"Binance 适配层只接 USDⓈ-M 永续, 拿不到 $kind 的规格"))
+    else fetchPerpMetas()
+
+  private def fetchPerpMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
     // exchangeInfo 是三家里最大的响应 (几百个标的), 与下单路径的时限无关
     publicGet[ExchangeInfo]("/fapi/v1/exchangeInfo", Map.empty, RestTransport.QueryTimeout).map { info =>
       info.symbols.iterator
@@ -108,7 +114,7 @@ class BinancePublicClient protected[binance] (
     * 键取 `baseAsset` 而不是从 symbol 上剥掉计价币：剥字符串要先假定后缀，而 `baseAsset`
     * 是币安自己给出的答案。
     *
-    * **不并入 [[fetchAllSymbolMetas]]**：那里的口径是加密永续 (`PERPETUAL`)，合并会静默改变
+    * **不并入 [[fetchMetas]] 的永续口径**：那里的口径是加密永续 (`PERPETUAL`)，合并会静默改变
     * 既有调用方 (全市场扫描器) 的标的集合；而且传统资产永续有交易时段与休市停更，
     * 与 7×24 的加密永续混进同一张表，后来者就分不出哪些标的会整段没有行情。
     */

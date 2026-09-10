@@ -30,7 +30,7 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
   private def feed(runner: StrategyRunner, ev: AnyEvent): Vector[OutcomeEvent] =
     runner.onEvent(ev, ev.localTs).flatMap(_.as(OrderIntent)).map(_.outcome)
 
-  private val metas = Map((ex, sym) -> SymbolMeta(ex, sym, 0.01, 0.0001, 0.0001, 1.0))
+  private val metas = Map(Instrument.perp(ex, sym) -> SymbolMeta(ex, sym, 0.01, 0.0001, 0.0001, 1.0))
 
   private def warm(band: HedgeBand, rawDelta: Double): StrategyRunner =
     val runner = StrategyRunner.backtest(strat(band), AccountId.Live)

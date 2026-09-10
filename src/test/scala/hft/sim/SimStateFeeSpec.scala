@@ -7,8 +7,8 @@ import hft.TestUnits.given
 /** 撮合手续费单测：maker/taker 成交按对应费率扣现金，非成交路径 (拒单/撤单) 不扣费。 */
 class SimStateFeeSpec extends munit.FunSuite:
   /** contractSize = 1：撮合入口的币本位还原对这些用例是恒等变换 */
-  private val metasOf: Map[(Exchange, Symbol), SymbolMeta] =
-    Map((Exchange.Binance, "ETHUSDT") -> SymbolMeta(Exchange.Binance, "ETHUSDT", 0.1, 0.001, 0.001, 1.0))
+  private val metasOf: Map[Instrument, SymbolMeta] =
+    Map(Instrument.perp(Exchange.Binance, "ETHUSDT") -> SymbolMeta(Exchange.Binance, "ETHUSDT", 0.1, 0.001, 0.001, 1.0))
 
   private val ex = Exchange.Binance
   private val sym = "ETHUSDT"

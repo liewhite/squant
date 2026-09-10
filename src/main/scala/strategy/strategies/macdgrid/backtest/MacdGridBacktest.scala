@@ -1,5 +1,6 @@
 package strategy.strategies.macdgrid.backtest
 
+import hft.domain.InstrumentKind
 import hft.backtest.binance.BinanceMarketDataProvider
 import hft.backtest.{BacktestEngine, MarketDataKind, SyntheticBboSource}
 import hft.engine.StrategyRunner
@@ -34,8 +35,8 @@ import java.time.{LocalDate, ZoneOffset}
   val backend = DefaultSyncBackend()
   val publicClient = hft.exchange.binance.BinanceClient.public(backend)
   val symbolMetas = publicClient
-    .fetchAllSymbolMetas()
-    .fold(e => sys.error(s"fetch symbol metas failed: ${e.message}"), _.map(m => (m.exchange, m.symbol) -> m).toMap)
+    .fetchMetas(InstrumentKind.LinearPerp)
+    .fold(e => sys.error(s"fetch symbol metas failed: ${e.message}"), _.map(m => m.instrument -> m).toMap)
 
   def epochMs(d: LocalDate): Long = d.atStartOfDay(ZoneOffset.UTC).toInstant.toEpochMilli
   val startMs = epochMs(start)

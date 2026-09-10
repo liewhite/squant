@@ -20,7 +20,7 @@ class AccountMonitorSpec extends munit.FunSuite:
     private val meta = SymbolMeta(ex, "BTCUSDT", tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
     val placed = ConcurrentLinkedQueue[String]()
     override def exchange: Exchange = ex
-    override def fetchAllSymbolMetas() = Right(Vector(meta))
+    override def fetchMetas(kind: InstrumentKind) = Right(Vector(meta))
     override def placeOrder(order: ExchangeOrder) = { placed.add("placed"): Unit; Right("should-never-happen") }
     override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
     override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)

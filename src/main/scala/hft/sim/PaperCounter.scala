@@ -51,7 +51,7 @@ final class PaperCounter(
     config: SimConfig,
     /** 本所合约规格：影子盘也按交易所精度对齐, 否则它的成交量与实盘系统性地差一个取整，
       * 而它存在的全部理由就是预测实盘。 */
-    metas: Map[Symbol, SymbolMeta],
+    metas: Map[Instrument, SymbolMeta],
     /** 净值刷新间隔：与实盘柜台对齐，让两边的净值同频 */
     equityRefreshMs: Long = 1000,
 ) extends TradingGateway:
@@ -85,8 +85,8 @@ final class PaperCounter(
     event.as(CounterCommands).foreach(cmd => matchNow(cmd.input, now))
     Vector.empty
 
-  override protected def metaOf(symbol: Symbol): SymbolMeta =
-    metas.getOrElse(symbol, sys.error(s"影子柜台没有 $symbol 的合约规格, 无法撮合 (装配时未加载?)"))
+  override protected def metaOf(instrument: Instrument): SymbolMeta =
+    metas.getOrElse(instrument, sys.error(s"影子柜台没有 $instrument 的合约规格, 无法撮合 (装配时未加载?)"))
 
   override protected def placeAligned(order: Order, now: Timestamp): Unit =
     orderIdSeq += 1

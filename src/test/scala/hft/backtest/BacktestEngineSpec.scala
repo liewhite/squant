@@ -15,7 +15,7 @@ import hft.TestUnits.given
 class BacktestEngineSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private val metas = Map((ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.01, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0))
+  private val metas = Map(Instrument.perp(ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.01, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0))
 
   private def bboEv(bid: Price, ask: Price, ts: Timestamp): AnyEvent =
     Event.at(Topics.Bbo, BBO(ex, sym, bid, Coin(1.0), ask, Coin(1.0), ts), ts)

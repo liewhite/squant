@@ -121,7 +121,14 @@ class OkxPublicClient protected[okx] (
 
   // ==================== ExchangeClient ====================
 
-  override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
+  /** OKX 的规格端点按 `instType` 分口。目前只接 U 本位永续 —— 本客户端的响应侧
+    * (fetchPositions / 私有流 / 挂单查询) 也只认它, 见 `perpInstId` 的说明。 */
+  override def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
+    if kind != InstrumentKind.LinearPerp then
+      Left(ExchangeError.Rejected("unsupported", s"OKX 适配层尚未接入 $kind 的规格与响应侧"))
+    else fetchPerpMetas()
+
+  private def fetchPerpMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
     // 合约清单响应大, 与下单路径的时限无关
     publicGet[InstrumentsResp]("/api/v5/public/instruments?instType=SWAP", RestTransport.QueryTimeout).flatMap { resp =>
       ensureOk(resp.code, resp.msg).map { _ =>
@@ -148,9 +155,9 @@ class OkxPublicClient protected[okx] (
 
 
   /** 把交易所回报里的**张数**换回框架统一的币本位。
-    * 规格取自 [[ExchangeClient.symbolMetas]] —— 与行情源、汇报面、柜台读的是同一份。 */
-  protected def metaOf(symbol: Symbol): SymbolMeta =
-    symbolMetas.getOrElse(symbol, sys.error(s"SymbolMeta not found: $exchange $symbol"))
+    * 规格取自 [[ExchangeClient.metaOf]] —— 与行情源、汇报面、柜台读的是同一份。
+    * 本客户端只认 U 本位永续 (见 `perpInstId`), 故按 perp 查表。 */
+  protected def metaOf(symbol: Symbol): SymbolMeta = metaOf(Instrument.perp(Exchange.Okx, symbol))
 
 
   // ==================== 请求基础设施 ====================
@@ -360,7 +367,7 @@ final class OkxClient private[okx] (
         resp.data.iterator.flatMap { d =>
           for
             sym <- fromOkx(d.instId, quote)
-            meta <- symbolMetas.get(sym)
+            meta <- knownMetas.get(Instrument.perp(Exchange.Okx, sym))
           yield Position(
             account = AccountId.Live,
             exchange = Exchange.Okx,

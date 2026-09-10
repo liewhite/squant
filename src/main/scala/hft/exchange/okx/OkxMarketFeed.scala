@@ -37,10 +37,8 @@ final class OkxMarketFeed(
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
   /** symbol -> meta，用于把盘口数量从合约张数换算为币本位 (装上总线时一次性拉取) */
-  private var metas: Map[Symbol, SymbolMeta] = Map.empty
 
   override protected def connect(): Unit =
-    metas = client.symbolMetas // 进程内只拉一次, 与柜台读的是同一份
     WsLoop.run("okx/public", backend, () => wsUrl, outgoing, onPublicText, body => fork(body))
 
   /** 基类已去重，这里收到的都是尚未订阅过的流 */
@@ -80,7 +78,7 @@ final class OkxMarketFeed(
   // OKX bbo-tbt 盘口数量单位为合约张数，统一换算为币本位 (策略层永远看币本位，与 Binance BBO 一致)
   private def publishBbo(instId: String, d: BboData): Unit =
     val sym = requireSymbol(instId)
-    val meta = metas.getOrElse(sym, throw IllegalStateException(s"No SymbolMeta for OKX bbo symbol: $sym"))
+    val meta = client.metaOf(Instrument.perp(Exchange.Okx, sym))
     val ask = d.asks.headOption.getOrElse(throw IllegalStateException(s"OKX bbo empty asks: $instId"))
     val bid = d.bids.headOption.getOrElse(throw IllegalStateException(s"OKX bbo empty bids: $instId"))
     val ts = d.ts.toLong
@@ -108,7 +106,7 @@ final class OkxMarketFeed(
     val ts = d.ts.toLong
     // OKX side = taker 方向: side=sell -> 买方是挂单方 (isBuyerMaker=true)
     val sym = requireSymbol(d.instId)
-    val trade = MarketTrade(Exchange.Okx, sym, d.px.asPrice, metas.getOrElse(sym, throw IllegalStateException(s"No SymbolMeta for OKX trade symbol: $sym")).toCoin(Contracts(d.sz.asDouble)), d.side == "sell", ts)
+    val trade = MarketTrade(Exchange.Okx, sym, d.px.asPrice, client.metaOf(Instrument.perp(Exchange.Okx, sym)).toCoin(Contracts(d.sz.asDouble)), d.side == "sell", ts)
     publish(Event.at(Topics.Trade, trade, ts))
 
   private def publishFunding(d: FundingRateData): Unit =

@@ -33,7 +33,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
   private val meta = SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
-  private val metas = Map[Symbol, SymbolMeta](sym -> meta)
+  private val metas = Map(Instrument.perp(ex, sym) -> meta)
 
   /** 可手动喂行情的假上游行情源。柜台把它装在自己的私有总线上 */
   private class FakeMarketFeed(publishOnConnect: Boolean = false) extends MarketFeed:
@@ -90,7 +90,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     assert(cond, s"等待超时: $what")
 
   /** 装一台虚拟柜台在总线上，交给测试体驱动 */
-  private def withCounter(config: SimConfig, symbolMetas: Map[Symbol, SymbolMeta] = metas)(
+  private def withCounter(config: SimConfig, symbolMetas: Map[Instrument, SymbolMeta] = metas)(
       body: (EventBus, FakeMarketFeed, SimulatedExchange, ConcurrentLinkedQueue[AnyEvent]) => Unit
   ): Unit =
     supervised:
@@ -233,7 +233,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
   test("精度对齐在柜台里发生: 收不下的量不进撮合, 以拒单回流"):
     // 精度是交易所的事实, 影子盘也照此对齐 —— 否则它的成交量与实盘系统性地差一个取整,
     // 而它存在的全部理由就是预测实盘。
-    val coarse = Map[Symbol, SymbolMeta](sym -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = 0.01))
+    val coarse = Map(Instrument.perp(ex, sym) -> SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 1.0, minOrderSize = 1.0, contractSize = 0.01))
     withCounter(TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000), coarse) { (bus, upstream, sim, q) =>
       upstream.emitBbo(50000, 50001, 1)
       bus.publish(limitIntent(Side.Long, 49995.0, TimeInForce.PostOnly, "dust", qty = Coin(0.004))) // 0.4 张 < 1 张

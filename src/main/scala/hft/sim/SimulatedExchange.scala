@@ -75,7 +75,7 @@ final class SimulatedExchange(
     /** 上游真实行情源。装在私有总线上，由本柜台独占 —— 它的输出只经本柜台的延迟通道外流 */
     upstream: MarketFeed,
     /** 本所合约规格：撮合前按交易所精度对齐，与真实柜台同一份判据 */
-    metas: Map[Symbol, SymbolMeta],
+    metas: Map[Instrument, SymbolMeta],
     /** 延迟与费率。**无默认值** —— 费率是交易所+账户的事实, 见 [[SimConfig]] */
     config: SimConfig,
     /** 本柜台服务的账户。作为实盘替身时是 [[AccountId.Live]] (策略对真假无感知)。
@@ -149,8 +149,8 @@ final class SimulatedExchange(
 
   // ==================== 撮合 ====================
 
-  override protected def metaOf(symbol: Symbol): SymbolMeta =
-    metas.getOrElse(symbol, sys.error(s"虚拟柜台没有 $symbol 的合约规格, 无法撮合 (装配时未加载?)"))
+  override protected def metaOf(instrument: Instrument): SymbolMeta =
+    metas.getOrElse(instrument, sys.error(s"虚拟柜台没有 $instrument 的合约规格, 无法撮合 (装配时未加载?)"))
 
   override protected def placeAligned(order: Order, now: Timestamp): Unit =
     orderIdSeq += 1

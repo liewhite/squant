@@ -20,7 +20,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
   private val ex = Exchange.Okx
   private val sym = "ETH"
   private val ccy = "ETH"
-  private val metas = Map((ex, sym) -> SymbolMeta(ex, sym, 0.01, 0.0001, 0.0001, 1.0))
+  private val metas = Map(Instrument.perp(ex, sym) -> SymbolMeta(ex, sym, 0.01, 0.0001, 0.0001, 1.0))
   private val minute = 60_000L
 
   /** 固定阈值的死区 —— 把波动率/方向那两维隔离掉, 单独测触发与定量 */

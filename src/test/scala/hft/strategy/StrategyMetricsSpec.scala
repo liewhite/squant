@@ -20,7 +20,7 @@ class StrategyMetricsSpec extends munit.FunSuite:
   private val sym = "BTCUSDT"
   private val inst = Instrument.perp(ex, sym)
   private val meta = SymbolMeta(ex, sym, 0.1, 0.001, 0.001, 1.0)
-  private val metas = Map((ex, sym) -> meta)
+  private val metas = Map(Instrument.perp(ex, sym) -> meta)
 
   /** 用户域的指标事件 —— 框架对它一无所知 */
   final case class Spread(instrument: Instrument, bps: Double)

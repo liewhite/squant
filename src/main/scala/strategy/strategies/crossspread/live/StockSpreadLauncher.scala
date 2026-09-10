@@ -1,5 +1,6 @@
 package strategy.strategies.crossspread.live
 
+import hft.domain.InstrumentKind
 import hft.dashboard.DashboardActor
 import hft.domain.{Exchange, ExchangeError, Instrument, Symbol}
 import hft.engine.Engine
@@ -69,7 +70,8 @@ private def tickerOf(listings: Map[Exchange, Map[Ticker, Symbol]]): Instrument =
     // 故它只按代码加入前两者给出的候选 (判据与最终防线见 CrossVenueUniverse / PairRejection)
     val binanceTradFi = orExit("取币安传统资产永续清单")(binance.fetchTradFiPerps())
     val hyperliquidStocks = orExit(s"取 Hyperliquid ${HyperliquidClient.StockDex} dex 清单")(hyperliquid.listedSymbols())
-    val okxSwaps = okx.symbolMetas.keySet // 拉不到即抛, 装配期失败好过带着半个宇宙上线
+    // 拉不到即抛, 装配期失败好过带着半个宇宙上线
+    val okxSwaps = orExit("取 OKX 永续合约规格")(okx.fetchMetas(InstrumentKind.LinearPerp)).map(_.symbol).toSet
 
     val candidates = (binanceTradFi.keySet ++ hyperliquidStocks).filter(t => whitelist.isEmpty || whitelist(t))
     val listings: Map[Exchange, Map[Ticker, Symbol]] = Map(

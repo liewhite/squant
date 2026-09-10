@@ -114,7 +114,7 @@ class EngineContractSpec extends munit.FunSuite:
     override def account: AccountId = acct
     override protected def accountRefreshMs: Long = 100_000 // 别让周期刷新干扰断言
     override protected def connect(): Unit = ()
-    override protected def metaOf(symbol: Symbol): SymbolMeta = meta
+    override protected def metaOf(instrument: Instrument): SymbolMeta = meta
     override protected def placeAligned(order: Order, now: Timestamp): Unit = log.add(s"place:${order.symbol}"): Unit
     override protected def cancelOrder(instrument: Instrument, ref: OrderRef, now: Timestamp): Unit = ()
     override protected def syncSnapshot(instruments: Set[Instrument]): TradingGateway.AccountSnapshot =

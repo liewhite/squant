@@ -89,7 +89,7 @@ private def envChoice[A](name: String, default: String, choices: Map[String, A])
   val tenorWeeks = math.max(1, math.round(tenorDays / 7.0).toInt) // 7d -> 1 周
 
   val meta = SymbolMeta(Exchange.Binance, symbol, tickSize = 0.01, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
-  val symbolMetas = Map((Exchange.Binance, symbol) -> meta)
+  val symbolMetas = Map(meta.instrument -> meta)
   // 仓位: 波动下降(iv<ivPrev)→gridLow, 上升→gridHigh; StepGrid(up=低,down=高)
   val sizePolicy = WeeklyIvGrid.StepGrid(up = gridLow, down = gridHigh)
   // 对冲带: ma=MA20 不对称(顺势紧逆势松) | sym=对称(上下均 tightAtr×ATR, 无方向, iv=rv 应盈亏平衡的基准)

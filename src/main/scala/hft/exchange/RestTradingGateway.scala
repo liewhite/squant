@@ -18,14 +18,13 @@ import org.slf4j.LoggerFactory
   * @param client       私有 REST。**拿得到这个类型本身就意味着凭证已具备**
   * @param feed         私有推送流
   * @param account      本柜台服务的账户
-  * @param metas        本所合约规格。装配期一次性加载 —— 缺一个标的的规格就发不出它的单，
-  *                     与其在首笔下单时炸，不如启动时就失败
+  * 合约规格不再由构造方传入一份快照，而是问 `client` 要（见 [[ExchangeClient.metaOf]]）：
+  * 表在运行中可以增量补充（期权链每周滚动），拷贝一份就意味着柜台看到的是启动那一刻的旧表。
   */
 final class RestTradingGateway(
     client: TradingClient,
     feed: AccountFeed,
     override val account: AccountId,
-    metas: Map[Symbol, SymbolMeta],
     override protected val accountRefreshMs: Long = 10_000,
 ) extends TradingGateway:
   require(
@@ -49,6 +48,14 @@ final class RestTradingGateway(
   /** 汇报面解析出的每一条都排进本柜台的邮箱 (不经总线)，由 actor 线程按序消费 ——
     * 于是"柜台是回报的唯一发布者"成立，账本也只有一个写者。 */
   override protected def connect(): Unit =
+    // 启动即加载本所的基础品种规格。柜台一装上就该能发永续单 —— 那是它此前的行为
+    // (规格由构造方在装配期传入一份), 不该因为"规格改成按需加载"而悄悄变成"对齐之后才能发单"。
+    //
+    // 其它品种 (期权等) 由启动对齐按需补齐: 那时才知道要交易哪些标的, 而期权链每周滚动,
+    // 启动时也拉不到"下周才上市的合约"。见 syncSnapshot 的 ensureMetas。
+    client.loadMetas(InstrumentKind.LinearPerp) match
+      case Right(n) => logger.info(s"$target 加载永续合约规格 $n 条")
+      case Left(e)  => throw IllegalStateException(s"$target 加载永续合约规格失败: ${e.message}")
     feed.connect(
       report => tell(Event.local(GatewayInboxes, GatewayInbox(report))),
       body => fork(body),
@@ -171,11 +178,22 @@ final class RestTradingGateway(
     * 而这个分支本就该不可达 —— [[syncSnapshot]] 在对齐入口挡过了。
     */
   private def dustOf(instrument: Instrument): Double =
-    val meta = metaOf(instrument.symbol)
+    val meta = metaOf(instrument)
     meta.toCoin(Contracts(meta.sizeStep)).value / 2
 
-  override protected def metaOf(symbol: Symbol): SymbolMeta =
-    metas.getOrElse(symbol, sys.error(s"$exchange 没有 $symbol 的合约规格, 无法发单 (装配时未加载?)"))
+  override protected def metaOf(instrument: Instrument): SymbolMeta = client.metaOf(instrument)
+
+  /** 把这批标的缺的品种各拉一次规格。已有的品种不再拉 —— 幂等且不白打 REST。
+    *
+    * 拉不到就抛: 规格拉不到 = 这批标的发不出单, 而对齐的契约本来就是"任何一步失败都终止,
+    * 账户状态没对上就开始交易比不启动危险得多"。 */
+  private def ensureMetas(instruments: Set[Instrument]): Unit =
+    val known = client.knownMetas
+    instruments.filterNot(known.contains).map(_.kind).foreach { kind =>
+      client.loadMetas(kind) match
+        case Right(n) => logger.info(s"$target 加载 $kind 合约规格 $n 条")
+        case Left(e)  => throw IllegalStateException(s"$target 加载 $kind 合约规格失败: ${e.message}")
+    }
 
   /** 每个 REST 调用 fork 独立虚拟线程，互不阻塞，也不阻塞柜台的事件循环。
     *
@@ -194,7 +212,7 @@ final class RestTradingGateway(
     */
   override protected def placeAligned(order: Order, now: Timestamp): Unit =
     fork {
-      client.placeOrder(OrderConversion.toExchangeOrder(order, metaOf(order.symbol))) match
+      client.placeOrder(OrderConversion.toExchangeOrder(order, metaOf(order.instrument))) match
         case Right(orderId) =>
           // 订单确认 (Pending/Filled) 以私有流推送为准，这里只记录
           logger.info(s"下单已受理: $exchange ${order.symbol} orderId=$orderId clientOrderId=${order.clientOrderId}")
@@ -232,9 +250,16 @@ final class RestTradingGateway(
     * 没有成交发生。静默标的一次就收敛。
     */
   override protected def syncSnapshot(instruments: Set[Instrument]): TradingGateway.AccountSnapshot =
-    // 先确认这批标的都有合约规格。对齐是它们进入本柜台视野的**唯一入口**，
-    // 在这里挡住, 后面的 dustOf / metaOf 就都落在"必然有规格"的前提上 (缺失即抛)。
-    instruments.foreach(i => metaOf(i.symbol))
+    // 两步, 顺序有意义:
+    //   1. 缺哪个品种的规格就把那个品种拉一次 —— 冷路径上的一次显式网络往返, 与下面的
+    //      fetchPositions / fetchOrders 并列。放在这里而不是让 metaOf 自己去拉: 那是热路径
+    //      (每条回报都要拿规格把张换回币), 藏一次网络往返进查表方法里迟早咬人。
+    //   2. 拉完仍缺 -> 抛。此时"交易所没有这个合约"是唯一的解释, 而不是"忘了加载"。
+    //
+    // 对齐是标的进入本柜台视野的**唯一入口**, 所以"记得先加载规格"不是一条要靠人记住的约定;
+    // 后面的 dustOf / metaOf 也就都落在"必然有规格"的前提上。
+    ensureMetas(instruments)
+    instruments.foreach(metaOf)
     val (positions, orders) = consistentSnapshot(instruments, attempt = 1)
     val mine = positions.filter(p => instruments.contains(p.instrument)).map(_.copy(account = account))
     book.align(instruments, mine, orders, nowMs)
@@ -297,10 +322,8 @@ object RestTradingGateway:
     * 交给三方对账兜底 —— 比无限重试卡住启动强。 */
   val SnapshotAttempts: Int = 3
 
-  /** 装好柜台，合约规格取自客户端 (见 [[ExchangeClient.symbolMetas]]，进程内只拉一次)。
-    *
-    * 规格在**装配期**加载并且失败即终止：缺一个标的的规格就发不出它的单，
-    * 与其在首笔下单时才炸，不如启动时就说清楚。
+  /** 装好柜台。合约规格由柜台在启动对齐入口按需加载 (见 [[RestTradingGateway.syncSnapshot]])，
+    * 不在这里预拉 —— 那时还不知道要交易哪些标的，而"拉哪个品种"取决于它们。
     */
   def load(
       client: TradingClient,
@@ -308,4 +331,4 @@ object RestTradingGateway:
       account: AccountId,
       accountRefreshMs: Long = 10_000,
   ): RestTradingGateway =
-    RestTradingGateway(client, feed, account, client.symbolMetas, accountRefreshMs)
+    RestTradingGateway(client, feed, account, accountRefreshMs)
