@@ -309,7 +309,7 @@ final case class FundingRate(
   /** 基于指定时间基准的日化费率。
     *
     * 它公开的理由曾是"跨交易所用统一基准公平比较"，而那个消费者
-    * (`SymbolView.bestShort/bestLongExchange`) 已随无人使用一并删除。现在只剩
+    * (当时 `SymbolView` 上的 `bestShort/bestLongExchange`) 已随无人使用一并删除。现在只剩
     * [[dailyRate]] 一个调用方，故收成私有 —— 一个没有消费者的公开参数化入口，
     * 只会让读者以为存在"另一种基准"的用法。 */
   private def dailyRateWithBaseTime(baseSettleTime: Timestamp, currentTime: Timestamp): Rate =

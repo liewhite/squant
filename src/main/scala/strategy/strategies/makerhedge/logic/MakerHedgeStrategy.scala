@@ -47,6 +47,8 @@ final class MakerHedgeStrategy(
     history: (Long, Int) => Either[String, Seq[(Double, Double, Double)]] =
       (_, _) => Left("没有接预热数据源"),
 ) extends Strategy:
+  /** 本策略交易的标的 —— 状态查询与行情声明的同一个键 */
+  private val instrument = Instrument(exchange, symbol)
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[MakerHedgeStrategy])
   private var warnCnt = 0L
   private def warnThrottled(msg: String): Unit =
@@ -110,7 +112,7 @@ final class MakerHedgeStrategy(
       leg.onOrderUpdate(u, now).foreach(px => center = px.value) // 对冲成交 -> 中心重置到成交价
       Vector.empty
     }
-    .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, now) =>
+    .market(Topics.Bbo, instrument) { (b, ctx, now) =>
       val px = b.midPrice.value
       klines.update(b.timestamp, px)
       if center.isNaN then center = px
@@ -122,7 +124,7 @@ final class MakerHedgeStrategy(
     .account(Topics.Greeks) { (g, ctx, now) =>
       if g.ccy != ccy then Vector.empty
       else
-        ctx.state.symbolState(symbol).flatMap(_.bbo(exchange)).map { b =>
+        ctx.state.instrumentState(instrument).flatMap(_.bbo).map { b =>
           greeksRefMid = b.midPrice.value // 记录本次 greeks 对应的现价, 供 gamma 修正
           manage(b, now, ctx) // 同上: 本地钟
         }.getOrElse(Vector.empty)
@@ -167,7 +169,7 @@ final class MakerHedgeStrategy(
                     s"center=${if center.isNaN then "预热中" else center.toString}); 预热需 ${atrPeriodBars} 根 ${barIntervalMs}ms K 线"
                 )
               (for
-                ss <- ctx.state.symbolState(symbol)
+                ss <- ctx.state.instrumentState(instrument)
                 atr <- klines.atr
                 if atr > 0.0 && !center.isNaN
               yield
@@ -185,7 +187,7 @@ final class MakerHedgeStrategy(
                 else
                   // gamma 一阶修正: 两次 greeks 间用现价相对基准价刷新 delta (tick 级)
                   val gammaAdj = if gammaAdjust && !greeksRefMid.isNaN then greeks.gamma * (px - greeksRefMid) else 0.0
-                  val netDelta = greeks.delta + gammaAdj + ss.positionSize(exchange).value
+                  val netDelta = greeks.delta + gammaAdj + ss.positionSize.value
                   val qty = math.abs(netDelta)
                   if qty < minHedgeQty.value then Vector.empty
                   else if qty > maxHedgeQty.value then

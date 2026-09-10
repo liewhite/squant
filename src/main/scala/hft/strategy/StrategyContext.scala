@@ -45,7 +45,7 @@ final class StrategyContext private[hft] (
       *
       * `None` 的含义是**这条回报没有本策略的标注**，四种情形：非回报事件；下单时没标注；
       * 重启后从交易所接管的既有挂单 (标注是上一个进程内存里的事实，见 [[hft.domain.Order.tag]])；
-      * 以及回报本身没带 clientOrderId (那压根不是本策略发的单，见 [[hft.state.SymbolState]])。
+      * 以及回报本身没带 clientOrderId (那压根不是本策略发的单，见 [[hft.state.InstrumentState]])。
       * 它们在决策上是同一件事 ——"按标注分派"这一支走不了 —— 所以不细分。
       *
       * **不要指望用 `state` 去细分它们**：处理器看到的状态已经应用过本次事件，而订单进终态时
@@ -89,9 +89,9 @@ final class StrategyContext private[hft] (
 
   /** 撤销本策略已登记的挂单。撤单终态以私有流推送为准，框架不合成确认事件。 */
   def cancel(exchange: Exchange, symbol: Symbol, ref: OrderRef): AnyEvent =
-    val owned = state.symbolState(symbol).exists(_.pendingOrders.exists { pending =>
+    val owned = state.instrumentState(Instrument(exchange, symbol)).exists(_.pendingOrders.exists { pending =>
       val order = pending.order
-      order.exchange == exchange && (ref match
+      (ref match
         case OrderRef.ByExchangeId(id) => id.nonEmpty && order.id == id
         case OrderRef.ByClientId(id)   => id.nonEmpty && order.clientOrderId == id
       )

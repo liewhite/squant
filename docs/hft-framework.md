@@ -272,7 +272,7 @@ def handlers = StrategyHandlers.empty
 | 给策略的 | 是什么 |
 |---|---|
 | `Strategy` / `StrategyHandlers` / `StrategyContext` | 实现契约与能力面 |
-| `StateView` / `SymbolView` | **只读**状态视图 |
+| `StateView` / `InstrumentView` | **只读**状态视图 |
 | `Topics` / `AnyEvent` | 订阅与产出事件 |
 | `domain` / `indicator` / `option` | 纯数据与纯计算 |
 
@@ -280,8 +280,8 @@ def handlers = StrategyHandlers.empty
 
 - `StateManager.apply`（事件应用）与 `addPendingOrder`（挂单登记）—— 这两件事框架在固定
   位置做，策略插一脚的后果是"同一条事件重复计入仓位"和"登记一条无主挂单"，都没有外在症状。
-- `SymbolState` 的可变集合 —— 从前它们是 `public val mutable.Map`，策略能 `positions.clear()`
-  或往 `bbos` 里塞假行情。现在 `SymbolView` 上根本没有这些成员。
+- `InstrumentState` 的可变读数 —— 从前它们是 `public val mutable.Map`，策略能 `positions.clear()`
+  或往 `bbos` 里塞假行情。现在 `InstrumentView` 上根本没有这些成员。
 - `AccountOutcome` 的构造器（`private[hft]`）—— 策略拼不出下单意图，因此绕不过
   `ctx.place` 的 clientOrderId 生成 / pending 登记 / 精度换算，也冒充不了别的账户。
 - 账户值本身 —— `ctx` 能用它构造下单意图，读不到它是哪个账户，所以策略里写不出依赖
@@ -312,7 +312,7 @@ def handlers = StrategyHandlers.empty
 | `domain` | 纯数据模型: Order/Position/BBO/FundingRate/SymbolMeta 等，零行为依赖 |
 | `event` | `Topic`/`Event`/`Interest`/`Subscription`/`EventBus` — 事件与投递的全部基础设施 |
 | `actor` | `ActorSystem`（事务协调）、`ActorRuntime`（运行身份）、`ComponentGraph`（依赖图）、`MailboxMonitor`（健康监督） |
-| `state` | `SymbolState`/`StateManager` (策略视角的聚合状态) |
+| `state` | `InstrumentState`/`StateManager` (策略视角的聚合状态，按标的索引) |
 | `event` (指令面) | `Commands` — 行情订阅 / 账户对齐 / 下单撤单三条指令及其载荷 |
 | `exchange` | 插件形态 `MarketFeed` / `TradingGateway` / `RestTradingGateway` / `AccountFeed`；传输层 `ExchangeClient` / `TradingClient`；`WsLoop` (通用连接泵) |
 | `engine` | `Engine`（应用门面）、`StrategySession`（租约 + 对齐 + 所有权）、`Executor`（策略驱动）、`StrategyRunner`（纯逻辑）、`Clock` |

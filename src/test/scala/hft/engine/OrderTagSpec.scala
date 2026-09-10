@@ -74,7 +74,7 @@ class OrderTagSpec extends munit.FunSuite:
     assertEquals(strategy.seen.toVector, Vector(OrderStatus.Pending -> Some("entry")))
 
   test("**终态**回报仍带标注 —— 挂单登记此刻已被移除, 这正是要害"):
-    // 终态时 SymbolState 会把这张单从挂单登记里删掉, 而策略恰恰在终态里做事 (结算、重挂、
+    // 终态时 InstrumentState 会把这张单从挂单登记里删掉, 而策略恰恰在终态里做事 (结算、重挂、
     // 平腿)。取标注若发生在应用事件之后, 这里拿到的就是 None —— 没有报错, 只是策略从此
     // 认不出自己的单。顺序封在 StrategyRunner.observe 里, 本用例钉住它。
     val strategy = TaggingStrategy(Vector(order("entry")))
@@ -84,7 +84,7 @@ class OrderTagSpec extends munit.FunSuite:
     runner.onEvent(updateOf(id, OrderStatus.Filled), now = 2L)
     assertEquals(strategy.seen.toVector, Vector(OrderStatus.Filled -> Some("entry")))
     assert(
-      runner.state.symbolState(symbol).exists(_.pendingOrders.isEmpty),
+      runner.state.instrumentState(instrument).exists(_.pendingOrders.isEmpty),
       "终态之后挂单登记应已清空 —— 标注是在清空之前取出的",
     )
 

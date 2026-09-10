@@ -1,7 +1,7 @@
 package hft.state
 
 import hft.domain.*
-import hft.state.{StateManager, SymbolState}
+import hft.state.{InstrumentState, StateManager}
 import hft.event.{Event, Topics}
 import hft.TestUnits.given
 
@@ -36,17 +36,17 @@ class StateManagerSpec extends munit.FunSuite:
     assertEquals(state.equity(Exchange.Binance), Some(5000.0))
     assertEquals(state.totalEquity, 5000.0)
 
-  test("symbol 事件路由到对应 SymbolState"):
+  test("标的事件路由到对应 InstrumentState"):
     val state = StateManager(List(Instrument(Exchange.Binance, "BTCUSDT"), Instrument(Exchange.Binance, "ETHUSDT")), orderTimeoutMs = 5000)
     val bbo = BBO(Exchange.Binance, "ETHUSDT", 1600.0, Coin(1.0), 1600.1, Coin(1.0), t0)
     state.apply(Event.at(Topics.Bbo, bbo, t0))
-    assertEquals(state.symbolState("ETHUSDT").flatMap(_.bbo(Exchange.Binance)), Some(bbo))
-    assertEquals(state.symbolState("BTCUSDT").flatMap(_.bbo(Exchange.Binance)), None)
+    assertEquals(state.instrumentState(Instrument(Exchange.Binance, "ETHUSDT")).flatMap(_.bbo), Some(bbo))
+    assertEquals(state.instrumentState(Instrument(Exchange.Binance, "BTCUSDT")).flatMap(_.bbo), None)
 
   test("Clock 事件驱动超时校验: 超时未确认订单 -> 抛错终止"):
     val state = StateManager(List(Instrument(Exchange.Binance, "BTCUSDT")), orderTimeoutMs = 5000)
     state.addPendingOrder(newOrder("BTCUSDT", "c1"), t0) // createdAt = t0
-    assert(state.hasPendingOrders("BTCUSDT"))
+    assert(state.hasPendingOrders(Instrument(Exchange.Binance, "BTCUSDT")))
     // 未超时不抛
     state.apply(Event.stamped(Topics.Clock, (), 0, t0 + 1000))
     // localTs 远超 createdAt + timeout -> 结果不确定，终止
@@ -61,7 +61,7 @@ class StateManagerSpec extends munit.FunSuite:
     }
 
   test("未订阅标的的事件只可能是路由 bug -> 抛错终止"):
-    // 归属校验在 StateManager (按 Instrument 定位 SymbolState)，不在 SymbolState:
+    // 归属校验在 StateManager (按 Instrument 定位 InstrumentState)，不在 InstrumentState:
     // 路由键由载荷派生，事件到了这里 symbol 必然已注册，找不到就是路由坏了。
     val state = StateManager(Set(Instrument(Exchange.Binance, "BTCUSDT")), orderTimeoutMs = 0L)
     val other = BBO(Exchange.Binance, "ETHUSDT", 1.0, Coin(1.0), 2.0, Coin(1.0), t0)
@@ -69,7 +69,7 @@ class StateManagerSpec extends munit.FunSuite:
       state.apply(Event.at(Topics.Bbo, other, t0))
     }
 
-  test("私有回报按 AccountInstrument 路由, 仍要落到对应的 SymbolState"):
+  test("私有回报按 AccountInstrument 路由, 仍要落到对应的 InstrumentState"):
     // 回归防线: 私有回报的 key 从 Instrument 换成 AccountInstrument 时, 这里的定位逻辑
     // 一度没跟上 —— `case _: Instrument` 对新 key 永不匹配, 于是成交被静默忽略、
     // 仓位不更新、挂单拿不到交易所 id。300+ 个测试里只有一个间接路径抓到了它。
@@ -77,7 +77,7 @@ class StateManagerSpec extends munit.FunSuite:
     val ex = Exchange.Binance
 
     state.apply(Event.local(Topics.Position, Position(AccountId.Live, ex, "BTCUSDT", Coin(2.0))))
-    assertEqualsDouble(state.symbolState("BTCUSDT").get.positionSize(ex).value, 2.0, 1e-12, "仓位快照必须落到 SymbolState")
+    assertEqualsDouble(state.instrumentState(Instrument(ex, "BTCUSDT")).get.positionSize.value, 2.0, 1e-12, "仓位快照必须落到 InstrumentState")
 
     val order = Order("", ex, "BTCUSDT", Side.Long, OrderType.Limit(99.0, TimeInForce.GTC), 1.0, reduceOnly = false, clientOrderId = "c1")
     state.addPendingOrder(order, t0)
@@ -86,16 +86,16 @@ class StateManagerSpec extends munit.FunSuite:
       OrderUpdate(AccountId.Live, "EX-9", Some("c1"), ex, "BTCUSDT", Side.Long, OrderStatus.Pending, 99.0, Coin(1.0), Coin(0.0), reduceOnly = false, t0),
     ))
     assertEquals(
-      state.symbolState("BTCUSDT").get.pendingOrders.head.order.id,
+      state.instrumentState(Instrument(ex, "BTCUSDT")).get.pendingOrders.head.order.id,
       "EX-9",
       "OrderUpdate 必须回填交易所 id —— 否则停机收尾撤不掉这张单",
     )
 
-  test("行情仍按 Instrument 路由 (无账户维度), 同样要落到 SymbolState"):
+  test("行情仍按 Instrument 路由 (无账户维度), 同样要落到 InstrumentState"):
     val state = StateManager(Set(Instrument(Exchange.Binance, "BTCUSDT")), orderTimeoutMs = 0L)
     val ex = Exchange.Binance
     state.apply(Event.at(Topics.Bbo, BBO(ex, "BTCUSDT", 100.0, Coin(1.0), 100.1, Coin(1.0), t0), t0))
-    assertEquals(state.symbolState("BTCUSDT").flatMap(_.bbo(ex)).map(_.bidPrice.value), Some(100.0))
+    assertEquals(state.instrumentState(Instrument(ex, "BTCUSDT")).flatMap(_.bbo).map(_.bidPrice.value), Some(100.0))
 
   test("钱包快照到达前, greeks 返回 None —— 而不是把'没见过该币'当成 0"):
     // 期权 delta 对冲要 `期权 delta + 该币现金余额` 才是总敞口。缺余额只能暂停对冲,

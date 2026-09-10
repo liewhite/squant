@@ -65,7 +65,7 @@ final class StrategyRunner private (
     * 在等着被分派。
     *
     * **取标注与应用事件的顺序是承重的**，所以两件事收在这一个方法里：订单进终态时挂单
-    * 登记会被移除 (见 [[hft.state.SymbolState]])，先应用再取就只剩 `None`。拆成两步交给
+    * 登记会被移除 (见 [[hft.state.InstrumentState]])，先应用再取就只剩 `None`。拆成两步交给
     * 调用方按顺序写，写反的症状是"标注恒为 None" —— 没有报错、没有异常，只是策略从此
     * 认不出自己的单。
     */
@@ -132,7 +132,7 @@ object StrategyRunner:
     *   1. 所声明标的的持仓与订单回报 (见 [[Topics.essentialPrivate]]；
     *      **成交明细不补** —— 仓位归柜台算之后策略不再非它不可，要就自己声明)；
     *   2. 所涉交易所的账户级读数 (余额 / 净值 / 希腊值)；
-    *   3. 时钟 (驱动 [[hft.state.SymbolState.failOnTimedOutOrders]])。
+    *   3. 时钟 (驱动 [[hft.state.InstrumentState.failOnTimedOutOrders]])。
     *
     * 账户级读数按**交易所**补齐而不是全收：策略读不到自己没订阅的交易所的净值，
     * 而杠杆闸门正是拿净值算的。

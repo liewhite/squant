@@ -88,6 +88,8 @@ final class DeltaHedgeStrategy(
     history: (Long, Int) => Either[String, Seq[(Double, Double, Double)]] =
       (_, _) => Left("没有接预热数据源"),
 ) extends Strategy:
+  /** 本策略交易的标的 —— 状态查询与行情声明的同一个键 */
+  private val instrument = Instrument(exchange, symbol)
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[DeltaHedgeStrategy])
   /** **按类别**分别节流：共用一个计数器的话，一条高频告警会把另一条低频但更重要的
     * (如"敞口陈旧") 淹没到 1/200 采样，而那条恰恰是需要立刻看到的。 */
@@ -169,7 +171,7 @@ final class DeltaHedgeStrategy(
       leg.onOrderUpdate(u, now) // 成交价对敞口轴判据没有意义 (判据是敞口本身), 故不用它重置任何东西
       Vector.empty
     }
-    .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, now) =>
+    .market(Topics.Bbo, instrument) { (b, ctx, now) =>
       macdKlines.update(b.timestamp, b.midPrice.value)
       fastKlines.update(b.timestamp, b.midPrice.value) // ER 逐笔即时更新, 无"一根 bar 内冻结"的盲区
       manage(b, now, ctx)
@@ -179,7 +181,7 @@ final class DeltaHedgeStrategy(
       if e.ccy != ccy then Vector.empty
       else
         exposure = Some(e)
-        ctx.state.symbolState(symbol).flatMap(_.bbo(exchange)).map(manage(_, now, ctx)).getOrElse {
+        ctx.state.instrumentState(instrument).flatMap(_.bbo).map(manage(_, now, ctx)).getOrElse {
           warnThrottled("盘口未就绪", "盘口未就绪 -> 本次敞口更新不对冲 (检查永续 BBO 订阅)")
           Vector.empty
         }
@@ -229,9 +231,9 @@ final class DeltaHedgeStrategy(
         warnThrottled("敞口陈旧", s"敞口读数陈旧 ${localNow - e.timestamp}ms > ${maxExposureStaleMs}ms -> 暂停对冲 (宁可不动也不按过期 delta 乱挂)")
         Vector.empty
       case Some(e) =>
-        (for ss <- ctx.state.symbolState(symbol)
+        (for ss <- ctx.state.instrumentState(instrument)
         yield
-          val perp = ss.positionSize(exchange)          // 自己的对冲仓位
+          val perp = ss.positionSize          // 自己的对冲仓位
           val net = e.delta + perp                       // 真实净敞口 —— 判据与下单量的唯一依据
           // 方向只取**符号**: 方向判断比强度判断可靠, 用强度还要再拍一组映射, 没有依据
           val driftDir = macdKlines.macdDirection        // 预热不足 = 0 -> 死区对称, 不猜方向

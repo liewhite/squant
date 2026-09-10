@@ -38,6 +38,8 @@ final class BandHedgeStrategy(
     barIntervalMs: Long = 3_600_000L,
     minHedgeQty: Coin = Coin(0.001),
 ) extends Strategy:
+  /** 本策略交易的标的 —— 状态查询与行情声明的同一个键 */
+  private val instrument = Instrument(exchange, symbol)
 
   private val klines =
     new KlineSeries(barIntervalMs, math.max(math.max(atrPeriodBars * 4, rvLongWindowBars + 8), 64))
@@ -51,7 +53,7 @@ final class BandHedgeStrategy(
   private var center: Double = Double.NaN
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
-    .market(Topics.Bbo, Instrument(exchange, symbol)) { (b, ctx, _) =>
+    .market(Topics.Bbo, instrument) { (b, ctx, _) =>
       val px = b.midPrice.value
       klines.update(b.timestamp, px)
       if center.isNaN then center = px
@@ -60,12 +62,12 @@ final class BandHedgeStrategy(
     // greeks 的路由键只到交易所，币种在载荷里，故 ccy 仍需自行判断
     .account(Topics.Greeks) { (g, ctx, _) =>
       if g.ccy != ccy then Vector.empty
-      else ctx.state.symbolState(symbol).flatMap(_.bbo(exchange)).map(b => hedge(b.midPrice.value, ctx)).getOrElse(Vector.empty)
+      else ctx.state.instrumentState(instrument).flatMap(_.bbo).map(b => hedge(b.midPrice.value, ctx)).getOrElse(Vector.empty)
     }
 
   private def hedge(px: Double, ctx: StrategyContext): Vector[AnyEvent] =
     (for
-      symbolState <- ctx.state.symbolState(symbol)
+      instrumentState <- ctx.state.instrumentState(instrument)
       greeks <- ctx.state.greeks(exchange, ccy) // greeks 与 cashBal 均到达才动作
       atr <- klines.atr                     // ATR 未预热 -> 不动作 (gating)
       if atr > 0.0 && !center.isNaN
@@ -77,7 +79,7 @@ final class BandHedgeStrategy(
       val crossed = (px - center > upBand) || (center - px > downBand)
       if !crossed then Vector.empty
       else
-        val netDelta = greeks.delta + symbolState.positionSize(exchange).value // 同为币本位敞口, 解包比较
+        val netDelta = greeks.delta + instrumentState.positionSize.value // 同为币本位敞口, 解包比较
         val qty = Coin(math.abs(netDelta))
         if qty < minHedgeQty then Vector.empty
         else

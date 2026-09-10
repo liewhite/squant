@@ -75,14 +75,27 @@ final class CrossArbStrategy(
 
   private def quoteOf(instrument: Instrument, ctx: StrategyContext): Option[ArbPlan.LegQuote] =
     for
-      state <- ctx.state.symbolState(instrument.symbol)
-      bbo <- state.bbo(instrument.exchange)
+      state <- ctx.state.instrumentState(instrument)
+      bbo <- state.bbo
       if bbo.bidPrice.value > 0 && bbo.askPrice.value > 0
     yield ArbPlan.LegQuote(instrument, bbo.bidPrice, bbo.askPrice)
 
-  /** 某条腿的当前仓位 —— **框架的账本**, 不是策略自己记的。 */
+  /** 某条腿的当前仓位 —— **框架的账本**, 不是策略自己记的。
+    *
+    * **取不到状态就抛**, 不退回零仓: 状态只覆盖本策略声明过的标的, 取不到只意味着问错了
+    * 标的 (信号里带了一条不属于本实例的腿)。那种情况下的 0 不是"空仓"而是"没这个东西",
+    * 拿它去算配平会得出"两腿已配平"并放行开仓 —— 在一条根本没在跟踪的腿上。
+    *
+    * 从前这道守卫在框架里 (状态按交易对索引, `positionSize(exchange)` 对未声明的交易所抛),
+    * 现在状态按标的索引、取不到就是 `None`, 于是判据落到调用方这一侧。正常路径够不到它:
+    * [[ArbPlan.plan]] 先校验腿属于本实例再读仓位。 */
   private def positionOf(instrument: Instrument, ctx: StrategyContext): Coin =
-    ctx.state.symbolState(instrument.symbol).map(_.positionSize(instrument.exchange)).getOrElse(Coin.Zero)
+    ctx.state
+      .instrumentState(instrument)
+      .map(_.positionSize)
+      .getOrElse(
+        sys.error(s"[对敲 $ticker] $instrument 不在本策略的订阅范围内 —— 读到的 0 不是空仓, 是问错了标的")
+      )
 
   private def onSignal(signal: SpreadDislocation, ctx: StrategyContext) =
     ArbPlan.plan(

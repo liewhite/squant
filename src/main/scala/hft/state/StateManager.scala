@@ -10,13 +10,13 @@ import scala.collection.mutable
   * 可变状态，仅在所属 Executor 的虚拟线程内访问，无需同步。
   */
 final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long) extends StateView:
-  /** 每个标的一份状态，并把**它声明过的交易所**一起带下去。
+  /** 每个标的一份状态。
     *
-    * 从前这里只收 `symbols`，`Instrument` 的 exchange 维度在状态层被丢掉了 —— 于是
-    * "从未声明、从未对齐的交易所"与"已对齐的空仓"读数完全相同 (都是 0)，跨所策略问错
-    * 一个交易所会静默拿到零仓。声明集合是一个事实，不该在这一层只剩一半。 */
-  private val states: Map[Symbol, SymbolState] =
-    instruments.groupMap(_.symbol)(_.exchange).map((sym, exs) => sym -> SymbolState(sym, exs.toSet)).toMap
+    * 键就是 [[Instrument]] 本身 —— 从前按 `Symbol` 索引、把 exchange 挤进每个读数的
+    * `Map[Exchange, _]` 里，于是"从未声明因而从未对齐的交易所"与"已对齐的空仓"读数完全
+    * 相同 (都是 0)，只能靠一道运行时守卫挡着。现在没订阅的标的直接取不到状态。 */
+  private val states: Map[Instrument, InstrumentState] =
+    instruments.map(i => i -> InstrumentState(i)).toMap
   private val balances: mutable.Map[Exchange, Double] = mutable.Map.empty
   private val accountInfos: mutable.Map[Exchange, AccountInfo] = mutable.Map.empty
   /** 原始账户级希腊字母 (按 (交易所, 币种) 索引)，delta 未含现货修正 */
@@ -38,16 +38,17 @@ final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long
 
   /** 添加 pending order (由 StrategyRunner 调用，clientOrderId 已生成)。
     * `now` 为当前处理时刻 (回测虚拟时间 / 实盘墙钟)，作为 createdAt 超时检测基准。
-    * symbol 不在订阅范围内时抛异常 (表示策略配置错误，应立即暴露)
+    * 标的不在订阅范围内时抛异常 (表示策略配置错误，应立即暴露)
     */
   def addPendingOrder(order: Order, now: Timestamp): Unit =
+    val instrument = Instrument(order.exchange, order.symbol)
     states
-      .getOrElse(order.symbol, sys.error(s"Symbol not found in StateManager: ${order.symbol}"))
+      .getOrElse(instrument, sys.error(s"Instrument not found in StateManager: $instrument"))
       .addPendingOrder(order, now)
 
   // ==================== 状态查询 ====================
 
-  def symbolState(symbol: Symbol): Option[SymbolState] = states.get(symbol)
+  def instrumentState(instrument: Instrument): Option[InstrumentState] = states.get(instrument)
 
   /** USDT 余额，None 表示该交易所数据尚未到达 */
   def usdtBalance(exchange: Exchange): Option[Double] = balances.get(exchange)
@@ -104,22 +105,22 @@ final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long
     for
       update <- event.as(Topics.OrderUpdate)
       clientId <- update.clientOrderId
-      state <- states.get(update.symbol)
+      state <- states.get(Instrument(update.exchange, update.symbol))
       tag <- state.tagOf(clientId)
     yield tag
 
   /** 本策略在所有标的上的挂单 (供停机收尾逐一撤掉) */
   def allPendingOrders: Iterable[PendingOrder] = states.values.flatMap(_.pendingOrders)
 
-  def hasPendingOrders(symbol: Symbol): Boolean =
-    states.get(symbol).exists(_.hasPendingOrders)
+  def hasPendingOrders(instrument: Instrument): Boolean =
+    states.get(instrument).exists(_.hasPendingOrders)
 
   // ==================== 事件处理 ====================
 
   /** 按 topic 更新状态。
     *
-    * 账户级读数 (余额/净值/希腊值) 与标的事件分两路：前者按交易所存，后者按 symbol 委托
-    * 给对应的 [[SymbolState]]。事件能到达这里就说明订阅声明里有它，故标的必然已注册 ——
+    * 账户级读数 (余额/净值/希腊值) 与标的事件分两路：前者按交易所存，后者按标的委托
+    * 给对应的 [[InstrumentState]]。事件能到达这里就说明订阅声明里有它，故标的必然已注册 ——
     * 找不到只可能是路由 bug，立即暴露而不是静默丢弃。
     */
   def apply(event: AnyEvent): Unit =
@@ -143,17 +144,17 @@ final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long
       greeksAt((g.exchange, g.ccy)) = event.localTs // 本地钟, 见 greeksAt 的说明
     }
     event.as(Topics.Clock).foreach(_ => states.values.foreach(_.failOnTimedOutOrders(event.localTs, orderTimeoutMs)))
-    // 只有框架内置的按标的路由 topic 才进 SymbolState。用户自定义的、同样以 Instrument 为 key
-    // 的 topic (如订阅别的策略在某标的上的指标) 不代表交易该标的，其标的未必注册过 ——
+    // 只有框架内置的按标的路由 topic 才进 InstrumentState。用户自定义的、同样以 Instrument
+    // 为 key 的 topic (如订阅别的策略在某标的上的指标) 不代表交易该标的，其标的未必注册过 ——
     // 不加这道判别的话，它的首条事件就会撞上下面的 fail-fast 把引擎拉崩。
     // 行情按 Instrument 路由、私有回报按 AccountInstrument 路由，两者都落到同一个
-    // SymbolState (本 StateManager 只服务一个策略实例, 也就只服务一个账户)。
+    // InstrumentState (本 StateManager 只服务一个策略实例, 也就只服务一个账户)。
     instrumentOf(event).foreach { instrument =>
       states
         .getOrElse(
-          instrument.symbol,
+          instrument,
           sys.error(
-            s"Symbol not found in StateManager (routing bug): $instrument —— " +
+            s"Instrument not found in StateManager (routing bug): $instrument —— " +
               "策略若要交易该标的, 需为它声明至少一条公共行情 Interest"
           ),
         )
@@ -170,5 +171,5 @@ final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long
         case _                     => None
 
 object StateManager:
-  /** 框架内置的按标的路由 topic —— 只有它们的事件进 [[SymbolState]] */
+  /** 框架内置的按标的路由 topic —— 只有它们的事件进 [[InstrumentState]] */
   private val instrumentTopics: Set[Topic[?, ?]] = (Topics.market ++ Topics.instrumentPrivate).toSet

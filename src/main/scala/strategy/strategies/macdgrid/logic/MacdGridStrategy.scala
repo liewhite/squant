@@ -8,7 +8,7 @@ import hft.event.{AnyEvent, Topics}
 import strategy.strategies.macdgrid.logic.MacdGridLogic.{Decision, OrderSpec, Params}
 
 import scala.collection.mutable
-import hft.state.{PendingOrder, SymbolView}
+import hft.state.{InstrumentView, PendingOrder}
 
 /** MACD 网格策略 (trade-native)。决策逻辑见 [[MacdGridLogic]] (纯函数)。
   *
@@ -32,6 +32,7 @@ final class MacdGridStrategy(
     minOrderQty: Coin = Coin(0.001),
 ) extends Strategy:
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[MacdGridStrategy])
+  private val instrument = Instrument(exchange, symbol)
 
   private val k =
     new KlineSeries(barIntervalMs, maxBars = math.max(maPeriodBars, 26 + 9) + atrPeriodBars + 4)
@@ -44,7 +45,7 @@ final class MacdGridStrategy(
   private val cancelling = mutable.Set.empty[OrderId] // 已发撤单、等 Cancelled 确认 (防重复撤)
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
-    .market(Topics.Trade, Instrument(exchange, symbol)) { (t, ctx, _) =>
+    .market(Topics.Trade, instrument) { (t, ctx, _) =>
       k.update(t.timestamp, t.price.value, t.qty.value)
       reconcile(t.price, t.timestamp, ctx)
     }
@@ -63,13 +64,13 @@ final class MacdGridStrategy(
         case _ => None
 
   private def reconcile(price: Price, now: Long, ctx: StrategyContext): Vector[AnyEvent] =
-    (ctx.state.symbolState(symbol), indicators) match
+    (ctx.state.instrumentState(instrument), indicators) match
       case (Some(ss), Some((dea, bar, ma20, atr))) =>
         cancelling.filterInPlace(id => ss.pendingOrders.exists(_.order.id == id)) // 清理已消失的撤单追踪
         // 锚价只在"重建挂单时"刷新: 无任何挂单 (冷启动/两单都已离场) -> 锚到现价; 成交时 onEvent 已锚到成交价。
         // 期间锚价固定, 故挂单价稳定 resting、不逐笔追价 (否则单子永远在现价±1ATR 漂移, 永不成交)。
         if ss.pendingOrders.isEmpty then anchorPrice = price.value
-        val posCoin = ss.positionSize(exchange)
+        val posCoin = ss.positionSize
         val flat = posCoin.abs < minOrderQty
         if flat then
           // 空仓: 按当时权益刷新"一份"大小 (持仓期冻结)。
@@ -114,7 +115,7 @@ final class MacdGridStrategy(
     * 时序说明: 撤单异步 (等 Cancelled 确认), 市价平即时。撤单确认前, 若旧 resting 加仓限价单恰被成交价穿越成交,
     * 会多开一份逆 DEA 方向的单; 但下一拍 posUnits 仍与 DEA 冲突 -> 再次 flatten, 最终收敛 (至多多一次 taker 往返)。
     * 加仓单非 reduceOnly、平仓单 reduceOnly, 不会出现"平仓反向开仓"。 */
-  private def flattenAll(ss: SymbolView, posCoin: Coin, dea: Double, price: Price, ctx: StrategyContext): Vector[AnyEvent] =
+  private def flattenAll(ss: InstrumentView, posCoin: Coin, dea: Double, price: Price, ctx: StrategyContext): Vector[AnyEvent] =
     val cancels = ss.pendingOrders.flatMap(cancelConfirmed(_, ctx)).toVector
     val close =
       if posCoin.abs >= minOrderQty then
@@ -129,7 +130,7 @@ final class MacdGridStrategy(
 
   /** 把加仓单 / 止盈单两个槽对齐到期望 (仅缺失才补挂, 价偏移/不再期望才撤)。
     * 静态单 (加仓单、网格态止盈单) 仅锚价移动才撤换; **追价止盈单 (被动平仓) 按 ChaseIntervalMs 节奏撤单追挂**。 */
-  private def placeGrid(ss: SymbolView, d: Decision, posUnits: Int, price: Price, now: Long, ctx: StrategyContext): Vector[AnyEvent] =
+  private def placeGrid(ss: InstrumentView, d: Decision, posUnits: Int, price: Price, now: Long, ctx: StrategyContext): Vector[AnyEvent] =
     // 现有挂单按槽分类: reduceOnly=止盈槽, 否则=加仓槽 (每槽留首张)
     var addPending: Option[PendingOrder] = None
     var closePending: Option[PendingOrder] = None

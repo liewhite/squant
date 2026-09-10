@@ -4,24 +4,29 @@ import hft.domain.*
 
 /** 策略能看到的**单标的**状态 —— 只读。
   *
-  * 与 [[SymbolState]]（实现）分开，是因为两者的能力面本就不同：框架要写（应用事件、
+  * 与 [[InstrumentState]]（实现）分开，是因为两者的能力面本就不同：框架要写（应用事件、
   * 登记挂单、超时校验），策略只该读。此前策略拿到的是实现本身，于是能 `positions.clear()`、
   * 能往 `bbos` 里塞假行情、能调 `addPendingOrder` 登记一条框架不知道来源的挂单
   * —— 而框架的停机收尾会去撤它。
   *
   * 这条边界不靠"策略作者别那么写"的约定，靠类型：写方法根本不在这个接口上。
+  *
+  * 读数不再按交易所取（从前是 `bbo(exchange)`）——本视图就是**一个标的**的状态，
+  * 交易所已经在 [[instrument]] 里。跨所策略逐个标的问即可，见 [[InstrumentState]]。
   */
-trait SymbolView:
+trait InstrumentView:
+  def instrument: Instrument
+  def exchange: Exchange
   def symbol: Symbol
 
-  def bbo(exchange: Exchange): Option[BBO]
-  def markPrice(exchange: Exchange): Option[MarkPrice]
-  def indexPrice(exchange: Exchange): Option[IndexPrice]
-  def fundingRate(exchange: Exchange): Option[FundingRate]
+  def bbo: Option[BBO]
+  def markPrice: Option[MarkPrice]
+  def indexPrice: Option[IndexPrice]
+  def fundingRate: Option[FundingRate]
 
-  def position(exchange: Exchange): Option[Position]
-  /** 仓位大小。没有记录 = 空仓，依据见 `SymbolState.positionSize` */
-  def positionSize(exchange: Exchange): Coin
+  def position: Option[Position]
+  /** 仓位大小。没有记录 = 空仓，依据见 [[InstrumentState.positionSize]] */
+  def positionSize: Coin
 
   /** 本策略在该标的上的挂单。[[PendingOrder]] 是不可变数据，读它不会动到框架状态 */
   def pendingOrders: Iterable[PendingOrder]
@@ -35,8 +40,11 @@ trait SymbolView:
   * 计入仓位"和"登记一条无主挂单"，两者都没有外在症状。
   */
 trait StateView:
-  /** 某标的的状态视图；标的不在订阅范围内时 None */
-  def symbolState(symbol: Symbol): Option[SymbolView]
+  /** 某标的的状态视图；标的不在订阅范围内时 `None`。
+    *
+    * "问了一个没订阅的标的"因此拿不到任何读数，而不是拿到一份看着正常的空状态 ——
+    * 从前按交易对索引时做不到这一点，只能在 `positionSize(exchange)` 上加一道运行时守卫。 */
+  def instrumentState(instrument: Instrument): Option[InstrumentView]
 
   /** USDT 余额，None 表示该交易所数据尚未到达 */
   def usdtBalance(exchange: Exchange): Option[Double]
@@ -58,4 +66,4 @@ trait StateView:
 
   /** 本策略在所有标的上的挂单 */
   def allPendingOrders: Iterable[PendingOrder]
-  def hasPendingOrders(symbol: Symbol): Boolean
+  def hasPendingOrders(instrument: Instrument): Boolean

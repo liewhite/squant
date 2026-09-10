@@ -22,7 +22,7 @@ import hft.domain.*
   * 而这段时间里 BBO 会 tick 好几次。把这个窗口当成"已经空闲"就会出孤儿挂单 ——
   * 挂出新单 B，紧接着旧单 A 的 `Cancelled` 到达并把状态清成空闲，于是又挂出 C；
   * B 的回报后到、随即被 C 覆盖，从此无人管、无人撤。框架的超时清理只管 `Created` 态
-  * （见 `SymbolState.failOnTimedOutOrders`），对已经 Pending 的 B 没有兜底，
+  * （见 `InstrumentState.failOnTimedOutOrders`），对已经 Pending 的 B 没有兜底，
   * 它最终会在一个陈旧价位上成交，只能靠下一轮对账反向擦掉 —— 白付两笔手续费。
   *
   * ## 回报按 orderId 匹配
