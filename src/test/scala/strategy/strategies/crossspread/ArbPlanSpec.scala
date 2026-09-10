@@ -6,8 +6,8 @@ import strategy.strategies.crossspread.logic.*
 
 /** 对敲决策与对账的契约。两层判据 (偏离 + 可执行的边)、成本门槛、以及**腿不平**的处理。 */
 class ArbPlanSpec extends munit.FunSuite:
-  private val rich = Instrument(Exchange.Binance, "AAPLUSDT")
-  private val cheap = Instrument(Exchange.Okx, "AAPL")
+  private val rich = Instrument.perp(Exchange.Binance, "AAPLUSDT")
+  private val cheap = Instrument.perp(Exchange.Okx, "AAPL")
   private val t0 = 1_700_000_000_000L
 
   private val cfg = ArbPlan.Config(

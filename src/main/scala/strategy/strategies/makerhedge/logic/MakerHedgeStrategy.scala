@@ -48,7 +48,7 @@ final class MakerHedgeStrategy(
       (_, _) => Left("没有接预热数据源"),
 ) extends Strategy:
   /** 本策略交易的标的 —— 状态查询与行情声明的同一个键 */
-  private val instrument = Instrument(exchange, symbol)
+  private val instrument = Instrument.perp(exchange, symbol)
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[MakerHedgeStrategy])
   private var warnCnt = 0L
   private def warnThrottled(msg: String): Unit =

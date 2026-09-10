@@ -7,7 +7,7 @@ import hft.state.StateManager
 
 class StrategyContextSpec extends munit.FunSuite:
   private val account = AccountId.Live
-  private val instrument = Instrument(Exchange.Binance, "BTCUSDT")
+  private val instrument = Instrument.perp(Exchange.Binance, "BTCUSDT")
   private val order = Order(
     id = "exchange-1",
     exchange = instrument.exchange,
@@ -43,12 +43,12 @@ class StrategyContextSpec extends munit.FunSuite:
 
   test("交易所不匹配时拒绝撤单"):
     val error = intercept[IllegalArgumentException] {
-      context().cancel(Instrument(Exchange.Okx, instrument.symbol), OrderRef.ByExchangeId(order.id))
+      context().cancel(Instrument.perp(Exchange.Okx, instrument.symbol), OrderRef.ByExchangeId(order.id))
     }
     assert(error.getMessage.contains("instrument=Okx:BTCUSDT"), error.getMessage)
 
   test("标的不匹配时拒绝撤单"):
     val error = intercept[IllegalArgumentException] {
-      context().cancel(Instrument(instrument.exchange, "ETH"), OrderRef.ByExchangeId(order.id))
+      context().cancel(Instrument.perp(instrument.exchange, "ETH"), OrderRef.ByExchangeId(order.id))
     }
     assert(error.getMessage.contains("instrument=Binance:ETH"), error.getMessage)

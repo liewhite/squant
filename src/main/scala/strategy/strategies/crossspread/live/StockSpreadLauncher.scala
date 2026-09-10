@@ -40,7 +40,7 @@ import strategy.strategies.crossspread.logic.*
 private def tickerOf(listings: Map[Exchange, Map[Ticker, Symbol]]): Instrument => Ticker =
   val index: Map[Instrument, Ticker] =
     listings.iterator.flatMap((exchange, bySymbol) =>
-      bySymbol.iterator.map((ticker, symbol) => Instrument(exchange, symbol) -> ticker)
+      bySymbol.iterator.map((ticker, symbol) => Instrument.perp(exchange, symbol) -> ticker)
     ).toMap
   instrument => index.getOrElse(instrument, instrument.symbol)
 

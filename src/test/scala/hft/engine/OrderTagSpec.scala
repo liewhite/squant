@@ -16,7 +16,7 @@ import scala.collection.mutable
 class OrderTagSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val symbol = "BTCUSDT"
-  private val instrument = Instrument(ex, symbol)
+  private val instrument = Instrument.perp(ex, symbol)
 
   /** 下 `orders` 里的单, 并把每条订单回报看到的 (状态, 标注) 记进 [[seen]]。 */
   private final class TaggingStrategy(orders: Vector[Order]) extends Strategy:

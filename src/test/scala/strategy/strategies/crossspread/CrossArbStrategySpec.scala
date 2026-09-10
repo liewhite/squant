@@ -15,8 +15,8 @@ import strategy.strategies.crossspread.logic.*
   * 拿策略自己生成的 id 去匹配回报，一条都匹配不上。bug 恰好活在纯逻辑与框架之间那道缝里。
   */
 class CrossArbStrategySpec extends munit.FunSuite:
-  private val rich = Instrument(Exchange.Binance, "AAPLUSDT")
-  private val cheap = Instrument(Exchange.Okx, "AAPL")
+  private val rich = Instrument.perp(Exchange.Binance, "AAPLUSDT")
+  private val cheap = Instrument.perp(Exchange.Okx, "AAPL")
   private val t0 = 1_700_000_000_000L
   private val minOrder = Coin(0.001)
 
@@ -199,7 +199,7 @@ class CrossArbStrategySpec extends munit.FunSuite:
 
   test("信号里有未声明的腿 -> 一张单都不发"):
     // 检测器按 ticker 的全部两两组合出信号, 三家所就有三对; 在没声明的标的上下单会拿不到回报。
-    val hl = Instrument(Exchange.Hyperliquid, "AAPL")
+    val hl = Instrument.perp(Exchange.Hyperliquid, "AAPL")
     val r = quoted(runner())
     val foreign = Event.stamped(
       SpreadDislocations,

@@ -17,7 +17,7 @@ class HandoffCostSpec extends munit.FunSuite:
   override def munitIgnore: Boolean = sys.env.get("BENCH").isEmpty
 
   private val ex = Exchange.Binance
-  private val inst = Instrument(ex, "BTCUSDT")
+  private val inst = Instrument.perp(ex, "BTCUSDT")
   private val N = 200_000
 
   private def bbo(i: Int) = BBO(ex, "BTCUSDT", 100.0 + i % 10, Coin(1.0), 100.1, Coin(1.0), i.toLong)

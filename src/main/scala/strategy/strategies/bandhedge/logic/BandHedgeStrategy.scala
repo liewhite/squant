@@ -39,7 +39,7 @@ final class BandHedgeStrategy(
     minHedgeQty: Coin = Coin(0.001),
 ) extends Strategy:
   /** 本策略交易的标的 —— 状态查询与行情声明的同一个键 */
-  private val instrument = Instrument(exchange, symbol)
+  private val instrument = Instrument.perp(exchange, symbol)
 
   private val klines =
     new KlineSeries(barIntervalMs, math.max(math.max(atrPeriodBars * 4, rvLongWindowBars + 8), 64))

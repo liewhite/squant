@@ -10,7 +10,7 @@ import hft.TestUnits.given
 /** 策略订阅范围的派生: 框架补齐了什么、又据此向交易所订了什么。 */
 class StrategyRunnerSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
-  private val btc = Instrument(ex, "BTCUSDT")
+  private val btc = Instrument.perp(ex, "BTCUSDT")
 
   /** 直接喂声明，绕过策略实例 —— 这里测的是"框架据声明补齐了什么" */
   private def subOf(interests: Set[Interest]): Subscription =
@@ -62,7 +62,7 @@ class StrategyRunnerSpec extends munit.FunSuite:
   test("行情订阅由同一份声明派生 —— 一处声明, 两处派生"):
     val sub = subOf(Set(
       Interest.Keyed(Topics.Bbo, Set(btc)),
-      Interest.Keyed(Topics.Trade, Set(Instrument(Exchange.Okx, "ETHUSDT"))),
+      Interest.Keyed(Topics.Trade, Set(Instrument.perp(Exchange.Okx, "ETHUSDT"))),
     ))
     assertEquals(
       sub.marketStreams,

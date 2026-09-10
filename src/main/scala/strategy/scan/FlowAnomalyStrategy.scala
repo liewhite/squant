@@ -52,7 +52,7 @@ final class FlowAnomalyStrategy(
   require(universe.nonEmpty, "universe 不能为空")
 
   private val detector = TakerFlowDetector(exchange, config, rule)
-  private val instruments: Set[Instrument] = universe.map(Instrument(exchange, _))
+  private val instruments: Set[Instrument] = universe.map(Instrument.perp(exchange, _))
 
   override def handlers: StrategyHandlers = StrategyHandlers.empty
     .market(Topics.Trade, instruments) { (t, _, _) =>

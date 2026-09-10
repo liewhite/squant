@@ -32,7 +32,7 @@ final class MacdGridStrategy(
     minOrderQty: Coin = Coin(0.001),
 ) extends Strategy:
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[MacdGridStrategy])
-  private val instrument = Instrument(exchange, symbol)
+  private val instrument = Instrument.perp(exchange, symbol)
 
   private val k =
     new KlineSeries(barIntervalMs, maxBars = math.max(maPeriodBars, 26 + 9) + atrPeriodBars + 4)

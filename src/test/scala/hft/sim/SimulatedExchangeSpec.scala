@@ -46,12 +46,12 @@ class SimulatedExchangeSpec extends munit.FunSuite:
       publish(Event.at(Topics.Bbo, BBO(ex, sym, bid, Coin(1.0), ask, Coin(1.0), ts), ts))
     /** 外部喂一条**用户自定义**的行情 —— 框架把这类源当一等公民, 替身也必须转发 */
     def emitCustom(value: Double, ts: Timestamp): Unit =
-      publish(Event.at(CustomFeedSpec.Depth, CustomFeedSpec.DepthSnapshot(Instrument(ex, sym), value), ts))
+      publish(Event.at(CustomFeedSpec.Depth, CustomFeedSpec.DepthSnapshot(Instrument.perp(ex, sym), value), ts))
 
   /** 测试用极简策略: 收到首个 BBO 即在买一下方 offset 处挂一张 PostOnly 限价买单 */
   private class OneShotMakerStrategy(offsetRatio: Double, orderSize: Coin) extends Strategy:
     private var placed = false
-    override def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument(ex, sym)) { (b, ctx, _) =>
+    override def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument.perp(ex, sym)) { (b, ctx, _) =>
       if placed then Vector.empty
       else
         placed = true

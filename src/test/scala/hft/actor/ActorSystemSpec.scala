@@ -13,7 +13,7 @@ import hft.TestUnits.given
 /** actor 生命周期：树形停机、收尾、退订、fail-fast。 */
 class ActorSystemSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
-  private val btc = Instrument(ex, "BTCUSDT")
+  private val btc = Instrument.perp(ex, "BTCUSDT")
   private val t0 = 1_700_000_000_000L
 
   private def bbo(px: Double = 100.0) = BBO(ex, "BTCUSDT", px, Coin(1.0), px + 0.1, Coin(1.0), t0)

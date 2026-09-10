@@ -24,7 +24,7 @@ final case class FlowAnomaly(
     windowNotional: Double,
     timestamp: Timestamp,
 ):
-  def instrument: Instrument = Instrument(exchange, symbol)
+  def instrument: Instrument = Instrument.perp(exchange, symbol)
 
 /** 异动信号通道。
   *

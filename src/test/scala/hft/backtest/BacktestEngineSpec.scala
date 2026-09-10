@@ -27,7 +27,7 @@ class BacktestEngineSpec extends munit.FunSuite:
   /** 首个 BBO 时挂一张 PostOnly 买单 (挂在买一价, 不可成交故 resting)。 */
   private class OneShotBuy extends Strategy:
     private var placed = false
-    def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument(ex, sym)) { (b, ctx, _) =>
+    def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument.perp(ex, sym)) { (b, ctx, _) =>
       if placed then Vector.empty
       else
         placed = true

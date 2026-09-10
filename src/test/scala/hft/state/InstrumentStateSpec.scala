@@ -5,7 +5,7 @@ import hft.event.{AnyEvent, Event, Topics}
 import hft.TestUnits.given
 
 class InstrumentStateSpec extends munit.FunSuite:
-  private val instrument = Instrument(Exchange.Binance, "BTCUSDT")
+  private val instrument = Instrument.perp(Exchange.Binance, "BTCUSDT")
   private val symbol = "BTCUSDT"
   private val t0 = 1_700_000_000_000L
 
@@ -126,7 +126,7 @@ class InstrumentStateSpec extends munit.FunSuite:
       "已订阅的标的: 没记录 = 空仓",
     )
     assertEquals(
-      mgr.instrumentState(Instrument(Exchange.Okx, instrument.symbol)),
+      mgr.instrumentState(Instrument.perp(Exchange.Okx, instrument.symbol)),
       None,
       "没订阅的标的拿不到状态, 不必再靠运行时守卫挡",
     )

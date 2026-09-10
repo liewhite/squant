@@ -38,18 +38,59 @@ enum AccountId:
     case Live     => "live"
     case Paper(n) => s"paper$n"
 
-/** 标的 = (交易所, 交易对) —— 公共行情与持仓/订单/成交的路由键。
+/** 合约品种 —— 同一个基础资产上**不同的可交易物**。
   *
-  * 独立类型而非 `(Exchange, Symbol)` 元组：它是事件路由的键，会进哈希表、进日志、
-  * 进订阅声明，具名类型让这些地方读起来是"标的"而不是"某个二元组"。
+  * 存在的理由是 [[Symbol]] 表达不了它。框架的 symbol 是交易所口径的标识（OKX 是基础币
+  * `ETH`，Binance/Bybit 是原生 `ETHUSDT`），于是同一个 `ETH` 底下的这些东西会收敛成同一个
+  * 键：U 本位永续、币本位永续、几十个期权合约、现货。它们的保证金、盈亏计价、下单端点
+  * 都不同，挤在一个键上就是互相覆盖。
+  *
+  * 这不是为将来预留：OKX 适配层已经在替这件事打补丁 —— `ETH-USD-SWAP` 与 `ETH-USDT-SWAP`
+  * 都会 `fromOkx` 成 `"ETH"`，只能靠"计价币是不是我要的那个"去过滤，而私有流按 instType
+  * 全量订阅、`/account/positions` 也返回全部计价币种。那道过滤漏一个入口，币本位的仓位与
+  * 订单回报就会被当成 U 本位合约记账（拿错的 ctVal 换张成币，还会在对齐快照 `toMap` 时
+  * 静默覆盖真正的那一行）。`OkxCodec` 的注释记着"本文件原先三个全量入口就漏了两个"。
+  *
+  * 品种进了键之后，这类混淆在投递层就不可能发生 —— 不同品种是不同的标的。
   */
-final case class Instrument(exchange: Exchange, symbol: Symbol):
+enum InstrumentKind:
+  /** U 本位永续：保证金与盈亏都用计价币。框架里目前绝大多数标的。 */
+  case LinearPerp
+  /** 币本位（反向）永续：保证金与盈亏用基础币，计价恒为 USD。 */
+  case InversePerp
+  /** 期权。[[Instrument.symbol]] 是交易所原生的合约标识
+    * （Bybit `ETH-26SEP25-3000-C-USDT`、OKX `ETH-USD-250101-3000-C`）——
+    * 行权价/到期/方向不进路由键：它们是**合约规格**，归 [[SymbolMeta]] 那一侧，
+    * 而键只需要认得出"是哪一个合约"。 */
+  case Option
+  /** 现货 */
+  case Spot
+
+/** 标的 = (交易所, 交易对, 品种) —— 公共行情与持仓/订单/成交的路由键。
+  *
+  * 独立类型而非元组：它是事件路由的键，会进哈希表、进日志、进订阅声明，具名类型让这些
+  * 地方读起来是"标的"而不是"某个三元组"。
+  *
+  * 品种是键的一部分而不是附属信息，见 [[InstrumentKind]]。
+  */
+final case class Instrument(exchange: Exchange, symbol: Symbol, kind: InstrumentKind):
   override def toString: String = s"$exchange:$symbol"
+
+object Instrument:
+  /** U 本位永续 —— 框架里绝大多数标的。
+    *
+    * 有这个工厂不是为了省字，是为了让**品种在调用点是看得见的**：主构造器要求显式写出
+    * 品种（没有默认值，理由同 [[SymbolMeta]] 的精度字段 —— 猜错的方向是把单下到另一个
+    * 合约上），而 `Instrument.perp(...)` 读起来就是"一个永续"。 */
+  def perp(exchange: Exchange, symbol: Symbol): Instrument = Instrument(exchange, symbol, InstrumentKind.LinearPerp)
+
+  /** 期权。`symbol` 用交易所原生的合约标识，见 [[InstrumentKind.Option]] */
+  def option(exchange: Exchange, symbol: Symbol): Instrument = Instrument(exchange, symbol, InstrumentKind.Option)
 
 /** 带标的归属的载荷 —— 它的 (交易所, 交易对) 就**是**它所属的 [[Instrument]]。
   *
   * "这条载荷属于哪个标的"是标的模型的一部分，不是各处随手拼的一个二元组。从前它以
-  * `Instrument(x.exchange, x.symbol)` 的形态散在六处：路由键派生、状态定位、挂单登记、
+  * `Instrument.perp(x.exchange, x.symbol)` 的形态散在六处：路由键派生、状态定位、挂单登记、
   * 撤单、绩效统计、看板。规则本身只有一行，但它会变 —— 给 [[Instrument]] 加品种维度
   * （期权的行权价/到期/方向、币本位与 U 本位永续）时，六处都得跟着改，而编译器只抓得到
   * 类型不匹配，抓不到"某处仍按旧规则拼出一个看着合法的键"。那种漏改的症状是事件被投给
@@ -61,8 +102,20 @@ trait HasInstrument:
   def exchange: Exchange
   def symbol: Symbol
 
+  /** 本载荷是哪个品种的。
+    *
+    * **有默认值，与 [[Instrument]] 的 `kind` 不同** —— 这个不对称是有意的：
+    *   - `Instrument` 是**键**，表达"我要交易什么"，由策略与装配方写下，必须明说；
+    *   - 载荷是**交易所告诉我的东西**，由适配层构造，而框架当下的适配层几乎全是 U 本位永续
+    *     （三百多处构造点）。让它们逐个写出品种，收益是零、改错的面是三百多处。
+    *
+    * 漏传的症状也不同：载荷的品种填错会让路由键与策略声明的键对不上，策略**完全收不到**
+    * 那条事件 —— 可见的失效，不是静默算错一个数。期权适配层落地时由测试钉住这一点。
+    */
+  def kind: InstrumentKind = InstrumentKind.LinearPerp
+
   /** 本载荷所属的标的 */
-  final def instrument: Instrument = Instrument(exchange, symbol)
+  final def instrument: Instrument = Instrument(exchange, symbol, kind)
 
 /** 某账户在某标的上的口子 —— **私有回报**的路由键。
   *
@@ -161,6 +214,8 @@ final case class Order(
       * "一个标注对应一张单"的策略自己保证，框架不校验 —— 校验会把上面那种用法一并禁掉。
       */
     tag: String = "",
+    /** 品种 —— 见 [[HasInstrument.kind]] */
+    override val kind: InstrumentKind = InstrumentKind.LinearPerp,
 ) extends HasInstrument
 
 /** 订单更新事件 */
@@ -186,6 +241,8 @@ final case class OrderUpdate(
       * 三家交易所的挂单查询与订单推送都返回这个字段，它不是"填不出来"的事实，是没去读。 */
     reduceOnly: Boolean,
     timestamp: Timestamp,
+    /** 品种 —— 见 [[HasInstrument.kind]] */
+    override val kind: InstrumentKind = InstrumentKind.LinearPerp,
 ) extends HasInstrument
 
 /** 公共成交印记 (市场上的匿名成交，非本账户成交)。
@@ -198,6 +255,8 @@ final case class MarketTrade(
     qty: Coin,
     isBuyerMaker: Boolean,
     timestamp: Timestamp,
+    /** 品种 —— 见 [[HasInstrument.kind]] */
+    override val kind: InstrumentKind = InstrumentKind.LinearPerp,
 ) extends HasInstrument
 
 /** 一笔成交的明细。仓位不由它维护 —— 那是柜台账本的事 */
@@ -209,6 +268,8 @@ final case class Fill(
     price: Price,
     size: Coin,
     timestamp: Timestamp,
+    /** 品种 —— 见 [[HasInstrument.kind]] */
+    override val kind: InstrumentKind = InstrumentKind.LinearPerp,
 ) extends HasInstrument
 
 /** 仓位 —— **只有数量**，size 为正表示多头，为负表示空头。
@@ -237,6 +298,8 @@ final case class Position(
     exchange: Exchange,
     symbol: Symbol,
     size: Coin,
+    /** 品种 —— 见 [[HasInstrument.kind]] */
+    override val kind: InstrumentKind = InstrumentKind.LinearPerp,
 ) extends HasInstrument:
   /** 判断是否空仓 (epsilon 比较避免浮点精度问题) */
   def isEmpty: Boolean = size.isZero
@@ -308,6 +371,8 @@ final case class BBO(
     askPrice: Price,
     askQty: Coin,
     timestamp: Timestamp,
+    /** 品种 —— 见 [[HasInstrument.kind]] */
+    override val kind: InstrumentKind = InstrumentKind.LinearPerp,
 ) extends HasInstrument:
   def spread: Price = askPrice - bidPrice
   def midPrice: Price = (bidPrice + askPrice) / 2.0
@@ -320,6 +385,8 @@ final case class FundingRate(
     nextSettleTime: Timestamp,
     /** 数据时间戳，用于计算基于剩余时间的日化费率 */
     timestamp: Timestamp,
+    /** 品种 —— 见 [[HasInstrument.kind]] */
+    override val kind: InstrumentKind = InstrumentKind.LinearPerp,
 ) extends HasInstrument:
   /** 基于剩余时间的日化费率: rate * 24 / hoursToSettle (最小 1 小时防止结算临近时爆炸) */
   def dailyRate: Rate = dailyRateWithBaseTime(nextSettleTime, timestamp)
@@ -342,6 +409,8 @@ final case class MarkPrice(
     symbol: Symbol,
     price: Price,
     timestamp: Timestamp,
+    /** 品种 —— 见 [[HasInstrument.kind]] */
+    override val kind: InstrumentKind = InstrumentKind.LinearPerp,
 ) extends HasInstrument
 
 /** 指数价格 */
@@ -350,6 +419,8 @@ final case class IndexPrice(
     symbol: Symbol,
     price: Price,
     timestamp: Timestamp,
+    /** 品种 —— 见 [[HasInstrument.kind]] */
+    override val kind: InstrumentKind = InstrumentKind.LinearPerp,
 ) extends HasInstrument
 
 /** 账户级期权希腊字母 (按币种 ccy 聚合)。
@@ -412,6 +483,8 @@ final case class SymbolMeta(
     minOrderSize: Double,
     /** 合约乘数: 每张合约对应的币本位数量 (Binance 为 1.0) */
     contractSize: Double,
+    /** 品种 —— 见 [[HasInstrument.kind]] */
+    override val kind: InstrumentKind = InstrumentKind.LinearPerp,
 ) extends HasInstrument:
   def isValid: Boolean = tickSize > 0 && sizeStep > 0 && contractSize > 0
 

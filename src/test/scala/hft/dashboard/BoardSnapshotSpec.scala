@@ -9,7 +9,7 @@ import hft.TestUnits.given
 class BoardSnapshotSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private val inst = Instrument(ex, sym)
+  private val inst = Instrument.perp(ex, sym)
   private val t0 = 1_700_000_000_000L
 
   private def bboEv(bid: Double, ask: Double, ts: Timestamp) =

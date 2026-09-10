@@ -89,7 +89,7 @@ final class DeltaHedgeStrategy(
       (_, _) => Left("没有接预热数据源"),
 ) extends Strategy:
   /** 本策略交易的标的 —— 状态查询与行情声明的同一个键 */
-  private val instrument = Instrument(exchange, symbol)
+  private val instrument = Instrument.perp(exchange, symbol)
   private val logger = org.slf4j.LoggerFactory.getLogger(classOf[DeltaHedgeStrategy])
   /** **按类别**分别节流：共用一个计数器的话，一条高频告警会把另一条低频但更重要的
     * (如"敞口陈旧") 淹没到 1/200 采样，而那条恰恰是需要立刻看到的。 */

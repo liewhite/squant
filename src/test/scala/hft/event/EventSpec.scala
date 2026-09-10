@@ -7,7 +7,7 @@ import hft.TestUnits.given
 class EventSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private val inst = Instrument(ex, sym)
+  private val inst = Instrument.perp(ex, sym)
   private val t0 = 1_700_000_000_000L
 
   private def bbo(symbol: String = sym, exchange: Exchange = ex) =
@@ -31,9 +31,9 @@ class EventSpec extends munit.FunSuite:
     // 若 equals 能被结构相等覆盖, 两个类型参数不同却结构相等的 topic 会撞进同一个索引槽,
     // 事件投给错误订阅者、而 as 因引用不等静默返回 None —— 无症状的错投。
     object A extends Topic[Instrument, BBO]("dup"):
-      def keyOf(p: BBO): Instrument = Instrument(p.exchange, p.symbol)
+      def keyOf(p: BBO): Instrument = Instrument.perp(p.exchange, p.symbol)
     object B extends Topic[Instrument, BBO]("dup"): // 同名, 不同 topic
-      def keyOf(p: BBO): Instrument = Instrument(p.exchange, p.symbol)
+      def keyOf(p: BBO): Instrument = Instrument.perp(p.exchange, p.symbol)
     assertNotEquals[Topic[?, ?], Topic[?, ?]](A, B, "同名不等价 —— 身份是引用不是名字")
     assertEquals[Topic[?, ?], Topic[?, ?]](A, A)
     assertEquals(Event.at(A, bbo(), t0).as(B), None, "as 与索引判据一致")
@@ -80,10 +80,10 @@ class EventSpec extends munit.FunSuite:
   test("Subscription: 跨 topic 汇总标的与交易所"):
     val sub = Subscription(Set(
       Interest.Keyed(Topics.Bbo, Set(inst)),
-      Interest.Keyed(Topics.Trade, Set(Instrument(Exchange.Okx, "ETHUSDT"))),
+      Interest.Keyed(Topics.Trade, Set(Instrument.perp(Exchange.Okx, "ETHUSDT"))),
       Interest.Keyed(Topics.AccountInfo, Set(AccountExchange(AccountId.Live, Exchange.Bybit))),
     ))
-    assertEquals(sub.instruments, Set(inst, Instrument(Exchange.Okx, "ETHUSDT")))
+    assertEquals(sub.instruments, Set(inst, Instrument.perp(Exchange.Okx, "ETHUSDT")))
     assertEquals(sub.exchanges, Set(Exchange.Binance, Exchange.Okx, Exchange.Bybit))
 
   test("账户级读数按交易所过滤 —— 越界防线"):
@@ -98,7 +98,7 @@ class EventSpec extends munit.FunSuite:
     // 后者多出"只在账户级声明里出现过的交易所"。差集里的策略: 引擎不为它发指令、latch 也不
     // 等它, 于是引擎照常打印"对齐完成"放行, 而策略永久停在闸门后 —— 不抛异常、不打日志。
     val sub = Subscription(Set(
-      Interest.Keyed(Topics.Bbo, Set(Instrument(Exchange.Binance, "BTCUSDT"))),
+      Interest.Keyed(Topics.Bbo, Set(Instrument.perp(Exchange.Binance, "BTCUSDT"))),
       // 只订 OKX 的希腊值, 不在 OKX 上交易任何标的
       Interest.Keyed(Topics.Greeks, Set(AccountExchange(AccountId.Live, Exchange.Okx))),
     ))

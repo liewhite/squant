@@ -83,7 +83,7 @@ import sttp.client4.DefaultSyncBackend
         engine.install(DashboardActor(conf.port, conf.host))
         wired.foreach { (v, _, _) =>
           if v.watchMarket && v.symbols.nonEmpty then
-            engine.watchMarket(v.symbols.map(Instrument(v.exchange, _)), Set(Topics.Bbo))
+            engine.watchMarket(v.symbols.map(Instrument.perp(v.exchange, _)), Set(Topics.Bbo))
         }
         logger.warn(s"看板: http://${conf.host}:${conf.port}  (Ctrl+C 退出)")
         engine.awaitShutdown()

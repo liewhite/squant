@@ -13,7 +13,7 @@ import hft.TestUnits.given
 class PerformanceTrackerSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private val inst = Instrument(ex, sym)
+  private val inst = Instrument.perp(ex, sym)
   private val paper = AccountId.Paper(1)
 
   private def fill(account: AccountId, side: Side, px: Double, qty: Double, ts: Long = 0L) =

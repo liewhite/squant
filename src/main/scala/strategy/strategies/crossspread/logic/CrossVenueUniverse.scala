@@ -28,7 +28,7 @@ object CrossVenueUniverse:
     require(minVenues >= 2, s"一个价差对至少要两家交易所, minVenues=$minVenues")
     candidates.toVector.sorted.flatMap { ticker =>
       val venues = listings.toVector
-        .flatMap((exchange, symbols) => symbols.get(ticker).map(symbol => Instrument(exchange, symbol)))
+        .flatMap((exchange, symbols) => symbols.get(ticker).map(symbol => Instrument.perp(exchange, symbol)))
         .sortBy(_.toString)
       if venues.sizeIs < minVenues then Vector.empty
       else venues.combinations(2).map(pair => VenuePair.of(ticker, pair(0), pair(1))).toVector

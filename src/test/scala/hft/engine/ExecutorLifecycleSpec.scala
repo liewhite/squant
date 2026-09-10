@@ -17,7 +17,7 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
   /** 收到首个 BBO 就挂一张限价单 */
   private class OneShotMaker extends Strategy:
     private var placed = false
-    def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument(ex, sym)) { (b, ctx, _) =>
+    def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument.perp(ex, sym)) { (b, ctx, _) =>
       if placed then Vector.empty
       else
         placed = true
@@ -39,7 +39,7 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
         override def prepare(): Unit =
           Thread.sleep(50) // 就绪需要时间 —— 阻塞是允许的
           trace.add("prepare")
-        def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument(ex, sym)) { (_, _, _) =>
+        def handlers = StrategyHandlers.empty.market(Topics.Bbo, Instrument.perp(ex, sym)) { (_, _, _) =>
           trace.add("event"); Vector.empty
         }
 

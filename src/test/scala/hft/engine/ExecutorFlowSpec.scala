@@ -16,7 +16,7 @@ class ExecutorFlowSpec extends munit.FunSuite:
   private class ClockOrderStrategy extends Strategy:
     override def handlers: StrategyHandlers = StrategyHandlers.empty
       // 声明标的以获得订阅范围与 SymbolMeta 校验；下单由时钟触发
-      .market(Topics.Bbo, Instrument(Exchange.Binance, "BTCUSDT")) { (_, _, _) => Vector.empty }
+      .market(Topics.Bbo, Instrument.perp(Exchange.Binance, "BTCUSDT")) { (_, _, _) => Vector.empty }
       .onClock { (ctx, _) =>
         ctx.place(
           Order(

@@ -9,8 +9,8 @@ import strategy.strategies.crossspread.logic.*
   * 全部用例都脱离引擎、脱离时钟同步跑 —— 逻辑层不碰框架，这就是证明。
   */
 class CrossSpreadDetectorSpec extends munit.FunSuite:
-  private val bn = Instrument(Exchange.Binance, "AAPLUSDT")
-  private val hl = Instrument(Exchange.Hyperliquid, "AAPL")
+  private val bn = Instrument.perp(Exchange.Binance, "AAPLUSDT")
+  private val hl = Instrument.perp(Exchange.Hyperliquid, "AAPL")
   private val pair = VenuePair.of("AAPL", bn, hl)
 
   private val config = CrossSpreadConfig(
@@ -215,7 +215,7 @@ class CrossSpreadDetectorSpec extends munit.FunSuite:
     assertEquals(VenuePair.of("AAPL", bn, hl), VenuePair.of("AAPL", hl, bn))
 
   test("同所两腿不构成价差对"):
-    intercept[IllegalArgumentException](VenuePair.of("AAPL", bn, Instrument(Exchange.Binance, "AAPLUSDT2")))
+    intercept[IllegalArgumentException](VenuePair.of("AAPL", bn, Instrument.perp(Exchange.Binance, "AAPLUSDT2")))
 
   test("配对只在至少两家上市时产生, 三家上市则给出全部三组两两组合"):
     val listings = Map(

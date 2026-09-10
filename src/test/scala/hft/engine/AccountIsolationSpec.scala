@@ -21,7 +21,7 @@ import hft.TestCommandSink
 class AccountIsolationSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private val inst = Instrument(ex, sym)
+  private val inst = Instrument.perp(ex, sym)
   private val paper = AccountId.Paper(1)
 
   /** 记录自己看到的成交与仓位；两个实例共用同一份逻辑 */
@@ -120,7 +120,7 @@ class AccountIsolationSpec extends munit.FunSuite:
   test("一组租约中任一键冲突就整组拒绝, 不留部分登记"):
     val claims = InstrumentClaims()
     val occupied = AccountInstrument(AccountId.Live, inst)
-    val free = AccountInstrument(AccountId.Live, Instrument(ex, "ETHUSDT"))
+    val free = AccountInstrument(AccountId.Live, Instrument.perp(ex, "ETHUSDT"))
     claims.acquire("existing", Set(occupied))
     intercept[IllegalStateException](claims.acquire("incoming", Set(occupied, free)))
     val freeLease = claims.acquire("next", Set(free))

@@ -62,7 +62,7 @@ class BsGreeksSourceSpec extends munit.FunSuite:
 
   test("经 StateManager: greeks().delta = 原始 delta + cashBal"):
     val src = BsGreeksSource(FixedSource(Vector(trade(100.0, 0))), AccountId.Live, config(straddles = 10.0, spot = 2.0))
-    val sm = StateManager(Iterable(Instrument(ex, sym)), orderTimeoutMs = 0L)
+    val sm = StateManager(Iterable(Instrument.perp(ex, sym)), orderTimeoutMs = 0L)
     src.events().foreach(sm.apply)
     val corrected = sm.greeks(ex, ccy)
     assert(corrected.isDefined)

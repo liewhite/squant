@@ -23,7 +23,7 @@ import hft.TestUnits.given
 class PositionOwnershipSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private val inst = Instrument(ex, sym)
+  private val inst = Instrument.perp(ex, sym)
   private val paper: AccountId.Paper = AccountId.Paper(1)
   private val metas = Map[Symbol, SymbolMeta](sym -> SymbolMeta(ex, sym, 0.1, 0.001, 0.001, 1.0))
   private val instant = TestSim.noFees.copy(exchangeToStrategyDelayMs = 0, orderToExchangeDelayMs = 0, initialBalanceUsdt = 10_000.0)
@@ -41,8 +41,8 @@ class PositionOwnershipSpec extends munit.FunSuite:
             "maker",
           )
       }
-      .own(Topics.Fill) { (_, ctx, _) => atFill.add(ctx.state.instrumentState(Instrument(ex, sym)).get.positionSize.value); Vector.empty }
-      .own(Topics.Position) { (_, ctx, _) => atPosition.add(ctx.state.instrumentState(Instrument(ex, sym)).get.positionSize.value); Vector.empty }
+      .own(Topics.Fill) { (_, ctx, _) => atFill.add(ctx.state.instrumentState(Instrument.perp(ex, sym)).get.positionSize.value); Vector.empty }
+      .own(Topics.Position) { (_, ctx, _) => atPosition.add(ctx.state.instrumentState(Instrument.perp(ex, sym)).get.positionSize.value); Vector.empty }
 
   private def eventually(what: => String)(cond: => Boolean): Unit =
     val deadline = System.nanoTime() + 3_000_000_000L
@@ -79,7 +79,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
       class NoFill extends Strategy:
         private var placed = false
         def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (b, ctx, _) =>
-          seen.add(ctx.state.instrumentState(Instrument(ex, sym)).get.positionSize.value)
+          seen.add(ctx.state.instrumentState(Instrument.perp(ex, sym)).get.positionSize.value)
           if placed then Vector.empty
           else
             placed = true
@@ -150,7 +150,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
           }
           .own(Topics.OrderUpdate) { (u, ctx, _) =>
             if u.status.isTerminal then
-              val view = ctx.state.instrumentState(Instrument(ex, sym)).get
+              val view = ctx.state.instrumentState(Instrument.perp(ex, sym)).get
               if view.pendingOrders.isEmpty && view.positionSize.isZero then
                 violations.add(s"挂单已消失但仓位仍为零 (status=${u.status})")
               terminalSeen.add(u.orderId)
@@ -193,7 +193,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
       /** 每收到一条行情就记一次"此刻看到的仓位" */
       class Peeker extends Strategy:
         def handlers = StrategyHandlers.empty.market(Topics.Bbo, inst) { (_, ctx, _) =>
-          decisions.add(ctx.state.instrumentState(Instrument(ex, sym)).get.positionSize.value)
+          decisions.add(ctx.state.instrumentState(Instrument.perp(ex, sym)).get.positionSize.value)
           Vector.empty
         }
 

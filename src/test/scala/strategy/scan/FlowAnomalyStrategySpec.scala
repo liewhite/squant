@@ -117,7 +117,7 @@ class FlowAnomalyStrategySpec extends munit.FunSuite:
   test("策略形态诚实声明它可能交易的标的 (不是绕过独占登记)"):
     val strategy = FlowAnomalyStrategy(ex, universe, cfg, rule)
     val sub = StrategyRunner.backtest(strategy).subscription
-    assertEquals(sub.instruments, universe.map(Instrument(ex, _)))
+    assertEquals(sub.instruments, universe.map(Instrument.perp(ex, _)))
 
   test("空宇宙在装配期即被拒"):
     intercept[IllegalArgumentException](FlowAnomalyStrategy(ex, Set.empty, cfg, rule))

@@ -21,7 +21,7 @@ import hft.TestUnits.given
 class EngineContractSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private val inst = Instrument(ex, sym)
+  private val inst = Instrument.perp(ex, sym)
   private val meta = SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
 
   test("账户对齐按 target 去重, 重复应答不能冒充另一个柜台"):

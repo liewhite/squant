@@ -8,8 +8,8 @@ import hft.TestUnits.given
 /** 总线投递: 按 (topic, key) 精确路由，且与 [[Subscription.accepts]] 判据同源。 */
 class EventBusSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
-  private val btc = Instrument(ex, "BTCUSDT")
-  private val eth = Instrument(ex, "ETHUSDT")
+  private val btc = Instrument.perp(ex, "BTCUSDT")
+  private val eth = Instrument.perp(ex, "ETHUSDT")
   private val t0 = 1_700_000_000_000L
 
   private def bboOf(i: Instrument) = BBO(i.exchange, i.symbol, 100.0, Coin(1.0), 100.1, Coin(1.0), t0)

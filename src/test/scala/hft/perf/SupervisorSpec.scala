@@ -18,7 +18,7 @@ import hft.TestCommandSink
 class SupervisorSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
   private val sym = "BTCUSDT"
-  private val inst = Instrument(ex, sym)
+  private val inst = Instrument.perp(ex, sym)
   private val meta = SymbolMeta(ex, sym, tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
   private val metas = Map((ex, sym) -> meta)
   private val paper = AccountId.Paper(1)
