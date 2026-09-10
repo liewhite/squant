@@ -46,15 +46,23 @@ class CrossArbStrategySpec extends munit.FunSuite:
   private def position(i: Instrument, size: Double, ts: Timestamp = t0) =
     Event.stamped(Topics.Position, Position(AccountId.Live, i.exchange, i.symbol, Coin(size)), ts, ts)
 
-  /** 终态回报。**注意 clientOrderId 用一个与策略无关的值** —— 框架会覆写策略给的那个,
-    * 策略必须按 (交易所, 标的) 认领, 不能按 id。 */
-  private def terminal(i: Instrument, side: Side, filled: Double, ts: Timestamp = t0 + 100) =
+  /** 终态回报。**clientOrderId 必须是框架真正分配的那个** ([[idOf]] 从下单产出里取)：
+    * 策略按 `ctx.orderTag` 认单，而标注是框架拿这个 id 去挂单登记里查出来的。
+    * 随手编一个 id 的话，标注就是 `None` —— 那模拟的是"别人的单"，不是本策略的回报。 */
+  private def terminal(clientOrderId: String, i: Instrument, side: Side, filled: Double, ts: Timestamp = t0 + 100) =
     Event.stamped(
       Topics.OrderUpdate,
-      OrderUpdate(AccountId.Live, "exch-id", Some("runner-generated-id"), i.exchange, i.symbol, side,
+      OrderUpdate(AccountId.Live, "exch-id", Some(clientOrderId), i.exchange, i.symbol, side,
         OrderStatus.Filled, 100.0, 1.0, Coin(filled), reduceOnly = false, ts),
       ts, ts,
     )
+
+  /** 发往某条腿的那张单的 clientOrderId —— 框架在处理器返回之后分配的那个。 */
+  private def idOf(orders: Vector[Order], i: Instrument): String =
+    orders
+      .find(o => o.exchange == i.exchange && o.symbol == i.symbol)
+      .map(_.clientOrderId)
+      .getOrElse(fail(s"没有发往 $i 的单: $orders"))
 
   /** 喂好两腿盘口, 使边足够 (100.50 买一 / 100.00 卖一 -> 约 50bp)。 */
   private def quoted(r: StrategyRunner): StrategyRunner =
@@ -76,26 +84,36 @@ class CrossArbStrategySpec extends munit.FunSuite:
       case _                                   => false
     ), "两条都必须是 IOC 限价")
 
-  test("**回报按 (交易所, 标的) 认领, 不按 clientOrderId** —— 框架会覆写它"):
+  test("**回报按标注认领, 不按 clientOrderId** —— 框架会覆写它"):
     // 这条就是那个 Critical 的回归测试: 从前策略拿自己生成的 id 匹配, 于是永久卡在 InFlight,
-    // 腿不平的检测与平腿代码一次都跑不到。
+    // 腿不平的检测与平腿代码一次都跑不到。现在认单靠下单时给的标注 (ArbPlan.Tag),
+    // 框架在回报到达时经 ctx.orderTag 交还。
     val r = quoted(runner())
-    feed(r, signal())
+    val opened = placed(feed(r, signal()))
     // 两腿都配平成交 -> 应回到 Idle
     feed(r, position(rich, -1.0))
     feed(r, position(cheap, 1.0))
-    feed(r, terminal(rich, Side.Short, 1.0))
-    val afterBoth = feed(r, terminal(cheap, Side.Long, 1.0))
+    feed(r, terminal(idOf(opened, rich), rich, Side.Short, 1.0))
+    val afterBoth = feed(r, terminal(idOf(opened, cheap), cheap, Side.Long, 1.0))
     assert(afterBoth.isEmpty, "配平之后不该发单")
     // 回到 Idle 的证据: 下一条信号还能开仓
     assertEquals(feed(r, signal()).size, 2, "配平后应能接受下一条信号 —— 卡死的话这里是 0")
 
-  test("一条腿全成、一条腿没成 -> 立刻市价 reduceOnly 平掉裸的那条"):
+  test("没有标注的回报一律不认 —— 那是重启后接管的别人的单"):
+    // 标注只活在下单那个进程的内存里 (不发给交易所), 所以接管单的 ctx.orderTag 是 None。
+    // 策略此刻正等着自己那两条腿, 一条认不出的回报不能推动状态机。
     val r = quoted(runner())
     feed(r, signal())
+    val foreign = feed(r, terminal("not-ours", rich, Side.Short, 1.0))
+    assert(foreign.isEmpty, "不认识的回报不该触发任何动作")
+    assert(feed(r, signal()).isEmpty, "状态机不该被推动 —— 仍在等自己的两条腿")
+
+  test("一条腿全成、一条腿没成 -> 立刻市价 reduceOnly 平掉裸的那条"):
+    val r = quoted(runner())
+    val opened = placed(feed(r, signal()))
     feed(r, position(rich, -1.0)) // 卖腿成了
-    feed(r, terminal(rich, Side.Short, 1.0))
-    val out = feed(r, terminal(cheap, Side.Long, 0.0)) // 买腿一点没成
+    feed(r, terminal(idOf(opened, rich), rich, Side.Short, 1.0))
+    val out = feed(r, terminal(idOf(opened, cheap), cheap, Side.Long, 0.0)) // 买腿一点没成
     val unwind = placed(out)
     assertEquals(unwind.size, 1)
     assertEquals(unwind.head.exchange, Exchange.Binance, "平的是有仓位的那条")
@@ -104,15 +122,20 @@ class CrossArbStrategySpec extends munit.FunSuite:
     assertEquals(unwind.head.orderType, OrderType.Market, "平腿用市价: 裸敞口, 少赚好过敞着")
     assert(unwind.head.reduceOnly, "平腿必须 reduceOnly")
 
+  /** 跑到"一腿裸着、平腿单已发出"这一步，返回平腿单的 clientOrderId。 */
+  private def unwinding(r: StrategyRunner): String =
+    val opened = placed(feed(r, signal()))
+    feed(r, position(rich, -1.0))
+    feed(r, terminal(idOf(opened, rich), rich, Side.Short, 1.0))
+    val unwind = placed(feed(r, terminal(idOf(opened, cheap), cheap, Side.Long, 0.0)))
+    idOf(unwind, rich)
+
   test("平腿成交后恢复 —— 能接受下一条信号"):
     val r = quoted(runner())
-    feed(r, signal())
-    feed(r, position(rich, -1.0))
-    feed(r, terminal(rich, Side.Short, 1.0))
-    feed(r, terminal(cheap, Side.Long, 0.0))
+    val unwindId = unwinding(r)
     // 平腿成交: 仓位回零
     feed(r, position(rich, 0.0))
-    val afterUnwind = feed(r, terminal(rich, Side.Long, 1.0, ts = t0 + 200))
+    val afterUnwind = feed(r, terminal(unwindId, rich, Side.Long, 1.0, ts = t0 + 200))
     assert(afterUnwind.isEmpty, "平掉之后不该再发单")
     assertEquals(feed(r, signal()).size, 2, "恢复后应能接受下一条信号")
 
@@ -121,13 +144,38 @@ class CrossArbStrategySpec extends munit.FunSuite:
     // 只有柜台一条 warn, 策略随后每条信号一条 INFO, 一个持有裸敞口且永久瘫痪的实盘策略
     // 在日志里是 INFO 级别的。
     val r = quoted(runner())
-    feed(r, signal())
-    feed(r, position(rich, -1.0))
-    feed(r, terminal(rich, Side.Short, 1.0))
-    feed(r, terminal(cheap, Side.Long, 0.0))
+    val unwindId = unwinding(r)
     // 平腿单回来了, 但仓位没动 (被拒)
-    val e = intercept[IllegalStateException](feed(r, terminal(rich, Side.Long, 0.0, ts = t0 + 200)))
+    val e = intercept[IllegalStateException](feed(r, terminal(unwindId, rich, Side.Long, 0.0, ts = t0 + 200)))
     assert(e.getMessage.contains("平腿之后仍有裸敞口"), e.getMessage)
+
+  test("平腿在途时, 别的回报不当成平腿终态 —— 按 (交易所, 标的) 认领会在这里误停机"):
+    // 平腿单发在裸着的那条腿上, 而开仓单也在那条腿上: 按 (交易所, 标的) 认领时两者分不开。
+    // 一条迟到/重发的开仓终态、或人工在同一标的上下的单, 都会被当成平腿单回来了 ->
+    // settleUnwind 在平腿单还没成交时就跑 -> 读到仍然不平的仓位 -> 抛异常终止进程。
+    //
+    // **本用例钉住的不变量是"不在本策略挂单登记里的回报不推动状态机"**: 这两条回报的
+    // `ctx.orderTag` 都是 None (开仓单已在首次终态时被移出登记, 手工单从来就不在),
+    // 于是落进 `case _`。承重的是 None 这一支, 不是 Unwind 与 OpenRich 两个值的区分 ——
+    // 当前状态机下这两个标注不会同时活在登记里, 那道值检查是一道断言, 不是这里的修复点。
+    val r = quoted(runner())
+    val opened = placed(feed(r, signal()))
+    feed(r, position(rich, -1.0))
+    feed(r, terminal(idOf(opened, rich), rich, Side.Short, 1.0))
+    feed(r, terminal(idOf(opened, cheap), cheap, Side.Long, 0.0)) // -> 发出平腿单
+
+    // 1) 交易所把开仓那张单的终态又推了一遍 (同一个 clientOrderId, 同一条腿)
+    val again = feed(r, terminal(idOf(opened, rich), rich, Side.Short, 1.0, ts = t0 + 150))
+    assert(again.isEmpty, "开仓单的重发回报不该推动平腿的结算")
+
+    // 2) 人工在同一条腿上平仓 (类文档: 本策略只开仓, 平仓需人工) —— 手工单不带 clientOrderId
+    val manual = Event.stamped(
+      Topics.OrderUpdate,
+      OrderUpdate(AccountId.Live, "manual-1", None, rich.exchange, rich.symbol, Side.Long,
+        OrderStatus.Filled, 100.0, 1.0, Coin(1.0), reduceOnly = false, t0 + 160),
+      t0 + 160, t0 + 160,
+    )
+    assert(feed(r, manual).isEmpty, "手工单的回报不该推动平腿的结算")
 
   test("在途期间不开新仓"):
     val r = quoted(runner())

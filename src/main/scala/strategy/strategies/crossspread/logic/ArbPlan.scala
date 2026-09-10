@@ -104,6 +104,20 @@ object ArbPlan:
       case NoQuote(instrument)             => s"$instrument 此刻没有两边盘口"
       case OrdersDisabled(edge)            => f"enableOrders=false: 本该对敲 (边 $edge%.1fbp), 只记录不下单"
 
+  /** 订单标注 (见 [[hft.domain.Order.tag]]) —— 策略据它认回报是哪一张单的。
+    *
+    * 与**这里构造的每一张单**收在一处: 本对象是三张单 (开仓两腿 + 平腿单) 的唯一构造点，
+    * 标注则是下单方与认单方之间的约定。两处各写一个字面量的话，改了一处不会有任何编译
+    * 错误 —— 症状是那条腿的回报从此认不出来，策略永久停在"上一轮还在途"。
+    */
+  object Tag:
+    /** 卖贵那条腿的开仓单 */
+    val OpenRich: String = "open-rich"
+    /** 买便宜那条腿的开仓单 */
+    val OpenCheap: String = "open-cheap"
+    /** 平掉裸敞口的市价单 */
+    val Unwind: String = "unwind"
+
   /** 决定要下的两条腿。 */
   final case class Legs(sell: Order, buy: Order, edgeBps: Double):
     def orders: Vector[Order] = Vector(sell, buy)
@@ -175,12 +189,12 @@ object ArbPlan:
       _ <- Either.cond(cfg.enableOrders, (), Skip.OrdersDisabled(edge))
     yield Legs(
       // 卖贵的一边: IOC 限价挂在它的买一 —— 主动吃单, 价内即成, 不留挂单。
-      sell = ioc(sellLeg.instrument, Side.Short, sellLeg.bid, cfg.qtyPerLeg),
-      buy = ioc(buyLeg.instrument, Side.Long, buyLeg.ask, cfg.qtyPerLeg),
+      sell = ioc(sellLeg.instrument, Side.Short, sellLeg.bid, cfg.qtyPerLeg, Tag.OpenRich),
+      buy = ioc(buyLeg.instrument, Side.Long, buyLeg.ask, cfg.qtyPerLeg, Tag.OpenCheap),
       edgeBps = edge,
     )
 
-  private def ioc(instrument: Instrument, side: Side, price: Price, qty: Coin): Order =
+  private def ioc(instrument: Instrument, side: Side, price: Price, qty: Coin, tag: String): Order =
     Order(
       id = "",
       exchange = instrument.exchange,
@@ -195,6 +209,29 @@ object ArbPlan:
       // 覆写。曾经在这里自己生成并拿它关联回报, 后果是一条回报都匹配不上: 策略永久卡在
       // "上一轮还在途", 而腿不平的检测与平腿代码一次都跑不到。
       clientOrderId = "",
+      // 认单靠它: 回报到达时框架经 `ctx.orderTag` 把它交还 (见 hft.domain.Order.tag)。
+      tag = tag,
+    )
+
+  /** 平掉裸敞口的那一张单。
+    *
+    * 与开仓两腿同处一个构造点: 三张单的标注 ([[Tag]]) 因此都在下单方这一侧, 认单方只引用。
+    * 从前它内联在策略里, 于是 `Tag.Unwind` 定义在这里却只在别处被用到 —— 约定的两端分了家。
+    *
+    * **市价**而不是 IOC 限价: 此刻手里已经是裸方向敞口, "少赚"远好过"敞着"。开仓那一步取向
+    * 相反 (见 [[ioc]]), 因为要害不同。
+    */
+  def unwindOrder(naked: Naked): Order =
+    Order(
+      id = "",
+      exchange = naked.leg.exchange,
+      symbol = naked.leg.symbol,
+      side = naked.closeSide,
+      orderType = OrderType.Market,
+      quantity = naked.excess,
+      reduceOnly = true,
+      clientOrderId = "",
+      tag = Tag.Unwind,
     )
 
   /** 两腿仓位不抵消的部分 —— **裸方向敞口**。
