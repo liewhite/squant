@@ -42,7 +42,7 @@ final case class Subscription(interests: Set[Interest]):
     */
   def marketStreams: Set[(Exchange, SubscriptionKind)] = interests.flatMap {
     case Interest.Keyed(t: MarketTopic[?], keys) =>
-      keys.collect { case i: Instrument => (i.exchange, t.streamKind(i.symbol)) }
+      keys.collect { case i: Instrument => (i.exchange, t.streamKind(i)) }
     case Interest.All(t: MarketTopic[?]) =>
       sys.error(
         s"公共行情 topic '$t' 只能用 Interest.Keyed 声明: Interest.All 没有标的集合, " +

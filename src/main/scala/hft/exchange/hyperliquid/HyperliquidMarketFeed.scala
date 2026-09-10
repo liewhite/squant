@@ -73,7 +73,12 @@ final class HyperliquidMarketFeed(
 
   /** 订阅报文即流标识：同一条报文就是同一条流，去重与下发因此不可能各说各话 */
   private def streamOf(kind: SubscriptionKind): String =
-    val coin = toHyperliquid(kind.subscribedSymbol, dex)
+    val instrument = kind.subscribedInstrument
+    require(
+      instrument.kind == InstrumentKind.LinearPerp,
+      s"Hyperliquid 行情源只支持永续, 收到 ${instrument.kind}: $instrument",
+    )
+    val coin = toHyperliquid(instrument.symbol, dex)
     kind match
       case _: SubscriptionKind.BBO   => s"""{"type":"bbo","coin":"$coin"}"""
       case _: SubscriptionKind.Trade => s"""{"type":"trades","coin":"$coin"}"""

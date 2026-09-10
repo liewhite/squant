@@ -46,12 +46,17 @@ final class OkxMarketFeed(
     val args = kinds.map(argJson).mkString(",")
     outgoing.send(WebSocketFrame.text(s"""{"op":"subscribe","args":[$args]}"""))
 
-  private def argJson(kind: SubscriptionKind): String = kind match
-    case SubscriptionKind.BBO(s)         => s"""{"channel":"bbo-tbt","instId":"${toOkxPerp(s, quote)}"}"""
-    case SubscriptionKind.FundingRate(s) => s"""{"channel":"funding-rate","instId":"${toOkxPerp(s, quote)}"}"""
-    case SubscriptionKind.MarkPrice(s)   => s"""{"channel":"mark-price","instId":"${toOkxPerp(s, quote)}"}"""
-    case SubscriptionKind.IndexPrice(s)  => s"""{"channel":"index-tickers","instId":"${toOkxIndex(s, quote)}"}"""
-    case SubscriptionKind.Trade(s)       => s"""{"channel":"trades","instId":"${toOkxPerp(s, quote)}"}"""
+  /** instId 按**品种**拼 (见 [[OkxCodec.toOkx]]) —— 从前这里恒拼 `-SWAP`, 期权盘口订不出来。
+    *
+    * 指数是例外: 它是标的的指数价 (`BTC-USDT`), 不属于任何一个合约, 所以走 [[toOkxIndex]]。 */
+  private def argJson(kind: SubscriptionKind): String =
+    val instrument = kind.subscribedInstrument
+    kind match
+      case _: SubscriptionKind.BBO         => s"""{"channel":"bbo-tbt","instId":"${toOkx(instrument, quote)}"}"""
+      case _: SubscriptionKind.FundingRate => s"""{"channel":"funding-rate","instId":"${toOkx(instrument, quote)}"}"""
+      case _: SubscriptionKind.MarkPrice   => s"""{"channel":"mark-price","instId":"${toOkx(instrument, quote)}"}"""
+      case _: SubscriptionKind.IndexPrice  => s"""{"channel":"index-tickers","instId":"${toOkxIndex(instrument.symbol, quote)}"}"""
+      case _: SubscriptionKind.Trade       => s"""{"channel":"trades","instId":"${toOkx(instrument, quote)}"}"""
 
   // ==================== 公共流解析 (解析失败/错误事件 -> 异常上抛终止) ====================
 

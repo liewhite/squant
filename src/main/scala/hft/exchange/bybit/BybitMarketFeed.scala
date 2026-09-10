@@ -48,12 +48,21 @@ final class BybitMarketFeed(
     val args = kinds.map(topicOf).map(t => s"\"$t\"").mkString(",")
     outgoing.send(WebSocketFrame.text(s"""{"op":"subscribe","args":[$args]}"""))
 
-  private def topicOf(kind: SubscriptionKind): String = kind match
-    case SubscriptionKind.BBO(s)         => s"orderbook.1.$s"
-    case SubscriptionKind.MarkPrice(s)   => s"tickers.$s"
-    case SubscriptionKind.IndexPrice(s)  => s"tickers.$s"
-    case SubscriptionKind.FundingRate(s) => s"tickers.$s"
-    case SubscriptionKind.Trade(s)       => s"publicTrade.$s"
+  private def topicOf(kind: SubscriptionKind): String =
+    // 与 BybitClient 的守卫同一条事实: 本适配层只接 category=linear。期权走的是另一条
+    // WS 端点 (option 有独立的公共流地址), 不是换个 topic 名就能订到的。
+    val instrument = kind.subscribedInstrument
+    require(
+      instrument.kind == InstrumentKind.LinearPerp,
+      s"Bybit 行情源只支持 category=linear, 收到 ${instrument.kind}: $instrument",
+    )
+    val s = instrument.symbol
+    kind match
+      case _: SubscriptionKind.BBO         => s"orderbook.1.$s"
+      case _: SubscriptionKind.MarkPrice   => s"tickers.$s"
+      case _: SubscriptionKind.IndexPrice  => s"tickers.$s"
+      case _: SubscriptionKind.FundingRate => s"tickers.$s"
+      case _: SubscriptionKind.Trade       => s"publicTrade.$s"
 
   // ==================== 公共流解析 (解析失败/订阅失败 -> 异常上抛终止) ====================
 

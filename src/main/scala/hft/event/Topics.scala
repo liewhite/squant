@@ -24,24 +24,24 @@ object Topics:
 
   object Bbo extends MarketTopic[BBO]("bbo"):
     def keyOf(p: BBO): Instrument = p.instrument
-    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.BBO(symbol)
+    def streamKind(instrument: Instrument): SubscriptionKind = SubscriptionKind.BBO(instrument)
 
   /** 公共成交印记 (市场匿名成交)：策略信号与模拟撮合的价格来源，非本账户成交 */
   object Trade extends MarketTopic[MarketTrade]("trade"):
     def keyOf(p: MarketTrade): Instrument = p.instrument
-    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.Trade(symbol)
+    def streamKind(instrument: Instrument): SubscriptionKind = SubscriptionKind.Trade(instrument)
 
   object MarkPrice extends MarketTopic[hft.domain.MarkPrice]("markPrice"):
     def keyOf(p: hft.domain.MarkPrice): Instrument = p.instrument
-    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.MarkPrice(symbol)
+    def streamKind(instrument: Instrument): SubscriptionKind = SubscriptionKind.MarkPrice(instrument)
 
   object IndexPrice extends MarketTopic[hft.domain.IndexPrice]("indexPrice"):
     def keyOf(p: hft.domain.IndexPrice): Instrument = p.instrument
-    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.IndexPrice(symbol)
+    def streamKind(instrument: Instrument): SubscriptionKind = SubscriptionKind.IndexPrice(instrument)
 
   object FundingRate extends MarketTopic[hft.domain.FundingRate]("fundingRate"):
     def keyOf(p: hft.domain.FundingRate): Instrument = p.instrument
-    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.FundingRate(symbol)
+    def streamKind(instrument: Instrument): SubscriptionKind = SubscriptionKind.FundingRate(instrument)
 
   // ==================== 账户私有回报 (按标的) ====================
 

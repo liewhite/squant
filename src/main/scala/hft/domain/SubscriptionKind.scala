@@ -18,17 +18,23 @@ package hft.domain
   * 订不到数据，没有任何症状。把方向倒过来之后这两个洞一起消失。
   */
 enum SubscriptionKind:
-  case FundingRate(symbol: Symbol)
-  case BBO(symbol: Symbol)
-  case MarkPrice(symbol: Symbol)
-  case IndexPrice(symbol: Symbol)
+  case FundingRate(instrument: Instrument)
+  case BBO(instrument: Instrument)
+  case MarkPrice(instrument: Instrument)
+  case IndexPrice(instrument: Instrument)
 
   /** 公共成交印记 (逐笔成交)，作策略信号 (如 K 线/动量)，不参与撮合 */
-  case Trade(symbol: Symbol)
+  case Trade(instrument: Instrument)
 
-  def subscribedSymbol: Symbol = this match
-    case FundingRate(s) => s
-    case BBO(s)         => s
-    case MarkPrice(s)   => s
-    case IndexPrice(s)  => s
-    case Trade(s)       => s
+  /** 订阅的是哪个标的 —— 带品种。
+    *
+    * 从前这里只有 symbol，于是适配层拼订阅参数时只能假定一种品种（OKX 侧就是恒拼
+    * `-SWAP`）。同一个 `ETH` 上的期权盘口与永续盘口是两条不同的流，订阅参数也不同，
+    * 少了品种就表达不出来 —— 而"订了个空"没有任何症状。
+    */
+  def subscribedInstrument: Instrument = this match
+    case FundingRate(i) => i
+    case BBO(i)         => i
+    case MarkPrice(i)   => i
+    case IndexPrice(i)  => i
+    case Trade(i)       => i

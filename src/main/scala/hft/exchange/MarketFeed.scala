@@ -60,7 +60,7 @@ abstract class MarketFeed extends Actor:
       val fresh = request.kinds -- subscribed
       if fresh.nonEmpty then
         subscribed ++= fresh
-        feedLogger.info(s"$exchange 新增行情订阅 ${fresh.size} 条: ${fresh.map(_.subscribedSymbol).mkString(",")}")
+        feedLogger.info(s"$exchange 新增行情订阅 ${fresh.size} 条: ${fresh.map(_.subscribedInstrument).mkString(",")}")
         subscribeToExchange(fresh)
     }
     Vector.empty

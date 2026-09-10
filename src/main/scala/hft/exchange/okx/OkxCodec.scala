@@ -27,8 +27,6 @@ private[okx] object OkxCodec:
     case InstrumentKind.Option      => instrument.symbol
     case InstrumentKind.Spot        => s"${instrument.symbol}-$quote"
 
-  /** 永续的 instId —— 只在还没有 [[Instrument]] 的调用点上用（行情订阅目前按 symbol 声明）。 */
-  def toOkxPerp(symbol: Symbol, quote: String): String = s"$symbol-$quote-SWAP"
   def toOkxIndex(symbol: Symbol, quote: String): String = s"$symbol-$quote"
 
   /** `"BTC-USDT-SWAP"` -> `Some("BTC")`；**计价币不是 `quote` 的、非永续的，一律 None**。

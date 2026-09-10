@@ -61,7 +61,14 @@ final class BinanceMarketFeed(
     case _: SubscriptionKind.MarkPrice | _: SubscriptionKind.IndexPrice | _: SubscriptionKind.FundingRate => Route.Market
 
   private def streamName(kind: SubscriptionKind): String =
-    val symbol = kind.subscribedSymbol.toLowerCase
+    val instrument = kind.subscribedInstrument
+    // 与 BinanceClient 的守卫同一条事实: 本适配层只接 USDⓈ-M 永续。别的品种订下去只会
+    // "订了个空" —— 交易所不认这个流名, 而 WS 订阅失败不一定有回执。
+    require(
+      instrument.kind == InstrumentKind.LinearPerp,
+      s"Binance 行情源只支持 U 本位永续, 收到 ${instrument.kind}: $instrument",
+    )
+    val symbol = instrument.symbol.toLowerCase
     kind match
       case _: SubscriptionKind.BBO   => s"$symbol@bookTicker"
       case _: SubscriptionKind.Trade => s"$symbol@aggTrade"

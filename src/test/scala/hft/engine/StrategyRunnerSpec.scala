@@ -67,15 +67,15 @@ class StrategyRunnerSpec extends munit.FunSuite:
     assertEquals(
       sub.marketStreams,
       Set[(Exchange, SubscriptionKind)](
-        (ex, SubscriptionKind.BBO("BTCUSDT")),
-        (Exchange.Okx, SubscriptionKind.Trade("ETHUSDT")),
+        (ex, SubscriptionKind.BBO(Instrument.perp(ex, "BTCUSDT"))),
+        (Exchange.Okx, SubscriptionKind.Trade(Instrument.perp(Exchange.Okx, "ETHUSDT"))),
       ),
     )
 
   test("补齐的私有回报不会被误当成要订阅的行情流"):
     // Position/OrderUpdate/Fill 由账户流推送，不该出现在向交易所下的行情订阅里
     val kinds = subOf(Set(Interest.Keyed(Topics.Bbo, Set(btc)))).marketStreams
-    assertEquals(kinds, Set[(Exchange, SubscriptionKind)]((ex, SubscriptionKind.BBO("BTCUSDT"))))
+    assertEquals(kinds, Set[(Exchange, SubscriptionKind)]((ex, SubscriptionKind.BBO(Instrument.perp(ex, "BTCUSDT")))))
 
   test("自定义的按标的路由 topic 表示关注, 不表示交易 —— 不触发补齐"):
     // 一个只订阅别处指标的监控/元策略, 不该被补上该标的的私有回报, 更不该被引擎
@@ -98,7 +98,15 @@ class StrategyRunnerSpec extends munit.FunSuite:
     // 从前那张 topic->流 的表只列了框架内置的五个, 自定义的会被认作交易标的却永远订不到数据。
     val sub = subOf(Set(Interest.Keyed(StrategyRunnerSpec.CustomFeed, Set(btc))))
     assertEquals(sub.instruments, Set(btc), "继承 MarketTopic 即被认作交易标的")
-    assertEquals(sub.marketStreams, Set[(Exchange, SubscriptionKind)]((ex, SubscriptionKind.Trade("BTCUSDT"))))
+    assertEquals(sub.marketStreams, Set[(Exchange, SubscriptionKind)]((ex, SubscriptionKind.Trade(Instrument.perp(ex, "BTCUSDT")))))
+
+  test("行情订阅流带着标的的品种 —— 期权盘口与永续盘口是两条不同的流"):
+    // 从前 SubscriptionKind 只带 symbol, 适配层拼订阅参数时只能假定一种品种 (OKX 侧恒拼
+    // -SWAP)。少了品种就订不到期权盘口, 而"订了个空"没有任何症状。
+    val option = Instrument.option(Exchange.Okx, "ETH-USD-250101-3000-C")
+    val streams = subOf(Set(Interest.Keyed(Topics.Bbo, Set(option)))).marketStreams
+    assertEquals(streams, Set[(Exchange, SubscriptionKind)]((Exchange.Okx, SubscriptionKind.BBO(option))))
+    assertEquals(streams.head._2.subscribedInstrument.kind, InstrumentKind.Option)
 
 object StrategyRunnerSpec:
   final case class Score(instrument: Instrument, value: Double)
@@ -106,7 +114,8 @@ object StrategyRunnerSpec:
   /** 一个"用户自定义"的行情源 —— 继承 MarketTopic 就必须回答 streamKind, 否则编译不过 */
   object CustomFeed extends hft.event.MarketTopic[Score]("customFeed"):
     def keyOf(p: Score): Instrument = p.instrument
-    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.Trade(symbol)
+    def streamKind(instrument: Instrument): SubscriptionKind = SubscriptionKind.Trade(instrument)
 
   object AlphaSignal extends hft.event.Topic[Instrument, Score]("alphaSignal"):
     def keyOf(p: Score): Instrument = p.instrument
+

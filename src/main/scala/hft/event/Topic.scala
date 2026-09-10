@@ -84,4 +84,4 @@ abstract class MarketTopic[P](name: String) extends Topic[hft.domain.Instrument,
     * 只是从此静默订不到数据），而且表只覆盖得了框架内置的那几个，覆盖不了用户自定义的
     * 行情源。抽象成员则由编译器保证每一个 `MarketTopic` 都回答了。
     */
-  def streamKind(symbol: hft.domain.Symbol): hft.domain.SubscriptionKind
+  def streamKind(instrument: hft.domain.Instrument): hft.domain.SubscriptionKind

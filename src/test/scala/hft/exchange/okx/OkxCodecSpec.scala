@@ -13,7 +13,6 @@ class OkxCodecSpec extends munit.FunSuite:
 
   test("symbol <-> instId 转换"):
     assertEquals(toOkx(Instrument.perp(Exchange.Okx, "BTC"), "USDT"), "BTC-USDT-SWAP")
-    assertEquals(toOkxPerp("BTC", "USDT"), "BTC-USDT-SWAP")
     assertEquals(toOkxIndex("BTC", "USDT"), "BTC-USDT")
     assertEquals(fromOkx("BTC-USDT-SWAP", "USDT"), Some("BTC"))
     // 计价币不符一律不认。框架的 Symbol 只有基础币, 认了的话币本位的 ETH-USD-SWAP

@@ -106,7 +106,7 @@ class EngineContractSpec extends munit.FunSuite:
     override def exchange: Exchange = exch
     override protected def connect(): Unit = ()
     override protected def subscribeToExchange(kinds: Set[SubscriptionKind]): Unit =
-      log.add(s"market:$exch:${kinds.map(_.subscribedSymbol).toVector.sorted.mkString(",")}"): Unit
+      log.add(s"market:$exch:${kinds.map(_.subscribedInstrument.symbol).toVector.sorted.mkString(",")}"): Unit
 
   /** 记录收到哪些指令的假柜台 */
   private class RecordingGateway(exch: Exchange, acct: AccountId, log: ConcurrentLinkedQueue[String]) extends TradingGateway:

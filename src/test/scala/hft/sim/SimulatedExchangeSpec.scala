@@ -27,7 +27,7 @@ object CustomFeedSpec:
 
   object Depth extends MarketTopic[DepthSnapshot]("testDepth"):
     def keyOf(p: DepthSnapshot): Instrument = p.instrument
-    def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.BBO(symbol)
+    def streamKind(instrument: Instrument): SubscriptionKind = SubscriptionKind.BBO(instrument)
 
 class SimulatedExchangeSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
@@ -225,7 +225,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
 
       bus.publish(Event.local(
         hft.event.Commands.MarketSubscription,
-        hft.event.Commands.MarketSubscriptionRequest(ex, Set(SubscriptionKind.BBO(sym))),
+        hft.event.Commands.MarketSubscriptionRequest(ex, Set(SubscriptionKind.BBO(Instrument.perp(ex, sym)))),
       ))
       Thread.sleep(200) // 真弹跳的话这 200ms 足够攒出成千上万条
       assertEquals(relayed.size, 1, "订阅指令只该在主总线上出现一次")
