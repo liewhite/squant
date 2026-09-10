@@ -231,7 +231,7 @@ final class BybitClient private[bybit] (
   /** 当前挂单。**必须翻页** —— `/v5/order/realtime` 默认每页 20 条并给出 `nextPageCursor`。
     *
     * 不翻页的后果不是"少看几张单": 对齐时 [[PositionBook.align]] 会漏掉部分成交单的记账进度,
-    * 于是下一条推送把已经含在仓位里的成交**再记一遍**。同文件的 fetchAllSymbolMetas 本就跟着
+    * 于是下一条推送把已经含在仓位里的成交**再记一遍**。同文件的 fetchMetas 本就跟着
     * cursor 走, 这里漏了。 */
   override def fetchPendingOrders(instrument: Instrument): Either[ExchangeError, Vector[OrderUpdate]] =
     val symbol = linearSymbol(instrument)

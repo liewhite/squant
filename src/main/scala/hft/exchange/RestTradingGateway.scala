@@ -48,14 +48,6 @@ final class RestTradingGateway(
   /** 汇报面解析出的每一条都排进本柜台的邮箱 (不经总线)，由 actor 线程按序消费 ——
     * 于是"柜台是回报的唯一发布者"成立，账本也只有一个写者。 */
   override protected def connect(): Unit =
-    // 启动即加载本所的基础品种规格。柜台一装上就该能发永续单 —— 那是它此前的行为
-    // (规格由构造方在装配期传入一份), 不该因为"规格改成按需加载"而悄悄变成"对齐之后才能发单"。
-    //
-    // 其它品种 (期权等) 由启动对齐按需补齐: 那时才知道要交易哪些标的, 而期权链每周滚动,
-    // 启动时也拉不到"下周才上市的合约"。见 syncSnapshot 的 ensureMetas。
-    client.loadMetas(InstrumentKind.LinearPerp) match
-      case Right(n) => logger.info(s"$target 加载永续合约规格 $n 条")
-      case Left(e)  => throw IllegalStateException(s"$target 加载永续合约规格失败: ${e.message}")
     feed.connect(
       report => tell(Event.local(GatewayInboxes, GatewayInbox(report))),
       body => fork(body),

@@ -18,8 +18,8 @@ object AccountMonitor:
   * [[TradingGateway]] 也能产出这些读数 (启动对齐时发一份), 但它是为**执行**设计的, 拿它来
   * **观察**会撞上三处它自己的前提:
   *
-  *   1. **它要求每个标的都有合约规格** (`syncSnapshot` 入口 `symbols.foreach(metaOf)`) ——
-  *      那是"我要给它发单"的前提。而账户里完全可能持有没有规格的东西: 币安的 `symbolMetas`
+  *   1. **它要求每个标的都有合约规格** (`syncSnapshot` 入口的 `ensureMetas` + `metaOf`) ——
+  *      那是"我要给它发单"的前提。而账户里完全可能持有没有规格的东西: 币安的合约规格表
   *      只收 `TRADING` + `PERPETUAL`, 于是一张股票永续 (`AAPLUSDT`) 或季度交割合约
   *      (`BTCUSDT_250926`) 就能让整个只读进程启动失败, 报的还是"无法发单"。
   *   2. **它只管对齐过的标的** (`PositionBook.manages`): 请求里没列的标的, 其回报一律在

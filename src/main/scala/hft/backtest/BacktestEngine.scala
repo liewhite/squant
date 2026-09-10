@@ -62,6 +62,15 @@ final class BacktestEngine(
     account: AccountId = AccountId.Live,
 ):
   // 装配期校验, 不留给运行时静默失效
+  // 回测是**单交易所**的: 撮合只有一个 SimState、accountInfo 只报一个所, 而账本按标的
+  // 记账后 openPositions 只返回本所那部分 —— 装了别所的规格就会拿到半份仓位而 equity 仍按
+  // 全账本算, 两个口径悄悄不一致。把"单所"写成结构保证, 而不是留给调用方记得。
+  private val foreign = symbolMetas.keys.filterNot(_.exchange == exchange)
+  require(
+    foreign.isEmpty,
+    s"回测绑定的是 $exchange, 但传入了别所的合约规格: ${foreign.mkString(",")} —— 跨所回测请分别跑",
+  )
+
   private val mismatched = runners.filterNot(_.account == account)
   require(
     mismatched.isEmpty,

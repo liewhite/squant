@@ -76,8 +76,6 @@ final class OkxAccountFeed(
   override def exchange: Exchange = Exchange.Okx
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
-  /** symbol -> meta，用于张<->币换算 (连接时一次性拉取) */
-  private var metas: Map[Symbol, SymbolMeta] = Map.empty
   /** greeks 去重：ccy -> 上次 timestamp */
   private val lastGreeksTs: mutable.Map[String, Timestamp] = mutable.Map.empty
 
@@ -91,6 +89,15 @@ final class OkxAccountFeed(
       sleepUnlessStopped: Long => Boolean,
   ): Unit =
     report = sink
+    // **本流自己保证规格已加载**: OKX 的私有推送里数量是张数, 把它换回币本位是本适配层
+    // 自己的事实 (Binance/Bybit 的推送就是币本位, 它们的账户流不需要规格)。
+    //
+    // 从前这里拷贝一份 client 的快照; 快照改成可增量加载之后, 一度变成"指望柜台先加载" ——
+    // 而账户流并不总是和柜台配对: 看板 (AccountMonitor) 那条链路就没有柜台。前提由谁需要
+    // 谁保证, 才不会因为装配形态换了一种就断掉。
+    client.loadMetas(InstrumentKind.LinearPerp) match
+      case Right(n) => logger.info(s"OKX 私有流加载永续合约规格 $n 条")
+      case Left(e)  => throw IllegalStateException(s"OKX 私有流加载合约规格失败: ${e.message}")
 
     WsLoop.run("okx/private", backend, () => wsUrl, outgoing, onPrivateText, spawn)
     // login 帧入队，连接建立后立即发送 (timestamp 在此刻生成；连接通常亚秒级，OKX 允许 ~30s 偏差)
@@ -149,16 +156,14 @@ final class OkxAccountFeed(
     case "error" => throw IllegalStateException(s"OKX private WS error: code=${env.code} msg=${env.msg}")
     case other   => logger.warn(s"ignoring OKX private event '$other': $text")
 
-  /** 张->币换算所需的合约规格。
+  /** 张->币换算所需的合约规格 —— **缺了就抛** (见 [[ExchangeClient.metaOf]])。
     *
-    * **缺了就抛**：`metas` 是装配期一次性加载的全量表 (见 `ExchangeClient.symbolMetas`)，
-    * 一个已被 `fromOkx` 认作本 quote 的 symbol 却查不到规格，只能是规格表没加载全或
-    * 新上市合约还没进表 —— 而这条仓位读数是对账的输入，静默跳过等于让对账永远"一致"。
+    * 一个已被 `fromOkx` 认作本 quote 的 symbol 却查不到规格，只能是新上市合约还没进表 ——
+    * 而这条仓位读数是对账的输入，静默跳过等于让对账永远"一致"。
     *
     * 从前同一个条件在本文件里有两种处理: 仓位路径用 for-comprehension 静默跳过、
     * 订单路径直接抛。同一事实必须只有一个答案。 */
-  private def metaOf(symbol: Symbol): SymbolMeta =
-    metas.getOrElse(symbol, throw IllegalStateException(s"OKX 缺 $symbol 的合约规格 (装配期未加载?)"))
+  private def metaOf(symbol: Symbol): SymbolMeta = client.metaOf(Instrument.perp(Exchange.Okx, symbol))
 
   /** 交易所报的仓位 —— 交给柜台对账, 不进总线 */
   private def publishPosition(d: PositionData): Unit =

@@ -91,12 +91,12 @@ final case class SimState(
     */
   def onMarket(exchange: Exchange, ev: AnyEvent, now: Timestamp): (SimState, Vector[AnyEvent]) =
     ev.as(Topics.Bbo).map { bbo =>
-      copy(lastBbo = lastBbo.updated(bbo.instrument, bbo)).matchCrossing(exchange, bbo, now)
+      copy(lastBbo = lastBbo.updated(bbo.instrument, bbo)).matchCrossing(bbo, now)
     }.orElse(ev.as(Topics.MarkPrice).map { mp =>
       (copy(lastMark = lastMark.updated(mp.instrument, mp.price)), Vector.empty[AnyEvent])
     }).orElse(ev.as(Topics.Trade).map { t =>
       // 逐笔撮合：真实成交价严格穿越挂单价即成交 (与 BBO 穿越同一 maker 口径, 见 Matcher)
-      copy(lastTrade = lastTrade.updated(t.instrument, t.price)).matchTrade(exchange, t, now)
+      copy(lastTrade = lastTrade.updated(t.instrument, t.price)).matchTrade(t, now)
     }).getOrElse((this, Vector.empty[AnyEvent]))
 
   /** 本柜台账户的读数快照 (估值口径见 [[markOf]])。
@@ -118,7 +118,7 @@ final case class SimState(
     else buf.sortInPlaceBy(o => (o.pricePriority, o.seq)).toVector
 
   /** 把按优先级排好序的越价挂单依次成交 (maker 成交价取挂单价)。 */
-  private def fillCrossed(exchange: Exchange, crossed: Vector[RestingOrder], now: Timestamp): (SimState, Vector[AnyEvent]) =
+  private def fillCrossed(crossed: Vector[RestingOrder], now: Timestamp): (SimState, Vector[AnyEvent]) =
     if crossed.isEmpty then (this, Vector.empty)
     else
       crossed.foldLeft((this, Vector.empty[AnyEvent])) { case ((st, evs), o) =>
@@ -129,12 +129,12 @@ final case class SimState(
       }
 
   /** BBO 严格穿越挂单价的全部挂单成交 (maker 悲观侧, 成交价取挂单价) */
-  private def matchCrossing(exchange: Exchange, bbo: BBO, now: Timestamp): (SimState, Vector[AnyEvent]) =
-    fillCrossed(exchange, crossingOrders(o => o.instrument == bbo.instrument && Matcher.crossedByBbo(o.side, o.limitPrice, bbo)), now)
+  private def matchCrossing(bbo: BBO, now: Timestamp): (SimState, Vector[AnyEvent]) =
+    fillCrossed(crossingOrders(o => o.instrument == bbo.instrument && Matcher.crossedByBbo(o.side, o.limitPrice, bbo)), now)
 
   /** 真实成交严格穿越挂单价的全部挂单成交 (maker 悲观侧, 成交价取挂单价) */
-  private def matchTrade(exchange: Exchange, t: MarketTrade, now: Timestamp): (SimState, Vector[AnyEvent]) =
-    fillCrossed(exchange, crossingOrders(o => o.instrument == t.instrument && Matcher.crossedByTrade(o.side, o.limitPrice, t.price)), now)
+  private def matchTrade(t: MarketTrade, now: Timestamp): (SimState, Vector[AnyEvent]) =
+    fillCrossed(crossingOrders(o => o.instrument == t.instrument && Matcher.crossedByTrade(o.side, o.limitPrice, t.price)), now)
 
   // ==================== 下单到达撮合 ====================
 

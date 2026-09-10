@@ -358,21 +358,23 @@ final class OkxClient private[okx] (
     * `instType=SWAP` 返回的是**全部计价币种**的永续 (USDT / USDC / 币本位)。非本 quote 的
     * 在 [[fromOkx]] 就被挡掉了 —— 挡不住的话, `ETH-USD-SWAP` 会和 `ETH-USDT-SWAP` 收敛成
     * 同一个 `"ETH"`, 拿 USDT 的 ctVal 去换币本位的张数, 还会在下面 `toMap` 时静默覆盖真的
-    * 那一行。剩下的若仍缺合约规格 (新上市还没进 metas) 也跳过: 张->币换不了, 而柜台只会
-    * 问它对齐的那几个标的。
+    * 那一行。
     */
   override def fetchPositions(): Either[ExchangeError, Vector[Position]] =
     signedRequest[PositionsResp](Method.GET, "/api/v5/account/positions?instType=SWAP").flatMap { resp =>
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator.flatMap { d =>
-          for
-            sym <- fromOkx(d.instId, quote)
-            meta <- knownMetas.get(Instrument.perp(Exchange.Okx, sym))
+          // 规格缺失**不再静默跳过**: 从前 symbolMetas 是 lazy val, 首次访问必然拉全表,
+          // 所以"查不到"只可能是"交易所清单里没有"; 规格改成可增量加载之后, "查不到"多了
+          // 一种含义"还没人加载", 而两者的表现完全一样 —— 返回空列表。看板那条链路
+          // (AccountMonitor, 无柜台) 会因此把 OKX 全部持仓显示成零, 没有任何症状。
+          for sym <- fromOkx(d.instId, quote)
           yield Position(
             account = AccountId.Live,
             exchange = Exchange.Okx,
             symbol = sym,
-            size = meta.toCoin(Contracts(d.pos.asDouble)), // 张 -> 币; OKX 的 pos 正多负空
+            // 张 -> 币; OKX 的 pos 正多负空。规格缺失即抛 (见上)
+            size = metaOf(sym).toCoin(Contracts(d.pos.asDouble)),
           )
         }.toVector
       }

@@ -166,7 +166,7 @@ private[okx] object OkxCodec:
     * 在启动拉规格时崩掉，与本进程交易什么毫不相干。规格得等它真正上市才有意义。
     *
     * 它**无默认值**，缺了就抛：给 `""` 兜底的话，
-    * [[OkxPublicClient.fetchAllSymbolMetas]] 的状态过滤会把**每一条**都判为不合格，
+    * [[OkxPublicClient.fetchMetas]] 的状态过滤会把**每一条**都判为不合格，
     * 于是进程带着一张空的规格表启动 —— 下不了单、换不了算，而启动本身是"成功"的。
     */
   final case class InstrumentData(

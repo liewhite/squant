@@ -8,7 +8,7 @@ import hft.event.{AnyEvent, Event, EventBus, Interest, Topics}
 import hft.exchange.{AccountFeed, AccountReport, RestTradingGateway, TradingClient}
 import hft.sim.{PaperCounter, SimConfig}
 import hft.state.StateManager
-import hft.event.Commands.{OrderIntent, OutcomeEvent}
+import hft.event.Commands.{AccountSync, AccountSyncRequest, AccountSynced, OrderIntent, OutcomeEvent}
 import hft.strategy.{Strategy, StrategyHandlers}
 import ox.supervised
 
@@ -77,6 +77,13 @@ class LiveAndShadowSpec extends munit.FunSuite:
       // 两个柜台：真实交易所 (Live) 与虚拟柜台 (Paper(1))
       system.spawn(RestTradingGateway(RecordingClient(livePlaced), SilentFeed, AccountId.Live))
       system.spawn(PaperCounter(paper, ex, instant, metas))
+
+      // 实盘柜台的合约规格在启动对齐入口加载 (见 RestTradingGateway.syncSnapshot) ——
+      // 本用例用 Executor.readyToTrade 绕过了策略侧的对齐闸门, 柜台这一侧仍要走真实链路。
+      val synced = bus.subscribe(Set(Interest.All(AccountSynced)))
+      bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 1L, Set(inst))))
+      synced.events.receive(): Unit
+      synced.close()
 
       // 同一份策略逻辑, 两个账户各一个实例
       system.spawn(Executor.readyToTrade(OneShotMaker(), AccountId.Live))
