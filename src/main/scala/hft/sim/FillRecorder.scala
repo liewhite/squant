@@ -98,7 +98,7 @@ object FillRecorder:
     */
   def record(ledger: Ledger, fill: Fill): (Ledger, String) =
     val before = ledger.cash
-    val next = ledger.applyFill(fill.exchange, fill.symbol, fill.side, fill.price, fill.size)
+    val next = ledger.applyFill(fill.instrument, fill.side, fill.price, fill.size)
     val realized = next.cash - before
     val row = s"${fill.timestamp},${fill.exchange},${fill.symbol},${fill.side},${fill.price},${fill.size},$realized,${next.cash}"
     (next, row)

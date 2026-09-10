@@ -70,7 +70,7 @@ class SimStateSpec extends munit.FunSuite:
     val f = fills(evs)
     assertEquals(f.map(_.price.value), Vector(49995.0)) // maker 价
     assertEquals(s3.resting.size, 0)
-    assertEquals(s3.ledger.positions(sym).size.value, 0.002)
+    assertEquals(s3.ledger.positions(Instrument.perp(ex, sym)).size.value, 0.002)
 
   test("撮合输出只含回报, 不回显行情 (转发行情是网关职责, 不是撮合的)"):
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
@@ -113,7 +113,7 @@ class SimStateSpec extends munit.FunSuite:
     val (s3, evs) = s2.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2)), 2) // bid 50011 >= 50010 -> 越价
     assert(fills(evs).isEmpty, "无多头可平, 不应成交")
     assert(statuses(evs).contains(OrderStatus.Cancelled), "reduceOnly 无可平 -> Cancelled")
-    assert(s3.ledger.positions.get(sym).forall(_.isEmpty), "不得反向开出空头")
+    assert(s3.ledger.positions.get(Instrument.perp(ex, sym)).forall(_.isEmpty), "不得反向开出空头")
 
   test("reduceOnly 卖单数量超过多头 -> 截断到持仓, 不反手"):
     val (s1, _) = empty.onMarket(ex, marketEv(bbo(50000, 50001)), 1)
@@ -121,7 +121,7 @@ class SimStateSpec extends munit.FunSuite:
     val (s3, _) = s2.onOrderArrived(ex, limitRO(Side.Short, 50010, TimeInForce.PostOnly, "s1", 0.005), "2", 2) // 平仓单量 0.005 > 持仓
     val (s4, evs) = s3.onMarket(ex, marketEv(bbo(50011, 50012, ts = 2)), 2)
     assertEquals(fills(evs).map(_.size.value), Vector(0.002)) // 截断到多头 0.002
-    assertEquals(s4.ledger.positions(sym).size.value, 0.0) // 平至 0, 不反手为 -0.003
+    assertEquals(s4.ledger.positions(Instrument.perp(ex, sym)).size.value, 0.0) // 平至 0, 不反手为 -0.003
 
   test("撮合按到达序 (FIFO) 而非哈希序: 同价 reduceOnly 竞争同一持仓, 先到先成交"):
     // 开多 0.003，两张同价 reduceOnly 卖单 (各 0.002, 合计 0.004 > 持仓) 同刻越价竞争。

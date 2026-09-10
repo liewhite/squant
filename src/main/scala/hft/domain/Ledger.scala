@@ -13,7 +13,11 @@ package hft.domain
   * 从前两者是同一个类型，于是"这个均价是谁算的"含糊不清，`unrealizedPnl` 还被发布路径
   * 一律强制归零 —— 一个恒为 0 的字段占着位置。
   */
-final case class Ledger(account: AccountId, positions: Map[Symbol, Ledger.Holding], cash: Double):
+final case class Ledger(account: AccountId, positions: Map[Instrument, Ledger.Holding], cash: Double):
+  // 按**标的**记账而不是按交易对: 同一个 symbol 底下可能有 U 本位永续、币本位永续、
+  // 几十个期权合约, 它们是各自独立的仓位。按 symbol 合并的话两条仓位会互相覆盖,
+  // 而它们的敞口含义完全不同 —— 一条期权空头与一条永续多头合并出来的净额没有意义。
+
 
   /** 账户读数快照 —— 净值与名义价值的**唯一构造处**。
     *
@@ -21,7 +25,7 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Ledger.Holdin
     * `AccountInfo(account, exchange, equity(...))`。同一个读数三处构造，
     * 迟早有一处漏跟上口径变化 (比如将来净值要扣未结算资金费)。
     */
-  def accountInfo(exchange: Exchange, markOf: Symbol => Option[Price]): AccountInfo =
+  def accountInfo(exchange: Exchange, markOf: Instrument => Option[Price]): AccountInfo =
     AccountInfo(account, exchange, equity = equity(markOf))
 
   /** 应用一笔成交，返回新账本：
@@ -31,11 +35,11 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Ledger.Holdin
     *
     * @param fee 本笔手续费 (>=0, 直接从现金扣除)。类型是名义额而非裸 double —— 它是一笔钱。maker/taker 区分与费率换算由调用方 (SimState) 决定。
     */
-  def applyFill(exchange: Exchange, symbol: Symbol, side: Side, price: Price, qty: Coin, fee: Notional = Notional.Zero): Ledger =
+  def applyFill(instrument: Instrument, side: Side, price: Price, qty: Coin, fee: Notional = Notional.Zero): Ledger =
     val signed = side match
       case Side.Long  => qty
       case Side.Short => -qty
-    val pos = positions.getOrElse(symbol, Ledger.Holding.empty)
+    val pos = positions.getOrElse(instrument, Ledger.Holding.empty)
     val oldSize = pos.size
     val newSize = oldSize + signed
     if oldSize.isZero || (oldSize > Coin.Zero) == (signed > Coin.Zero) then
@@ -43,7 +47,7 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Ledger.Holdin
       val newEntry =
         if oldSize.isZero then price
         else (oldSize.abs.notional(pos.entryPrice) + qty.notional(price)).pricePer(oldSize.abs + qty)
-      copy(positions = positions.updated(symbol, pos.copy(size = newSize, entryPrice = newEntry)), cash = cash - fee.value)
+      copy(positions = positions.updated(instrument, pos.copy(size = newSize, entryPrice = newEntry)), cash = cash - fee.value)
     else
       val closeQty = qty.min(oldSize.abs)
       val dir = if oldSize > Coin.Zero then 1.0 else -1.0
@@ -52,15 +56,15 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Ledger.Holdin
         if signed.abs <= oldSize.abs then
           if newSize.isZero then Price.Zero else pos.entryPrice
         else price // 反手: 剩余在成交价重开
-      Ledger(account, positions.updated(symbol, pos.copy(size = newSize, entryPrice = newEntry)), cash + realized - fee.value)
+      Ledger(account, positions.updated(instrument, pos.copy(size = newSize, entryPrice = newEntry)), cash + realized - fee.value)
 
   /** 账户净值 = 现金 + 未实现盈亏。
     *
     * `markOf` 对**持有仓位**的标的必须给得出估值价：给不出就意味着这部分仓位的盈亏算不出来，
     * 而净值是策略的杠杆闸门读的数。从前无估值价时把那一段未实现盈亏记作 0 —— 净值静默少算
     * 一块且没有任何症状。 */
-  def equity(markOf: Symbol => Option[Price]): Double =
-    cash + positions.map((sym, h) => Ledger.unrealizedPnl(sym, h, markOf(sym))).sum
+  def equity(markOf: Instrument => Option[Price]): Double =
+    cash + positions.map((instrument, h) => Ledger.unrealizedPnl(instrument, h, markOf(instrument))).sum
 
   /** 非空持仓的**总线形态** —— 只有数量 (见 [[Position]] 关于均价与盈亏的说明)。
     *
@@ -68,8 +72,8 @@ final case class Ledger(account: AccountId, positions: Map[Symbol, Ledger.Holdin
     */
   def openPositions(exchange: Exchange): Vector[Position] =
     positions.iterator
-      .filterNot((_, h) => h.isEmpty)
-      .map((sym, h) => Position(account, exchange, sym, h.size))
+      .filter((instrument, h) => instrument.exchange == exchange && !h.isEmpty)
+      .map((instrument, h) => Position(account, exchange, instrument.symbol, h.size, kind = instrument.kind))
       .toVector
 
 object Ledger:
@@ -87,15 +91,15 @@ object Ledger:
     val empty: Holding = Holding(Coin.Zero, Price.Zero)
 
   /** 未实现盈亏：(标记价 - 均价) × 带符号仓位。空仓不需要估值价。 */
-  private def unrealizedPnl(symbol: Symbol, h: Holding, mark: Option[Price]): Double =
-    if h.isEmpty then 0.0 else h.size.pnl(h.entryPrice, requireMark(symbol, h, mark)).value
+  private def unrealizedPnl(instrument: Instrument, h: Holding, mark: Option[Price]): Double =
+    if h.isEmpty then 0.0 else h.size.pnl(h.entryPrice, requireMark(instrument, h, mark)).value
 
   /** 持有仓位却拿不到估值价 = 净值算不出来。只由 [[unrealizedPnl]] 在**非空仓**时调用。 */
-  private def requireMark(symbol: Symbol, h: Holding, mark: Option[Price]): Price =
+  private def requireMark(instrument: Instrument, h: Holding, mark: Option[Price]): Price =
     mark.filter(_ > Price.Zero) match
       case Some(px) => px
       case None =>
         sys.error(
-          s"$symbol 持仓 ${h.size.value} 却没有可用的估值价 (mark=$mark) —— " +
+          s"$instrument 持仓 ${h.size.value} 却没有可用的估值价 (mark=$mark) —— " +
             "净值与名义额都算不出来, 记 0 会让杠杆闸门读到一个偏小的净值"
         )

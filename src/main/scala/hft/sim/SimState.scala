@@ -17,7 +17,7 @@ enum Liquidity:
 final case class RestingOrder(
     orderId: OrderId,
     clientOrderId: String,
-    symbol: Symbol,
+    instrument: Instrument,
     side: Side,
     limitPrice: Price,
     quantity: Coin,
@@ -59,9 +59,9 @@ final case class SimState(
     account: AccountId,
     ledger: Ledger,
     resting: Map[OrderId, RestingOrder],
-    lastBbo: Map[Symbol, BBO],
-    lastMark: Map[Symbol, Price],
-    lastTrade: Map[Symbol, Price] = Map.empty,
+    lastBbo: Map[Instrument, BBO],
+    lastMark: Map[Instrument, Price],
+    lastTrade: Map[Instrument, Price] = Map.empty,
     /** 费率没有默认值, 理由见 [[hft.sim.SimConfig]] —— 默认 0 会让每个忘了填的调用方
       * 拿到一份偏乐观且无症状的结果。 */
     makerFeeRate: Double,
@@ -72,11 +72,11 @@ final case class SimState(
     *
     * 一条行情都没见过时给 `None`，不给 `Price.Zero` —— 0 是一个**合法的价格取值**，
     * 用它表示"没见过行情"会让账本把一段未实现盈亏静默算成 0 (见 [[Ledger.equity]])。 */
-  def markOf(symbol: Symbol): Option[Price] =
+  def markOf(instrument: Instrument): Option[Price] =
     lastMark
-      .get(symbol)
-      .orElse(lastBbo.get(symbol).map(_.midPrice))
-      .orElse(lastTrade.get(symbol))
+      .get(instrument)
+      .orElse(lastBbo.get(instrument).map(_.midPrice))
+      .orElse(lastTrade.get(instrument))
 
   // ==================== 上游行情到达 (实时, 用于撮合) ====================
 
@@ -91,12 +91,12 @@ final case class SimState(
     */
   def onMarket(exchange: Exchange, ev: AnyEvent, now: Timestamp): (SimState, Vector[AnyEvent]) =
     ev.as(Topics.Bbo).map { bbo =>
-      copy(lastBbo = lastBbo.updated(bbo.symbol, bbo)).matchCrossing(exchange, bbo, now)
+      copy(lastBbo = lastBbo.updated(bbo.instrument, bbo)).matchCrossing(exchange, bbo, now)
     }.orElse(ev.as(Topics.MarkPrice).map { mp =>
-      (copy(lastMark = lastMark.updated(mp.symbol, mp.price)), Vector.empty[AnyEvent])
+      (copy(lastMark = lastMark.updated(mp.instrument, mp.price)), Vector.empty[AnyEvent])
     }).orElse(ev.as(Topics.Trade).map { t =>
       // 逐笔撮合：真实成交价严格穿越挂单价即成交 (与 BBO 穿越同一 maker 口径, 见 Matcher)
-      copy(lastTrade = lastTrade.updated(t.symbol, t.price)).matchTrade(exchange, t, now)
+      copy(lastTrade = lastTrade.updated(t.instrument, t.price)).matchTrade(exchange, t, now)
     }).getOrElse((this, Vector.empty[AnyEvent]))
 
   /** 本柜台账户的读数快照 (估值口径见 [[markOf]])。
@@ -124,17 +124,17 @@ final case class SimState(
       crossed.foldLeft((this, Vector.empty[AnyEvent])) { case ((st, evs), o) =>
         val (next, fillEvs) = st
           .copy(resting = st.resting - o.orderId)
-          .fill(exchange, o.orderId, o.clientOrderId, o.symbol, o.side, o.limitPrice, o.quantity, now, Liquidity.Maker, o.reduceOnly)
+          .fill(o.instrument, o.orderId, o.clientOrderId, o.side, o.limitPrice, o.quantity, now, Liquidity.Maker, o.reduceOnly)
         (next, evs ++ fillEvs)
       }
 
   /** BBO 严格穿越挂单价的全部挂单成交 (maker 悲观侧, 成交价取挂单价) */
   private def matchCrossing(exchange: Exchange, bbo: BBO, now: Timestamp): (SimState, Vector[AnyEvent]) =
-    fillCrossed(exchange, crossingOrders(o => o.symbol == bbo.symbol && Matcher.crossedByBbo(o.side, o.limitPrice, bbo)), now)
+    fillCrossed(exchange, crossingOrders(o => o.instrument == bbo.instrument && Matcher.crossedByBbo(o.side, o.limitPrice, bbo)), now)
 
   /** 真实成交严格穿越挂单价的全部挂单成交 (maker 悲观侧, 成交价取挂单价) */
   private def matchTrade(exchange: Exchange, t: MarketTrade, now: Timestamp): (SimState, Vector[AnyEvent]) =
-    fillCrossed(exchange, crossingOrders(o => o.symbol == t.symbol && Matcher.crossedByTrade(o.side, o.limitPrice, t.price)), now)
+    fillCrossed(exchange, crossingOrders(o => o.instrument == t.instrument && Matcher.crossedByTrade(o.side, o.limitPrice, t.price)), now)
 
   // ==================== 下单到达撮合 ====================
 
@@ -142,12 +142,12 @@ final case class SimState(
   def onOrderArrived(exchange: Exchange, order: Order, orderId: OrderId, now: Timestamp): (SimState, Vector[AnyEvent]) =
     // 进来的 [[Order]] 按类型即是币本位 —— 换算的职责在 exchange 边界 (虚拟柜台扮演交易所时
     // 收 ExchangeOrder 并自行换回)，撮合内部不再关心张数。
-    val bboOpt = lastBbo.get(order.symbol)
+    val bboOpt = lastBbo.get(order.instrument)
     order.orderType match
       case OrderType.Market =>
         bboOpt match
           case Some(bbo) =>
-            fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, Matcher.touchPrice(order.side, bbo), order.quantity, now, Liquidity.Taker, order.reduceOnly)
+            fill(order.instrument, orderId, order.clientOrderId, order.side, Matcher.touchPrice(order.side, bbo), order.quantity, now, Liquidity.Taker, order.reduceOnly)
           case None =>
             (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected("no market data for market order"), Price.Zero, now)))
       case OrderType.Limit(limit, tif) =>
@@ -159,7 +159,7 @@ final case class SimState(
         // 可达: 多标的策略看到 ETH 的盘口就给 BTC 下单, 而 BTC 的第一条行情还没到。
         bboOpt match
           case None =>
-            (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected(s"no market data for ${order.symbol}"), limit, now)))
+            (this, Vector(statusEvent(exchange, order, orderId, OrderStatus.Rejected(s"no market data for ${order.instrument}"), limit, now)))
           case Some(bbo) => limitArrived(exchange, order, orderId, limit, tif, bbo, now)
 
   /** 限价单到达且**已有盘口**: 按 TIF 决定 resting / 成交 / 拒单。 */
@@ -177,7 +177,7 @@ final case class SimState(
         // 价与可成交性同源 (都出自这张 bbo), 无需 .get
         val takerPrice: Option[Price] =
           Option.when(Matcher.marketable(order.side, limit, bbo))(Matcher.touchPrice(order.side, bbo))
-        def takerFill(price: Price) = fill(exchange, orderId, order.clientOrderId, order.symbol, order.side, price, order.quantity, now, Liquidity.Taker, order.reduceOnly)
+        def takerFill(price: Price) = fill(order.instrument, orderId, order.clientOrderId, order.side, price, order.quantity, now, Liquidity.Taker, order.reduceOnly)
         tif match
           case TimeInForce.PostOnly =>
             takerPrice match
@@ -199,7 +199,7 @@ final case class SimState(
       case Some((orderId, o)) =>
         val ev = Event.stamped(
           Topics.OrderUpdate,
-          OrderUpdate(account, orderId, Some(o.clientOrderId), exchange, o.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, Coin.Zero, o.reduceOnly, now),
+          OrderUpdate(account, orderId, Some(o.clientOrderId), exchange, o.instrument.symbol, o.side, OrderStatus.Cancelled, o.limitPrice, o.quantity, Coin.Zero, o.reduceOnly, now, kind = o.instrument.kind),
           now,
           now,
         )
@@ -214,7 +214,7 @@ final case class SimState(
   // ==================== 私有构造 ====================
 
   private def rest(exchange: Exchange, order: Order, orderId: OrderId, limit: Price, now: Timestamp): (SimState, Vector[AnyEvent]) =
-    val ro = RestingOrder(orderId, order.clientOrderId, order.symbol, order.side, limit, order.quantity, order.reduceOnly, restingSeq)
+    val ro = RestingOrder(orderId, order.clientOrderId, order.instrument, order.side, limit, order.quantity, order.reduceOnly, restingSeq)
     (copy(resting = resting.updated(orderId, ro), restingSeq = restingSeq + 1), Vector(statusEvent(exchange, order, orderId, OrderStatus.Pending, limit, now)))
 
   /** 成交落账。reduceOnly 单按当前持仓截断 (卖只平多、买只平空)：撮合层强制不反向开仓，
@@ -222,10 +222,9 @@ final case class SimState(
     * 无可平仓位时不成交，回 Cancelled。
     */
   private def fill(
-      exchange: Exchange,
+      instrument: Instrument,
       orderId: OrderId,
       clientOrderId: String,
-      symbol: Symbol,
       side: Side,
       fillPrice: Price,
       qty: Coin,
@@ -236,37 +235,43 @@ final case class SimState(
     val effectiveQty =
       if !reduceOnly then qty
       else
-        val posSize = ledger.positions.get(symbol).map(_.size).getOrElse(Coin.Zero)
+        val posSize = ledger.positions.get(instrument).map(_.size).getOrElse(Coin.Zero)
         side match
           case Side.Short => qty.min(posSize.max(Coin.Zero))    // 卖平多: 至多平掉现有多头
           case Side.Long  => qty.min((-posSize).max(Coin.Zero)) // 买平空: 至多平掉现有空头
     if reduceOnly && effectiveQty.isZero then
       // reduceOnly 无可平仓位 -> 不成交，回 Cancelled (订单已被调用方移出簿 / 不入簿)
-      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Cancelled, fillPrice, qty, Coin.Zero, reduceOnly, now)
+      val update = OrderUpdate(account, orderId, Some(clientOrderId), instrument.exchange, instrument.symbol, side, OrderStatus.Cancelled, fillPrice, qty, Coin.Zero, reduceOnly, now, kind = instrument.kind)
       (this, Vector(Event.stamped(Topics.OrderUpdate, update, now, now)))
     else
       val feeRate = liquidity match
         case Liquidity.Maker => makerFeeRate
         case Liquidity.Taker => takerFeeRate
       val fee = effectiveQty.notional(fillPrice) * feeRate
-      val next = copy(ledger = ledger.applyFill(exchange, symbol, side, fillPrice, effectiveQty, fee))
-      val update = OrderUpdate(account, orderId, Some(clientOrderId), exchange, symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, reduceOnly, now)
-      val f = Fill(account, exchange, symbol, side, fillPrice, effectiveQty, now)
+      val next = copy(ledger = ledger.applyFill(instrument, side, fillPrice, effectiveQty, fee))
+      val update = OrderUpdate(account, orderId, Some(clientOrderId), instrument.exchange, instrument.symbol, side, OrderStatus.Filled, fillPrice, effectiveQty, effectiveQty, reduceOnly, now, kind = instrument.kind)
+      val f = Fill(account, instrument.exchange, instrument.symbol, side, fillPrice, effectiveQty, now, kind = instrument.kind)
       // 顺序是这三条的全部意义, 见 hft.exchange.TradingGateway 的"回报有固定顺序":
       //   仓位快照 -> 成交 -> 订单终态
-      (next, Vector(next.positionEvent(exchange, symbol, now), Event.stamped(Topics.Fill, f, now, now), Event.stamped(Topics.OrderUpdate, update, now, now)))
+      (next, Vector(next.positionEvent(instrument, now), Event.stamped(Topics.Fill, f, now, now), Event.stamped(Topics.OrderUpdate, update, now, now)))
 
   /** 本账本当下这个标的的仓位快照 —— 构造与真实柜台同一份 */
-  private[sim] def positionEvent(exchange: Exchange, symbol: Symbol, now: Timestamp): AnyEvent =
+  private[sim] def positionEvent(instrument: Instrument, now: Timestamp): AnyEvent =
     hft.exchange.TradingGateway.positionEvent(
-      Position(account, exchange, symbol, ledger.positions.get(symbol).fold(Coin.Zero)(_.size)),
+      Position(
+        account,
+        instrument.exchange,
+        instrument.symbol,
+        ledger.positions.get(instrument).fold(Coin.Zero)(_.size),
+        kind = instrument.kind,
+      ),
       now,
     )
 
   private def statusEvent(exchange: Exchange, order: Order, orderId: OrderId, status: OrderStatus, price: Price, now: Timestamp): AnyEvent =
     Event.stamped(
       Topics.OrderUpdate,
-      OrderUpdate(account, orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, Coin.Zero, order.reduceOnly, now),
+      OrderUpdate(account, orderId, Some(order.clientOrderId), exchange, order.symbol, order.side, status, price, order.quantity, Coin.Zero, order.reduceOnly, now, kind = order.kind),
       now,
       now,
     )

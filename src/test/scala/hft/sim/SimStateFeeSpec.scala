@@ -28,7 +28,7 @@ class SimStateFeeSpec extends munit.FunSuite:
     val (s2, _) = s1.onOrderArrived(ex, order(Side.Long, OrderType.Market, 2.0), "o1", 1)
     // 吃单成交 @100, 开多 2, fee = 100*2*0.002 = 0.4
     near(s2.ledger.cash, initCash - 0.4)
-    near(s2.ledger.positions(sym).size.value, 2.0)
+    near(s2.ledger.positions(Instrument.perp(ex, sym)).size.value, 2.0)
 
   test("maker 成交扣 maker 费 (resting 单被越价)"):
     val (s1, _) = state.onMarket(ex, bboEv(100.0, 100.0, 1), 1)
@@ -39,7 +39,7 @@ class SimStateFeeSpec extends munit.FunSuite:
     // 价格下穿至 98 -> ask 98 <= 99 越价 -> maker 成交 @99
     val (s3, _) = s2.onMarket(ex, bboEv(98.0, 98.0, 2), 2)
     near(s3.ledger.cash, initCash - 99.0 * 2.0 * makerFee) // fee = 0.198
-    near(s3.ledger.positions(sym).size.value, 2.0)
+    near(s3.ledger.positions(Instrument.perp(ex, sym)).size.value, 2.0)
 
   test("PostOnly 越价被拒 -> 不成交不扣费"):
     val (s1, _) = state.onMarket(ex, bboEv(100.0, 100.0, 1), 1)
@@ -47,7 +47,7 @@ class SimStateFeeSpec extends munit.FunSuite:
     val (s2, evs) = s1.onOrderArrived(ex, order(Side.Long, OrderType.Limit(100.0, TimeInForce.PostOnly), 2.0), "o1", 1)
     assert(s2.resting.isEmpty, "拒单不 resting")
     near(s2.ledger.cash, initCash) // 不扣费
-    assert(!s2.ledger.positions.contains(sym) || s2.ledger.positions(sym).isEmpty)
+    assert(!s2.ledger.positions.contains(Instrument.perp(ex, sym)) || s2.ledger.positions(Instrument.perp(ex, sym)).isEmpty)
 
   test("撤单 -> 不扣费"):
     val (s1, _) = state.onMarket(ex, bboEv(100.0, 100.0, 1), 1)

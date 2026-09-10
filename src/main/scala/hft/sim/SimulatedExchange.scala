@@ -180,7 +180,7 @@ final class SimulatedExchange(
   /** 替身账户同样从零开始 —— 没有"历史"可言，如实报告当下的账本 */
   /** 虚拟柜台的账本与挂单簿都在自己手里, 读它们本就是原子的 */
   override protected def syncSnapshot(instruments: Set[Instrument]): TradingGateway.AccountSnapshot =
-    TradingGateway.AccountSnapshot(positions, restingOrders(instruments.map(_.symbol)))
+    TradingGateway.AccountSnapshot(positions, restingOrders(instruments))
 
   /** 本柜台当前的持仓快照 (供测试与绩效统计) */
   def positions: Vector[Position] = state.ledger.openPositions(exchange)
@@ -188,11 +188,12 @@ final class SimulatedExchange(
   /** 当前挂单簿里还有几张单 (供测试观察撮合进度) */
   def restingCount: Int = state.resting.size
 
-  private def restingOrders(symbols: Set[Symbol]): Vector[OrderUpdate] =
-    state.resting.values.filter(o => symbols.contains(o.symbol)).map { o =>
+  private def restingOrders(instruments: Set[Instrument]): Vector[OrderUpdate] =
+    state.resting.values.filter(o => instruments.contains(o.instrument)).map { o =>
       OrderUpdate(
-        account, o.orderId, Some(o.clientOrderId), exchange, o.symbol, o.side,
+        account, o.orderId, Some(o.clientOrderId), exchange, o.instrument.symbol, o.side,
         OrderStatus.Pending, o.limitPrice, o.quantity, Coin.Zero, o.reduceOnly, nowMs,
+        kind = o.instrument.kind,
       )
     }.toVector
 

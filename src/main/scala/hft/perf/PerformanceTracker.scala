@@ -56,10 +56,10 @@ final class PerformanceTracker(feeRate: Double, publishIntervalMs: Long = 1000) 
   private def applyFill(fill: Fill, now: Timestamp): Unit =
     val key = AccountInstrument(fill.account, fill.instrument)
     val ledger = ledgers.getOrElse(key, Ledger.empty(fill.account, 0.0))
-    val before = ledger.positions.get(fill.symbol).map(_.size).getOrElse(Coin.Zero)
+    val before = ledger.positions.get(fill.instrument).map(_.size).getOrElse(Coin.Zero)
     val fee = fill.size.notional(fill.price) * feeRate
-    val next = ledger.applyFill(fill.exchange, fill.symbol, fill.side, fill.price, fill.size, fee)
-    val after = next.positions.get(fill.symbol).map(_.size).getOrElse(Coin.Zero)
+    val next = ledger.applyFill(fill.instrument, fill.side, fill.price, fill.size, fee)
+    val after = next.positions.get(fill.instrument).map(_.size).getOrElse(Coin.Zero)
     ledgers(key) = next
     dirty += key
 
@@ -93,7 +93,7 @@ final class PerformanceTracker(feeRate: Double, publishIntervalMs: Long = 1000) 
           fees = st.fees,
           fills = st.fills,
           roundTrips = st.roundTrips,
-          position = ledger.positions.get(key.instrument.symbol).map(_.size).getOrElse(Coin.Zero),
+          position = ledger.positions.get(key.instrument).map(_.size).getOrElse(Coin.Zero),
           since = st.since,
           updatedAt = now,
         ),
@@ -105,5 +105,5 @@ final class PerformanceTracker(feeRate: Double, publishIntervalMs: Long = 1000) 
     ledgers.get(key).map { ledger =>
       val st = stats.getOrElse(key, Stats(0, 0, 0.0, 0L))
       Performance(key.account, key.instrument, ledger.cash, st.fees, st.fills, st.roundTrips,
-        ledger.positions.get(key.instrument.symbol).map(_.size).getOrElse(Coin.Zero), st.since, 0L)
+        ledger.positions.get(key.instrument).map(_.size).getOrElse(Coin.Zero), st.since, 0L)
     }
