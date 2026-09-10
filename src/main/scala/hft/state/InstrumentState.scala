@@ -180,6 +180,10 @@ final class InstrumentState(val instrument: Instrument) extends InstrumentView:
               quantity = update.quantity,
               reduceOnly = update.reduceOnly,
               clientOrderId = clientId,
+              // 品种取本状态所属标的 —— 这张单就挂在它上面。漏了它, 非永续标的上接管的单
+              // 会带着 LinearPerp 进登记, 停机撤单时 ctx.cancel 按 order.instrument 找不到
+              // 状态, 直接 require 崩在"只能撤销本策略已登记的挂单"上。
+              kind = instrument.kind,
             )
             _pendingOrders(clientId) = PendingOrder(order, update.status, update.timestamp)
     }

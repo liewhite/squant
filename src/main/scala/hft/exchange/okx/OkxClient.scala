@@ -224,9 +224,25 @@ final class OkxClient private[okx] (
   // ==================== ExchangeClient ====================
 
 
+  /** 本客户端目前只接 U 本位永续 —— **请求侧与响应侧必须同时支持才算接通**。
+    *
+    * `OkxCodec.toOkx` 已经能为期权/币本位拼出正确的 instId，但响应侧还没跟上：
+    * `fetchPositions` 固定 `instType=SWAP`、`fetchPendingOrders` 与 `OkxAccountFeed`
+    * 经 `fromOkx` 只认 `base-quote-SWAP`。只放开请求侧的话，一张期权单能成功发出去，
+    * 然后**全程没有回报、没有挂单、没有仓位** —— 策略以为单没成立，pending 清不掉，
+    * 十几秒后以"结果不确定"终止，而真实原因是我们根本没在听那条频道。
+    *
+    * 所以在响应侧接通之前，这里一起拒绝。接期权时三处同改，这道守卫随之放宽。 */
+  private def perpInstId(instrument: Instrument): String =
+    require(
+      instrument.kind == InstrumentKind.LinearPerp,
+      s"OKX 适配层目前只支持 U 本位永续 (响应侧尚未接入其它品种), 收到 ${instrument.kind}: $instrument",
+    )
+    toOkx(instrument, quote)
+
   override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
     // order.quantity 已由 StrategyRunner 转为合约张数并取整
-    val instId = toOkx(order.instrument, quote)
+    val instId = perpInstId(order.instrument)
     val (ordType, pxField) = order.orderType match
       case OrderType.Market            => ("market", "")
       case OrderType.Limit(price, tif) => (tifToOrdType(tif), s""","px":"${fmt(price.value)}"""")
@@ -249,7 +265,7 @@ final class OkxClient private[okx] (
     val idField = ref match
       case OrderRef.ByExchangeId(id) => s""""ordId":"$id""""
       case OrderRef.ByClientId(id)   => s""""clOrdId":"$id""""
-    val body = s"""{"instId":"${toOkx(instrument, quote)}",$idField}"""
+    val body = s"""{"instId":"${perpInstId(instrument)}",$idField}"""
     signedRequest[CancelResp](Method.POST, "/api/v5/trade/cancel-order", body).flatMap { resp =>
       resp.data.headOption match
         case Some(d) if d.sCode != "0" =>
@@ -264,13 +280,10 @@ final class OkxClient private[okx] (
 
 
   override def fetchPendingOrders(instrument: Instrument): Either[ExchangeError, Vector[OrderUpdate]] =
-    // instType 跟着品种走 —— 拿 SWAP 去查期权挂单会查到空, 而"没有挂单"与"问错了地方"
-    // 在对齐路径上是同一个读数, 分不出来。
-    val instType = instrument.kind match
-      case InstrumentKind.LinearPerp | InstrumentKind.InversePerp => "SWAP"
-      case InstrumentKind.Option                                  => "OPTION"
-      case InstrumentKind.Spot                                    => "SPOT"
-    val path = s"/api/v5/trade/orders-pending?instId=${toOkx(instrument, quote)}&instType=$instType"
+    // instType 恒为 SWAP: 本客户端只接永续 (见 perpInstId)。接期权时这里要按品种派生,
+    // **并且**下面解析响应的 fromOkx 也要跟着认期权 instId —— 只改一处的话, 查询会返回空,
+    // 而"没有挂单"与"问错了地方"在对齐路径上是同一个读数, 分不出来。
+    val path = s"/api/v5/trade/orders-pending?instId=${perpInstId(instrument)}&instType=SWAP"
     signedRequest[PendingResp](Method.GET, path).flatMap { resp =>
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator.flatMap { d =>

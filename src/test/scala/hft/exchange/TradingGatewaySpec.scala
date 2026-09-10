@@ -399,3 +399,16 @@ class TradingGatewaySpec extends munit.FunSuite:
         system.awaitShutdown()
       }
     }
+
+  test("拒单回报带着被拒那张单的品种 —— 否则策略收不到自己的拒单"):
+    // 拒单是框架自己从 Order 构造的回报, 不是交易所推来的。品种漏了会让它路由到 LinearPerp
+    // 键: 非永续策略永远收不到拒单, pending 清不掉, 十几秒后以"结果不确定"终止 ——
+    // 症状可见但归因错误 (看起来像交易所没回)。
+    val option = Instrument.option(Exchange.Binance, "ETH-26SEP25-3000-C-USDT")
+    val order = Order("", option.exchange, option.symbol, Side.Long, OrderType.Market, Coin(1.0),
+      reduceOnly = false, clientOrderId = "c1", kind = option.kind)
+    val update = TradingGateway
+      .rejection(AccountId.Live, option.exchange, order, "below min order size", now = 1L)
+      .as(Topics.OrderUpdate)
+      .getOrElse(fail("应产出一条 OrderUpdate"))
+    assertEquals(update.instrument, option, "拒单回报的标的必须与被拒的那张单一致")

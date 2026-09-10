@@ -180,6 +180,7 @@ final class BybitClient private[bybit] (
 
 
   override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
+    val symbol = linearSymbol(order.instrument)
     val (ordType, pxField) = order.orderType match
       case OrderType.Market => ("Market", "")
       case OrderType.Limit(price, tif) =>
@@ -187,7 +188,7 @@ final class BybitClient private[bybit] (
     val reduceField = if order.reduceOnly then ""","reduceOnly":true""" else ""
     val linkField = if order.clientOrderId.nonEmpty then s""","orderLinkId":"${order.clientOrderId}"""" else ""
     val body =
-      s"""{"category":"linear","symbol":"${order.symbol}","side":"${sideToParam(order.side)}","orderType":"$ordType","qty":"${fmt(order.quantity.value)}"$pxField$reduceField$linkField}"""
+      s"""{"category":"linear","symbol":"$symbol","side":"${sideToParam(order.side)}","orderType":"$ordType","qty":"${fmt(order.quantity.value)}"$pxField$reduceField$linkField}"""
     signedPost[OrderCreateResp]("/v5/order/create", body).flatMap { resp =>
       ensureWriteOk(resp.retCode, resp.retMsg, "下单").flatMap { _ =>
         if resp.result.orderId.nonEmpty then Right(resp.result.orderId)

@@ -321,6 +321,10 @@ object TradingGateway:
         filledQuantity = Coin.Zero, // 拒单 = 一点没成交
         reduceOnly = order.reduceOnly,
         timestamp = now,
+        // 品种从被拒的那张单上取 —— 这条回报是框架自己构造的, 不是交易所推来的。
+        // 漏了它, 非永续策略的拒单会被路由到 LinearPerp 键: 策略永远收不到自己的拒单,
+        // pending 清不掉, 十几秒后以"结果不确定"终止, 而症状看起来像交易所没回。
+        kind = order.kind,
       ),
       now,
       now,

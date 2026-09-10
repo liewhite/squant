@@ -209,7 +209,7 @@ final class BinanceClient private[binance] (
 
   override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
     val base = Map(
-      "symbol" -> order.symbol,
+      "symbol" -> perpSymbol(order.instrument),
       "side" -> sideParam(order.side),
       "quantity" -> fmt(order.quantity.value),
       "newClientOrderId" -> order.clientOrderId,

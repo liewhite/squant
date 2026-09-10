@@ -43,3 +43,28 @@ class SyncEventsSpec extends munit.FunSuite:
   test("顺序: 净值先于钱包 (两者都是账户级读数, 但风控读净值)"):
     val evs = events(Map("USDT" -> 1.0))
     assert(evs.indexWhere(_.as(Topics.AccountInfo).isDefined) < evs.indexWhere(_.as(Topics.Wallet).isDefined))
+
+  test("非永续标的的零仓快照带着自己的品种 —— 键对不上策略就永远等不到初始仓位"):
+    // 对齐给每个已声明标的显式推一条零仓, 而"没有推送"与"仓位为零"在策略看来无从分辨:
+    // 品种漏了的话这条快照会被路由到 LinearPerp 键, 期权策略永远停在对齐闸门后。
+    val option = Instrument.option(Exchange.Okx, "ETH-USD-250101-3000-C")
+    val req = AccountSyncRequest(AccountId.Live, Exchange.Okx, requestId = 8L, instruments = Set(option))
+    val positions = TradingGateway
+      .syncEvents(req, Exchange.Okx, positions = Vector.empty, accountInfo = info, wallet = Map.empty, pendingOrders = Vector.empty)
+      .flatMap(_.as(Topics.Position))
+    assertEquals(positions.map(_.instrument), Vector(option), "零仓快照的标的必须与请求的完全一致")
+
+  test("交易所返回的持仓按标的归位, 不按 symbol 合并"):
+    // 同一个 symbol 底下可能有永续与期权两条仓位。按 symbol 归并的话, 后一条会覆盖前一条,
+    // 而两者的敞口含义完全不同。
+    val perp = Instrument.perp(Exchange.Okx, "ETH")
+    val option = Instrument.option(Exchange.Okx, "ETH-USD-250101-3000-C")
+    val req = AccountSyncRequest(AccountId.Live, Exchange.Okx, requestId = 9L, instruments = Set(perp, option))
+    val reported = Vector(
+      Position(AccountId.Live, Exchange.Okx, perp.symbol, Coin(2.0)),
+      Position(AccountId.Live, Exchange.Okx, option.symbol, Coin(-5.0), kind = InstrumentKind.Option),
+    )
+    val positions = TradingGateway
+      .syncEvents(req, Exchange.Okx, positions = reported, accountInfo = info, wallet = Map.empty, pendingOrders = Vector.empty)
+      .flatMap(_.as(Topics.Position))
+    assertEquals(positions.map(p => p.instrument -> p.size.value).toMap, Map(perp -> 2.0, option -> -5.0))
