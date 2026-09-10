@@ -61,6 +61,14 @@ final class SymbolState(val symbol: Symbol, val declaredExchanges: Set[Exchange]
 
   def pendingOrders: Iterable[PendingOrder] = _pendingOrders.values
 
+  /** 这张单的策略标注 (见 [[hft.domain.Order.tag]])。
+    *
+    * 空标注与查不到都给 `None`：两者在调用方那里是同一件事 ——"按标注分派"这一支走不了。
+    * 详见 [[hft.strategy.StrategyContext.orderTag]]。
+    */
+  private[state] def tagOf(clientOrderId: String): Option[String] =
+    _pendingOrders.get(clientOrderId).map(_.order.tag).filter(_.nonEmpty)
+
   // ==================== 订单管理 ====================
 
   /** 添加待处理订单 (发送订单信号时调用) */
@@ -146,6 +154,10 @@ final class SymbolState(val symbol: Symbol, val declaredExchanges: Set[Exchange]
             // TIF 记为 GTC 有依据而不是默认值: **还在簿上 resting 的限价单必然是 GTC 语义** ——
             // IOC/FOK 从不 resting, 而 PostOnly 只是下单时刻的约束, 对一张已经挂上的单
             // 不再有行为差别。
+            //
+            // `tag` 留空是**事实**而不是缺省: 策略的标注只活在下单那个进程的内存里, 不发给
+            // 交易所 (见 Order.tag), 所以接管一张上个进程留下的单时它确实无从知道。策略若按
+            // 标注分派, 必须能处理"没有标注"这一支 —— 接管单一直是这样, 与本字段无关。
             val order = Order(
               id = update.orderId,
               exchange = update.exchange,

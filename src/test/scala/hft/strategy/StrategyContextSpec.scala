@@ -22,7 +22,7 @@ class StrategyContextSpec extends munit.FunSuite:
   private def context(): StrategyContext =
     val state = StateManager(List(instrument), orderTimeoutMs = 0L)
     state.addPendingOrder(order, now = 1L)
-    StrategyContext(state, account, now = 2L)
+    StrategyContext(state, account, now = 2L, orderTag = None)
 
   test("只能撤销本策略已登记的挂单"):
     val event = context().cancel(instrument.exchange, instrument.symbol, OrderRef.ByExchangeId(order.id))

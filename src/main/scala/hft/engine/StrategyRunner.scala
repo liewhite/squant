@@ -53,16 +53,26 @@ final class StrategyRunner private (
     * `now` 为当前处理时刻 (回测虚拟时间 / 实盘墙钟)，作为 pending order 的 createdAt。
     */
   def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =
-    observe(event)
-    handlers.dispatch(event, StrategyContext(state, account, now), now).map(prepareIntent(_, now))
+    val tag = observe(event)
+    handlers.dispatch(event, StrategyContext(state, account, now, tag), now).map(prepareIntent(_, now))
 
-  /** 只更新状态，**不叫醒策略**。
+  /** 只更新状态，**不叫醒策略**；返回这条事件所属订单的**策略标注**
+    * (见 [[hft.strategy.StrategyContext.orderTag]])。
     *
     * 启动对齐还没落地时用它：那时初始仓位与既有挂单都还在路上，策略要是此刻动作，
     * 用的就是一份残缺的世界观 (见 [[Executor]] 的闸门)。状态照收不误 —— 排队的事件
-    * 一条都不能丢，只是先不据此决策。
+    * 一条都不能丢，只是先不据此决策。闸门期的返回值无人接，那没有关系：闸门后面没有策略
+    * 在等着被分派。
+    *
+    * **取标注与应用事件的顺序是承重的**，所以两件事收在这一个方法里：订单进终态时挂单
+    * 登记会被移除 (见 [[hft.state.SymbolState]])，先应用再取就只剩 `None`。拆成两步交给
+    * 调用方按顺序写，写反的症状是"标注恒为 None" —— 没有报错、没有异常，只是策略从此
+    * 认不出自己的单。
     */
-  def observe(event: AnyEvent): Unit = state.apply(event)
+  def observe(event: AnyEvent): Option[String] =
+    val tag = state.orderTagOf(event)
+    state.apply(event)
+    tag
 
   /** 对策略**真正返回**的下单意图施加发单前的两件必做事：分配 clientOrderId、
     * 以币本位登记 pending。
@@ -96,7 +106,8 @@ final class StrategyRunner private (
     * 撤一张已经成交或本就不存在的单会得到 `OrderNotFound`，那是既有的容忍路径 (非致命)。
     */
   def pendingCancels(now: Timestamp): Vector[AnyEvent] =
-    val ctx = StrategyContext(state, account, now)
+    // 标注取 None: 这里不在处理任何一条回报, 收尾撤的是全部挂单
+    val ctx = StrategyContext(state, account, now, orderTag = None)
     state.allPendingOrders.view
       .map { p =>
         val ref = if p.order.id.nonEmpty then OrderRef.ByExchangeId(p.order.id) else OrderRef.ByClientId(p.order.clientOrderId)

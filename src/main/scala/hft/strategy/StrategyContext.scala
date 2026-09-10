@@ -24,6 +24,7 @@ import hft.state.StateView
   *
   * @param now 本次事件的处理时刻（回测虚拟时间 / 实盘墙钟）。事件时间戳取自它而非墙钟，
   *            回测才能"同一输入必得同一结果"。
+  * @param orderTag 本次事件若是一条订单回报，这里是**当初下这张单时给的标注**（见 [[orderTag]]）
   */
 final class StrategyContext private[hft] (
     /** 本策略订阅范围内的聚合状态 —— **只读视图**。
@@ -34,6 +35,34 @@ final class StrategyContext private[hft] (
     val state: StateView,
     private val account: AccountId,
     private val now: Timestamp,
+    /** 本次事件若是一条 [[hft.event.Topics.OrderUpdate]]，这里是当初下这张单时给的
+      * [[hft.domain.Order.tag]] —— **"这条回报是我哪一张单的"**。
+      *
+      * 没有它的话策略认不出自己的回报：clientOrderId 由框架在处理器返回之后才生成，策略手里
+      * 那个是空串。三个业务策略此前各自发明了一套替代办法 (按 `reduceOnly` 分槽、按
+      * (交易所, 标的) 认领、立"同时刻只有一张在途单"的不变量)，代价是同一标的上挂多张
+      * 可区分的单这件事写不出来。
+      *
+      * `None` 的含义是**这条回报没有本策略的标注**，四种情形：非回报事件；下单时没标注；
+      * 重启后从交易所接管的既有挂单 (标注是上一个进程内存里的事实，见 [[hft.domain.Order.tag]])；
+      * 以及回报本身没带 clientOrderId (那压根不是本策略发的单，见 [[hft.state.SymbolState]])。
+      * 它们在决策上是同一件事 ——"按标注分派"这一支走不了 —— 所以不细分。
+      *
+      * **不要指望用 `state` 去细分它们**：处理器看到的状态已经应用过本次事件，而订单进终态时
+      * 挂单登记就被移除了 —— 恰恰在最需要区分的那一刻，`pendingOrders` 里已经没有这张单。
+      * 手上只有 `update.clientOrderId`：有值即"本账户发出的单"(手工单与交易所自建的 TP/SL
+      * 都不带它)，但它区分不了"本进程未标注"与"上个进程留下的"。真要区分后者，得有别的机制，
+      * 现有查询给不出。
+      *
+      * **[[hft.event.Topics.Fill]] 上没有** —— `Fill` 载荷不带订单身份 (见 [[hft.domain.Fill]])，
+      * 框架无从知道它属于哪一张单。要按标注认成交，订 `own(Topics.OrderUpdate)` 看累计成交量，
+      * 那本来就是记账的唯一依据 (见 [[hft.exchange.TradingGateway]])。
+      *
+      * **无默认值**：构造点只有三个 (事件分派、停机撤单、测试)，显式写 `None` 的代价近乎为零，
+      * 而给一个默认值恰好制造本机制要消灭的那种静默 —— 将来新增一处分派忘了传标注，
+      * 编译照过，症状是"标注恒为 None"，策略从此认不出自己的单。
+      */
+    val orderTag: Option[String],
 ):
   /** 下单。`orders` 用**币本位**数量，柜台负责换算成交易所格式。
     *
@@ -42,6 +71,10 @@ final class StrategyContext private[hft] (
     * 分开调用：忘了拆的后果是路由键取了第一张单的交易所，另一个所的订单被发去错误的柜台。
     *
     * 空 `orders` 得到空结果 —— 没有订单的下单指令没有交易所可路由，也没有任何意义。
+    *
+    * `comment` 与 [[hft.domain.Order.tag]] 是两件事，别混用：前者描述**这一次决策**
+    * （一批单共一条，只进日志，如 `"cross_arb_open | edge=3.2bp"`），后者标注**这一张单**
+    * （进挂单登记，回报到达时经 [[orderTag]] 交还）。要按它认单就写 tag，写 comment 认不回来。
     */
   def place(orders: Vector[Order], comment: String): Vector[AnyEvent] =
     orders

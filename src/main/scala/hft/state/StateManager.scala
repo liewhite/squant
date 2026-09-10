@@ -90,6 +90,24 @@ final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long
   def greeksAgeMs(exchange: Exchange, ccy: String, now: Timestamp): Option[Long] =
     greeksAt.get((exchange, ccy)).map(now - _)
 
+  /** 一条订单回报所属订单的**策略标注** (见 [[hft.domain.Order.tag]])。
+    *
+    * **必须在 [[apply]] 应用这条事件之前问** —— 订单进终态时挂单登记就被移除了，那之后
+    * 查到的只会是 `None`。这个顺序不留给调用方记：它封在 [[hft.engine.StrategyRunner.observe]]
+    * 里，那是唯一的调用点。
+    *
+    * 标的没注册时给 `None` 而不是报错，**不是**在替路由 bug 兜底：紧随其后的 [[apply]] 对
+    * 同一条事件做同一个查找并以 fail-fast 暴露 (见那里的 "routing bug")。判据只该有一处，
+    * 这里再写一遍等于把同一条规则复制成两份。
+    */
+  private[hft] def orderTagOf(event: AnyEvent): Option[String] =
+    for
+      update <- event.as(Topics.OrderUpdate)
+      clientId <- update.clientOrderId
+      state <- states.get(update.symbol)
+      tag <- state.tagOf(clientId)
+    yield tag
+
   /** 本策略在所有标的上的挂单 (供停机收尾逐一撤掉) */
   def allPendingOrders: Iterable[PendingOrder] = states.values.flatMap(_.pendingOrders)
 
