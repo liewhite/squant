@@ -9,7 +9,7 @@ import hft.TestUnits.given
   *
   * 应答放行行情，所以它必须排在最后；排错了就等于"对齐没做完却已经开始交易"。 */
 class SyncEventsSpec extends munit.FunSuite:
-  private val request = AccountSyncRequest(AccountId.Live, Exchange.Okx, requestId = 7L, symbols = Set("ETH-USDT-SWAP"))
+  private val request = AccountSyncRequest(AccountId.Live, Exchange.Okx, requestId = 7L, instruments = Set(Instrument.perp(Exchange.Okx, "ETH-USDT-SWAP")))
   private val info = AccountInfo(AccountId.Live, Exchange.Okx, equity = 10_000.0)
 
   private def events(wallet: Map[String, Double]) =

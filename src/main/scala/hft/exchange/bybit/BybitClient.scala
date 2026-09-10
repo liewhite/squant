@@ -196,7 +196,17 @@ final class BybitClient private[bybit] (
     }
 
 
-  override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
+  /** Bybit v5 用 `category` 区分品种。本客户端目前只接 linear（U 本位永续）——
+    * 期权 (`category=option`) 的端点形状相同但尚未接入，收到即失败而不是当永续发出去。 */
+  private def linearSymbol(instrument: Instrument): Symbol =
+    require(
+      instrument.kind == InstrumentKind.LinearPerp,
+      s"Bybit 适配层目前只支持 category=linear (U 本位永续), 收到 ${instrument.kind}: $instrument",
+    )
+    instrument.symbol
+
+  override def cancelOrder(instrument: Instrument, ref: OrderRef): Either[ExchangeError, Unit] =
+    val symbol = linearSymbol(instrument)
     val idField = ref match
       case OrderRef.ByExchangeId(id) => s""""orderId":"$id""""
       case OrderRef.ByClientId(id)   => s""""orderLinkId":"$id""""
@@ -215,7 +225,8 @@ final class BybitClient private[bybit] (
     * 不翻页的后果不是"少看几张单": 对齐时 [[PositionBook.align]] 会漏掉部分成交单的记账进度,
     * 于是下一条推送把已经含在仓位里的成交**再记一遍**。同文件的 fetchAllSymbolMetas 本就跟着
     * cursor 走, 这里漏了。 */
-  override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] =
+  override def fetchPendingOrders(instrument: Instrument): Either[ExchangeError, Vector[OrderUpdate]] =
+    val symbol = linearSymbol(instrument)
     def loop(cursor: Option[String], acc: Vector[OrderUpdate]): Either[ExchangeError, Vector[OrderUpdate]] =
       val query = s"category=linear&symbol=$symbol" + cursor.fold("")(c => s"&cursor=$c")
       signedGet[OpenOrdersResp]("/v5/order/realtime", query).flatMap { resp =>

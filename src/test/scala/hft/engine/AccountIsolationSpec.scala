@@ -68,7 +68,7 @@ class AccountIsolationSpec extends munit.FunSuite:
         Set(AccountExchange(AccountId.Live, ex), AccountExchange(paper, ex)),
       ))
 
-      val order = OutcomeEvent.CancelOrder(ex, sym, OrderRef.ByClientId("c1"))
+      val order = OutcomeEvent.CancelOrder(Instrument.perp(ex, sym), OrderRef.ByClientId("c1"))
       bus.publish(Event.local(OrderIntent, AccountOutcome(paper, order)))
       bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live, order)))
 
@@ -90,15 +90,15 @@ class AccountIsolationSpec extends munit.FunSuite:
       ))
 
       bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live,
-        OutcomeEvent.CancelOrder(Exchange.Okx, sym, OrderRef.ByClientId("okx-1")))))
+        OutcomeEvent.CancelOrder(Instrument.perp(Exchange.Okx, sym), OrderRef.ByClientId("okx-1")))))
       // 哨兵: Binance 柜台若误收了上面那条, 先读到的就不是哨兵
       bus.publish(Event.local(OrderIntent, AccountOutcome(AccountId.Live,
-        OutcomeEvent.CancelOrder(Exchange.Binance, sym, OrderRef.ByClientId("sentinel")))))
+        OutcomeEvent.CancelOrder(Instrument.perp(Exchange.Binance, sym), OrderRef.ByClientId("sentinel")))))
 
       assertEquals(okx.events.receive().as(OrderIntent).map(_.outcome.targetExchange), Some(Exchange.Okx))
       assertEquals(
         binance.events.receive().as(OrderIntent).flatMap(_.outcome match
-          case OutcomeEvent.CancelOrder(_, _, ref) => Some(ref.raw)
+          case OutcomeEvent.CancelOrder(_, ref) => Some(ref.raw)
           case _                                   => None),
         Some("sentinel"),
         "Binance 柜台不该收到发往 OKX 的意图",

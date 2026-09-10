@@ -165,7 +165,11 @@ final class OkxAccountFeed(
   private def publishPosition(d: PositionData): Unit =
     // 非本 quote 的品种 (币本位等) 不属于本柜台, fromOkx 返回 None 即跳过 —— 这条有依据。
     fromOkx(d.instId, client.quote).foreach { sym =>
-      report(AccountReport.PositionReported(sym, metaOf(sym).toCoin(Contracts(d.pos.asDouble)), nowMs))
+      report(AccountReport.PositionReported(
+        Instrument.perp(Exchange.Okx, sym),
+        metaOf(sym).toCoin(Contracts(d.pos.asDouble)),
+        nowMs,
+      ))
     }
 
   private def publishAccount(d: AccountData): Unit =
@@ -187,7 +191,9 @@ final class OkxAccountFeed(
     report(AccountReport.OrderStatusChanged(
       orderId = d.ordId,
       clientOrderId = if d.clOrdId.nonEmpty then Some(d.clOrdId) else None,
-      symbol = sym,
+      // fromOkx 只认本 quote 的永续 (见它的说明), 所以到这里的必然是 U 本位永续。
+      // 接期权时这里要按 instId 解析出品种。
+      instrument = Instrument.perp(Exchange.Okx, sym),
       side = side,
       status = mapOrderState(d.state, filledQty),
       price = Price(d.px.asDoubleOrZero),
@@ -198,4 +204,4 @@ final class OkxAccountFeed(
       timestamp = ts,
     ))
     if fillSz.nonZero then
-      report(AccountReport.Executed(sym, side, d.fillPx.asPrice, fillSz, ts))
+      report(AccountReport.Executed(Instrument.perp(Exchange.Okx, sym), side, d.fillPx.asPrice, fillSz, ts))

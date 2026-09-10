@@ -28,7 +28,7 @@ class StrategyContextSpec extends munit.FunSuite:
     val event = context().cancel(instrument, OrderRef.ByExchangeId(order.id))
     assertEquals(
       event.as(OrderIntent).map(_.outcome),
-      Some(OutcomeEvent.CancelOrder(instrument.exchange, instrument.symbol, OrderRef.ByExchangeId(order.id))),
+      Some(OutcomeEvent.CancelOrder(Instrument.perp(instrument.exchange, instrument.symbol), OrderRef.ByExchangeId(order.id))),
     )
 
   test("未知订单立即拒绝"):

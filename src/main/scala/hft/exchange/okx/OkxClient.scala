@@ -226,7 +226,7 @@ final class OkxClient private[okx] (
 
   override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
     // order.quantity 已由 StrategyRunner 转为合约张数并取整
-    val instId = toOkx(order.symbol, quote)
+    val instId = toOkx(order.instrument, quote)
     val (ordType, pxField) = order.orderType match
       case OrderType.Market            => ("market", "")
       case OrderType.Limit(price, tif) => (tifToOrdType(tif), s""","px":"${fmt(price.value)}"""")
@@ -245,11 +245,11 @@ final class OkxClient private[okx] (
     }
 
 
-  override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
+  override def cancelOrder(instrument: Instrument, ref: OrderRef): Either[ExchangeError, Unit] =
     val idField = ref match
       case OrderRef.ByExchangeId(id) => s""""ordId":"$id""""
       case OrderRef.ByClientId(id)   => s""""clOrdId":"$id""""
-    val body = s"""{"instId":"${toOkx(symbol, quote)}",$idField}"""
+    val body = s"""{"instId":"${toOkx(instrument, quote)}",$idField}"""
     signedRequest[CancelResp](Method.POST, "/api/v5/trade/cancel-order", body).flatMap { resp =>
       resp.data.headOption match
         case Some(d) if d.sCode != "0" =>
@@ -263,8 +263,14 @@ final class OkxClient private[okx] (
     }
 
 
-  override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] =
-    val path = s"/api/v5/trade/orders-pending?instId=${toOkx(symbol, quote)}&instType=SWAP"
+  override def fetchPendingOrders(instrument: Instrument): Either[ExchangeError, Vector[OrderUpdate]] =
+    // instType 跟着品种走 —— 拿 SWAP 去查期权挂单会查到空, 而"没有挂单"与"问错了地方"
+    // 在对齐路径上是同一个读数, 分不出来。
+    val instType = instrument.kind match
+      case InstrumentKind.LinearPerp | InstrumentKind.InversePerp => "SWAP"
+      case InstrumentKind.Option                                  => "OPTION"
+      case InstrumentKind.Spot                                    => "SPOT"
+    val path = s"/api/v5/trade/orders-pending?instId=${toOkx(instrument, quote)}&instType=$instType"
     signedRequest[PendingResp](Method.GET, path).flatMap { resp =>
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator.flatMap { d =>

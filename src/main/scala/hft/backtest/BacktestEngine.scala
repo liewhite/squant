@@ -238,7 +238,7 @@ final class BacktestEngine(
                         logger.warn(s"下单被交易所精度拒绝: $reason")
                         schedule(now, Action.Deliver(TradingGateway.rejection(account, exchange, o, reason, now)))
                   }
-                case OutcomeEvent.CancelOrder(_, _, ref) =>
+                case OutcomeEvent.CancelOrder(_, ref) =>
                   enqueue(Counter.inbound(config, CounterInput.CancelArrived(ref)))
             case None =>
               // 自定义事件 (如策略指标): 回测里同样按虚拟时间投递, 观察者与其他 runner 都能收到

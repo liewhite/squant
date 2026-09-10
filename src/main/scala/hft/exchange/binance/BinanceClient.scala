@@ -223,7 +223,19 @@ final class BinanceClient private[binance] (
       .left
       .map(classifyWrite)
 
-  override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
+  /** 本客户端接的是 USDⓈ-M 永续，别的品种没有对应端点 —— **立即失败**。
+    *
+    * 不静默当永续处理: 那会把一张期权单发到永续端点上, 要么被交易所拒 (白跑一趟),
+    * 要么撞上一个同名的永续合约。品种是调用方明确写下的事实, 对不上就是装配错了。 */
+  private def perpSymbol(instrument: Instrument): Symbol =
+    require(
+      instrument.kind == InstrumentKind.LinearPerp,
+      s"Binance 适配层只支持 U 本位永续, 收到 ${instrument.kind}: $instrument",
+    )
+    instrument.symbol
+
+  override def cancelOrder(instrument: Instrument, ref: OrderRef): Either[ExchangeError, Unit] =
+    val symbol = perpSymbol(instrument)
     val idParam = ref match
       case OrderRef.ByExchangeId(id) => "orderId" -> id
       case OrderRef.ByClientId(id)   => "origClientOrderId" -> id
@@ -234,8 +246,8 @@ final class BinanceClient private[binance] (
         Left(ExchangeError.OrderNotFound(s"Binance -2011 unknown order: ${ref.raw}"))
       case Left(e) => Left(classifyWrite(e))
 
-  override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] =
-    signedRequest[List[OpenOrder]](Method.GET, "/fapi/v1/openOrders", Map("symbol" -> symbol)).map {
+  override def fetchPendingOrders(instrument: Instrument): Either[ExchangeError, Vector[OrderUpdate]] =
+    signedRequest[List[OpenOrder]](Method.GET, "/fapi/v1/openOrders", Map("symbol" -> perpSymbol(instrument))).map {
       orders =>
         orders.iterator.map { o =>
           // Binance USDⓈ-M 的原生数量就是**币本位** (contractSize = 1)，与 WS 路径一致

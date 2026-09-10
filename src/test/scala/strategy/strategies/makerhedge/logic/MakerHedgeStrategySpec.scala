@@ -64,7 +64,7 @@ class MakerHedgeStrategySpec extends munit.FunSuite:
     feed(runner, ordUpd(OrderStatus.Pending, Side.Short, 105.04, 8 * hour)) // 确认, restingAt=8h
     assertEquals(feed(runner, bbo(104.0, 8 * hour + 2000)), Vector.empty)   // 2s < 5s
     feed(runner, bbo(104.0, 8 * hour + 6000)) match                          // 6s > 5s -> 撤
-      case Vector(OutcomeEvent.CancelOrder(e, sy, ref)) => assertEquals(ref, OrderRef.ByExchangeId("o1"))
+      case Vector(OutcomeEvent.CancelOrder(_, ref)) => assertEquals(ref, OrderRef.ByExchangeId("o1"))
       case other                                       => fail(s"expected CancelOrder, got $other")
 
   test("成交回报 -> 中心重置到成交价, 同价不再下单"):

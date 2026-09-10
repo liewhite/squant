@@ -100,7 +100,7 @@ final class AccountMonitor(
 
     // 挂单按标的查 —— 只查看得见的那些 (持有的 + 点名的)。
     (held ++ symbols).toVector.sorted.foreach { symbol =>
-      orThrow(s"$symbol 挂单")(client.fetchPendingOrders(symbol))
+      orThrow(s"$symbol 挂单")(client.fetchPendingOrders(Instrument.perp(exchange, symbol)))
         .foreach(o => ctx.publish(Event.local(Topics.OrderUpdate, o.copy(account = account))))
     }
 

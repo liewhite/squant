@@ -54,14 +54,14 @@ object Commands:
     *
     * @param requestId 与 [[AccountSyncReport]] 配对。引擎逐次自增，用它认领自己那条应答，
     *                  不会把上一轮的残留应答当成本轮完成
-    * @param symbols   要对齐的标的 (交易所由路由键给出，故这里只有 symbol —— 少一处可以
-    *                  与路由键不一致的冗余)
+    * @param instruments 要对齐的标的。带品种 (见 [[hft.domain.InstrumentKind]]) —— 柜台据它
+    *                    决定去哪个端点查挂单: 同一个 symbol 底下可能有永续、币本位、期权。
     */
   final case class AccountSyncRequest(
       account: AccountId,
       exchange: Exchange,
       requestId: Long,
-      symbols: Set[Symbol],
+      instruments: Set[Instrument],
   ):
     def target: AccountExchange = AccountExchange(account, exchange)
 
@@ -97,7 +97,7 @@ object Commands:
           s"一条 PlaceOrders 的订单必须同属一个交易所, 实际 ${exchanges.mkString(",")} " +
             s"—— 跨所决策要按交易所拆成多条 (comment=$comment)",
         )
-      case CancelOrder(_, _, _) => ()
+      case CancelOrder(_, _) => ()
 
     /** 下单信号 (一次决策可包含多个关联订单)。
       *
@@ -116,7 +116,7 @@ object Commands:
       *
       * 用 [[OrderRef]] 而非裸 id 指名订单：在途单还没有交易所 id，只能按 clientOrderId 撤。
       */
-    case CancelOrder(exchange: Exchange, symbol: Symbol, ref: OrderRef)
+    case CancelOrder(instrument: Instrument, ref: OrderRef)
 
     /** 本信号发往哪个交易所 —— 路由键的唯一出处。
       *
@@ -124,7 +124,7 @@ object Commands:
     def targetExchange: Exchange = this match
       // 构造处 (init 校验) 已保证非空且同所，取第一张即可
       case PlaceOrders(orders, _)      => orders.head.exchange
-      case CancelOrder(exchange, _, _) => exchange
+      case CancelOrder(instrument, _) => instrument.exchange
 
   /** 带账户与交易所归属的策略信号 —— 一次决策要发往**哪个账户在哪个交易所的柜台**执行。
     *

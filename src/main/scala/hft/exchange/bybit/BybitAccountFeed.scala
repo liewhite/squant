@@ -166,7 +166,9 @@ final class BybitAccountFeed(
       return
     val sym = fromBybit(d.symbol).getOrElse(throw IllegalStateException(s"Unknown Bybit symbol in execution: '${d.symbol}'"))
     report(AccountReport.Executed(
-      symbol = sym,
+      // 本 feed 订的是 category=linear —— U 本位永续。接期权 (category=option) 时,
+      // 品种要按订阅的那条频道来定, 不能沿用这里。
+      instrument = Instrument.perp(Exchange.Bybit, sym),
       side = sideFromBybit(d.side),
       price = d.execPrice.asPrice,
       qty = Coin(d.execQty.asDouble),
@@ -187,7 +189,7 @@ final class BybitAccountFeed(
     report(AccountReport.OrderStatusChanged(
       orderId = d.orderId,
       clientOrderId = if d.orderLinkId.nonEmpty then Some(d.orderLinkId) else None,
-      symbol = sym,
+      instrument = Instrument.perp(Exchange.Bybit, sym),
       side = sideFromBybit(d.side),
       status = status,
       price = Price(d.price.asDoubleOrZero),
@@ -213,7 +215,7 @@ final class BybitAccountFeed(
       case "" if magnitude == 0.0 => 0.0
       case other =>
         throw IllegalStateException(s"未知的 Bybit 持仓方向: '$other' (symbol=${d.symbol} size=${d.size})")
-    report(AccountReport.PositionReported(sym, Coin(signed), nowMs))
+    report(AccountReport.PositionReported(Instrument.perp(Exchange.Bybit, sym), Coin(signed), nowMs))
 
   private def publishWallet(d: WalletData): Unit =
     BybitAccountFeed.walletReports(d, nowMs).foreach(report)

@@ -17,7 +17,18 @@ private[okx] object OkxCodec:
   //   永续:   to_okx("BTC","USDT")        = "BTC-USDT-SWAP"
   //   指数:   to_okx_index("BTC","USDT")  = "BTC-USDT"
 
-  def toOkx(symbol: Symbol, quote: String): String = s"$symbol-$quote-SWAP"
+  /** 框架标的 -> OKX instId。**按品种分派** —— 从前这里恒拼 `-SWAP`，于是币本位与期权
+    * 根本表达不出来（见 [[hft.domain.InstrumentKind]]）。 */
+  def toOkx(instrument: Instrument, quote: String): String = instrument.kind match
+    case InstrumentKind.LinearPerp  => s"${instrument.symbol}-$quote-SWAP"
+    // 反向（币本位）永续的计价币恒为 USD，与本柜台配置的 quote 无关
+    case InstrumentKind.InversePerp => s"${instrument.symbol}-USD-SWAP"
+    // 期权的 symbol 就是原生 instId（ETH-USD-250101-3000-C），不再拼装
+    case InstrumentKind.Option      => instrument.symbol
+    case InstrumentKind.Spot        => s"${instrument.symbol}-$quote"
+
+  /** 永续的 instId —— 只在还没有 [[Instrument]] 的调用点上用（行情订阅目前按 symbol 声明）。 */
+  def toOkxPerp(symbol: Symbol, quote: String): String = s"$symbol-$quote-SWAP"
   def toOkxIndex(symbol: Symbol, quote: String): String = s"$symbol-$quote"
 
   /** `"BTC-USDT-SWAP"` -> `Some("BTC")`；**计价币不是 `quote` 的、非永续的，一律 None**。

@@ -19,7 +19,7 @@ import hft.domain.*
   * @param dustOf 视作零的量级（币本位）。`sizeStep` 是**张**，拿它直接当阈值会在
   *               contractSize ≠ 1 的品种上差一个数量级，故由调用方换算好再传进来
   */
-final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol => Double):
+final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Instrument => Double):
   import PositionBook.*
 
   /** 主账本 —— 由订单回报的累计成交量驱动。**发到总线的仓位就是它**。
@@ -27,7 +27,7 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
     * 只有数量, 不是 [[Ledger]]: 柜台的账本从不读均价, 也没有现金可言 (那是撮合的事)。
     * 用全套账本等于给这里凭空引进两个它填不出、也用不上的量 —— 而"填不出就填 0"的字段
     * 迟早会被谁读走。 */
-  private var sizes: Map[Symbol, Coin] = Map.empty
+  private var sizes: Map[Instrument, Coin] = Map.empty
 
   /** 成交明细独立累出来的账 —— **第二意见**。
     *
@@ -35,27 +35,27 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
     * 说明**我们这边**有问题（少解析了一条推送、字段读错、去重去多了），
     * 而不是账户被外部改了 —— 后者要看 [[reported]]。三方比对的价值全在这个区分上。
     */
-  private var fillSizes: Map[Symbol, Coin] = Map.empty
+  private var fillSizes: Map[Instrument, Coin] = Map.empty
 
   /** 交易所报的最新仓位 —— **第三方读数**，不是账本 */
-  private val reported = scala.collection.mutable.Map.empty[Symbol, Coin]
+  private val reported = scala.collection.mutable.Map.empty[Instrument, Coin]
 
   /** 每张订单**已记进账本**的累计成交量 —— 差分的前值，也是去重的依据 */
   private val settled = scala.collection.mutable.Map.empty[OrderId, Settlement]
 
   /** 本账本负责的标的 —— 由对齐指令划定 */
-  private var managed: Set[Symbol] = Set.empty
+  private var managed: Set[Instrument] = Set.empty
 
   /** 连续对不上的次数：(标的, 比对种类) -> 次数 */
-  private val disagreements = scala.collection.mutable.Map.empty[(Symbol, Kind), Int]
+  private val disagreements = scala.collection.mutable.Map.empty[(Instrument, Kind), Int]
 
   /** 这个标的归本账本管吗。交易所推的是整个账户的动静，别人的标的不归它记也不归它对 */
-  def manages(symbol: Symbol): Boolean = managed.contains(symbol)
+  def manages(instrument: Instrument): Boolean = managed.contains(instrument)
 
-  def managedSymbols: Set[Symbol] = managed
+  def managedInstruments: Set[Instrument] = managed
 
-  def positionOf(symbol: Symbol): Position =
-    Position(account, exchange, symbol, sizes.getOrElse(symbol, Coin.Zero))
+  def positionOf(instrument: Instrument): Position =
+    Position(account, exchange, instrument.symbol, sizes.getOrElse(instrument, Coin.Zero), kind = instrument.kind)
 
   /** 按标的**增量**重置 —— 只动这批，别把上一批的账抹掉。
     *
@@ -65,22 +65,22 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
     * 既有挂单的已成交量要填进记账进度：少了这一步，对齐后第一条回报会把对齐之前就已
     * 成交的部分再记一遍 —— 拉到的仓位里本已含着它，而记账进度是空的。
     */
-  def align(symbols: Set[Symbol], positions: Vector[Position], pendingOrders: Vector[OrderUpdate], now: Timestamp): Unit =
-    val refreshed = positions.filter(p => symbols.contains(p.symbol)).map(p => p.symbol -> p.size).toMap
-    sizes = (sizes -- symbols) ++ refreshed
-    fillSizes = (fillSizes -- symbols) ++ refreshed
-    reported --= symbols
-    disagreements.filterInPlace((key, _) => !symbols.contains(key._1))
+  def align(instruments: Set[Instrument], positions: Vector[Position], pendingOrders: Vector[OrderUpdate], now: Timestamp): Unit =
+    val refreshed = positions.filter(p => instruments.contains(p.instrument)).map(p => p.instrument -> p.size).toMap
+    sizes = (sizes -- instruments) ++ refreshed
+    fillSizes = (fillSizes -- instruments) ++ refreshed
+    reported --= instruments
+    disagreements.filterInPlace((key, _) => !instruments.contains(key._1))
     // 记账进度不清空：这批标的还活着的订单会被下面的挂单快照覆盖，已终态的靠墓碑自然过期。
     // 清掉反而会让晚到的回报从零重记。
     //
     // 挂单同样按 `symbols` 过滤：账本重置与进度重置**必须同批**。放进一张别批标的的挂单，
     // 它的记账进度会被刷成快照值而对应账本没跟着重置 —— 增量差额从此永久漏记, 仓位错且无症状。
     // 这条不变量收在这里, 不能指望每个调用方都只传本批的挂单。
-    pendingOrders.filter(o => symbols.contains(o.symbol) && o.filledQuantity.nonZero).foreach { order =>
+    pendingOrders.filter(o => instruments.contains(o.instrument) && o.filledQuantity.nonZero).foreach { order =>
       settled(order.orderId) = Settlement(order.filledQuantity, firstSeenAt = now, terminalAt = None)
     }
-    managed ++= symbols
+    managed ++= instruments
 
   /** 把某订单的账记到 `cumulative` 为止。
     *
@@ -88,10 +88,10 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
     * 立身之本：重复推送记不进第二次、跨频道乱序谁先到谁记账、丢一条推送由下一条的
     * 累计量补回来。
     */
-  def settle(orderId: OrderId, symbol: Symbol, side: Side, price: Price, cumulative: Coin, now: Timestamp): Settled =
+  def settle(orderId: OrderId, instrument: Instrument, side: Side, price: Price, cumulative: Coin, now: Timestamp): Settled =
     val already = settled.get(orderId).map(_.cumulative).getOrElse(Coin.Zero)
     val delta = cumulative - already
-    val dust = dustOf(symbol)
+    val dust = dustOf(instrument)
     // 半个最小变动单位以下视作零 —— 两个精确值相减仍会留下浮点尾巴
     // (0.8 - 0.3 = 0.5000000000000001)，严格比较会让它产出一笔量级 1e-16 的幻影成交
     if delta.value <= dust then
@@ -107,15 +107,15 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
       // 文字要消灭的那个"危险侧中间状态", 只不过成因从交易所换成了我们自己。
       // 已经确认是 bug 的输入不该有"继续"这条路: 在第一现场抛, 带上足以定位的上下文。
       throw IllegalStateException(
-        s"$symbol order=$orderId 成交均价为 ${price.value} (非正), 拒绝入账并终止 —— " +
+        s"$instrument order=$orderId 成交均价为 ${price.value} (非正), 拒绝入账并终止 —— " +
           s"适配层多半填了委托价而非成交均价 (side=$side cumulative=${cumulative.value} 已记=${already.value})"
       )
     else
       settled(orderId) = settled.get(orderId) match
         case Some(prev) => prev.copy(cumulative = cumulative)
         case None       => Settlement(cumulative, firstSeenAt = now, terminalAt = None)
-      sizes = sizes.updated(symbol, sizes.getOrElse(symbol, Coin.Zero) + PositionBook.signed(side, delta))
-      Settled.Recorded(delta, positionOf(symbol))
+      sizes = sizes.updated(instrument, sizes.getOrElse(instrument, Coin.Zero) + PositionBook.signed(side, delta))
+      Settled.Recorded(delta, positionOf(instrument))
 
   /** 订单进终态：立墓碑，不删。
     *
@@ -126,11 +126,11 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
     settled.updateWith(orderId)(_.map(_.copy(terminalAt = Some(now))))
 
   /** 成交明细进第二本账 —— 只为对账，不影响发到总线的仓位 */
-  def recordFill(symbol: Symbol, side: Side, qty: Coin): Unit =
-    fillSizes = fillSizes.updated(symbol, fillSizes.getOrElse(symbol, Coin.Zero) + PositionBook.signed(side, qty))
+  def recordFill(instrument: Instrument, side: Side, qty: Coin): Unit =
+    fillSizes = fillSizes.updated(instrument, fillSizes.getOrElse(instrument, Coin.Zero) + PositionBook.signed(side, qty))
 
   /** 记下交易所报的仓位，按节拍统一对账 */
-  def observeReported(symbol: Symbol, size: Coin): Unit = reported(symbol) = size
+  def observeReported(instrument: Instrument, size: Coin): Unit = reported(instrument) = size
 
   /** 走一遍对账与清理，返回需要喊出来的事。
     *
@@ -138,11 +138,11 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
     */
   def audit(now: Timestamp): Vector[Alarm] =
     val stale = evictSettled(now)
-    val mismatches = managed.toVector.sorted.flatMap { symbol =>
-      val byOrders = positionOf(symbol).size
-      val byFills = fillSizes.getOrElse(symbol, Coin.Zero)
-      compare(byOrders, byFills, reported.get(symbol), dustOf(symbol) * 2)
-        .flatMap(verdict => record(symbol, verdict))
+    val mismatches = managed.toVector.sortBy(_.toString).flatMap { instrument =>
+      val byOrders = positionOf(instrument).size
+      val byFills = fillSizes.getOrElse(instrument, Coin.Zero)
+      compare(byOrders, byFills, reported.get(instrument), dustOf(instrument) * 2)
+        .flatMap(verdict => record(instrument, verdict))
     }
     stale ++ mismatches
 
@@ -150,8 +150,8 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
     *
     * 中间那几次咽下去 —— 它们多半是时序窗口，报出来会把真问题淹掉。
     */
-  private def record(symbol: Symbol, verdict: Verdict): Option[Alarm] =
-    val key = (symbol, verdict.kind)
+  private def record(instrument: Instrument, verdict: Verdict): Option[Alarm] =
+    val key = (instrument, verdict.kind)
     verdict match
       case _: Verdict.Agreed =>
         disagreements.remove(key)
@@ -160,7 +160,7 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Symbol 
         val times = disagreements.getOrElse(key, 0) + 1
         disagreements(key) = times
         // 恰好到阈值时喊一次；之后不再重复刷屏，首次告警已经说清楚了
-        Option.when(times == DisagreementsBeforeAlarm)(Alarm.Disagreement(symbol, mismatch))
+        Option.when(times == DisagreementsBeforeAlarm)(Alarm.Disagreement(instrument, mismatch))
 
   /** 清掉已终态且过了保留期的记账进度；顺便报出长期等不到终态的那些。
     *
@@ -245,7 +245,7 @@ object PositionBook:
 
   /** 要喊出来的事 */
   enum Alarm:
-    case Disagreement(symbol: Symbol, verdict: Verdict)
+    case Disagreement(instrument: Instrument, verdict: Verdict)
     /** 有成交却长期等不到终态回报 —— 通常意味着丢了一条订单推送 */
     case StaleSettlement(orderId: OrderId, cumulative: Coin)
 

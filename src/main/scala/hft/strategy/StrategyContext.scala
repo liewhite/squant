@@ -103,12 +103,7 @@ final class StrategyContext private[hft] (
       owned,
       s"只能撤销本策略已登记的挂单: instrument=$instrument ref=$ref",
     )
-    Event.stamped(
-      OrderIntent,
-      AccountOutcome(account, OutcomeEvent.CancelOrder(instrument.exchange, instrument.symbol, ref)),
-      now,
-      now,
-    )
+    Event.stamped(OrderIntent, AccountOutcome(account, OutcomeEvent.CancelOrder(instrument, ref)), now, now)
 
   /** 发一条自定义事件 —— 策略自己的指标、信号、给别的组件的提示。
     *

@@ -70,36 +70,44 @@ final class RestTradingGateway(
     * 那时它既不知道自己管什么，账本也还没有初值，处理了只会算错。
     */
   private def handle(report: AccountReport, now: Timestamp): Vector[AnyEvent] =
-    symbolOf(report) match
-      case Some(symbol) if !book.manages(symbol) =>
-        logger.debug(s"$target 忽略不归本柜台管的标的: $symbol")
+    instrumentOf(report) match
+      case Some(instrument) if !book.manages(instrument) =>
+        logger.debug(s"$target 忽略不归本柜台管的标的: $instrument")
         Vector.empty
       case _ => translate(report, now)
 
   /** 这条报告说的是哪个标的。账户级读数 (余额/净值/希腊值) 没有标的，不参与分流 */
-  private def symbolOf(report: AccountReport): Option[Symbol] = report match
-    case r: AccountReport.Executed           => Some(r.symbol)
-    case r: AccountReport.OrderStatusChanged => Some(r.symbol)
-    case r: AccountReport.PositionReported   => Some(r.symbol)
+  private def instrumentOf(report: AccountReport): Option[Instrument] = report match
+    case r: AccountReport.Executed           => Some(r.instrument)
+    case r: AccountReport.OrderStatusChanged => Some(r.instrument)
+    case r: AccountReport.PositionReported   => Some(r.instrument)
     case _                                   => None
 
   private def translate(report: AccountReport, now: Timestamp): Vector[AnyEvent] = report match
-    case AccountReport.Executed(symbol, side, price, qty, ts) =>
+    case AccountReport.Executed(instrument, side, price, qty, ts) =>
       // 成交明细不进主账本 (仓位由订单回报的累计量驱动)，但要进第二本账 —— 它是对账的
       // 另一条独立渠道，两本对不上就说明我们这边漏了什么。
-      book.recordFill(symbol, side, qty)
-      Vector(Event.stamped(Topics.Fill, Fill(account, exchange, symbol, side, price, qty, ts), ts, now))
+      book.recordFill(instrument, side, qty)
+      Vector(Event.stamped(
+        Topics.Fill,
+        Fill(account, exchange, instrument.symbol, side, price, qty, ts, kind = instrument.kind),
+        ts,
+        now,
+      ))
 
     case AccountReport.OrderStatusChanged(
-          orderId, clientOrderId, symbol, side, status, price, avgFillPrice, quantity, filledQuantity, reduceOnly, ts
+          orderId, clientOrderId, instrument, side, status, price, avgFillPrice, quantity, filledQuantity, reduceOnly, ts
         ) =>
       // 记账用**成交均价**而不是委托价: 市价单的委托价是空的, 拿它记账会把持仓均价记成 0。
       val settlement =
         if filledQuantity.isZero then Vector.empty
-        else settle(orderId, symbol, side, avgFillPrice, filledQuantity, ts, now)
+        else settle(orderId, instrument, side, avgFillPrice, filledQuantity, ts, now)
       if status.isTerminal then book.markTerminal(orderId, now)
       val update =
-        OrderUpdate(account, orderId, clientOrderId, exchange, symbol, side, status, price, quantity, filledQuantity, reduceOnly, ts)
+        OrderUpdate(
+          account, orderId, clientOrderId, exchange, instrument.symbol, side, status, price, quantity,
+          filledQuantity, reduceOnly, ts, kind = instrument.kind,
+        )
       // 顺序在这里构造: 仓位先于订单状态。反过来的话, 策略会看到"挂单已消失、仓位还没更新"
       // —— 它据此认为自己既没单也没仓位, 于是再下一单。那是危险侧的中间状态。
       settlement :+ Event.stamped(Topics.OrderUpdate, update, ts, now)
@@ -113,23 +121,23 @@ final class RestTradingGateway(
     case AccountReport.GreeksChanged(ccy, delta, gamma, theta, vega, ts) =>
       Vector(Event.stamped(Topics.Greeks, Greeks(account, exchange, ccy, delta, gamma, theta, vega, ts), ts, now))
 
-    case AccountReport.PositionReported(symbol, size, _) =>
-      book.observeReported(symbol, size) // 只记下来, 按节拍统一对账
+    case AccountReport.PositionReported(instrument, size, _) =>
+      book.observeReported(instrument, size) // 只记下来, 按节拍统一对账
       Vector.empty // 总线上的仓位只有一个来源: 本账本
 
   private def settle(
       orderId: OrderId,
-      symbol: Symbol,
+      instrument: Instrument,
       side: Side,
       price: Price,
       cumulative: Coin,
       ts: Timestamp,
       now: Timestamp,
   ): Vector[AnyEvent] =
-    book.settle(orderId, symbol, side, price, cumulative, now) match
+    book.settle(orderId, instrument, side, price, cumulative, now) match
       case PositionBook.Settled.Recorded(delta, position) =>
         logger.info(
-          s"成交入账 $target $symbol $side ${delta.value} @ ${price.value} -> 仓位 ${position.size.value} (order=$orderId)"
+          s"成交入账 $target $instrument $side ${delta.value} @ ${price.value} -> 仓位 ${position.size.value} (order=$orderId)"
         )
         // localTs 取本地时刻 —— 它是延迟度量的基准, 盖成交易所时间会让事件看起来零延迟
         Vector(TradingGateway.positionEvent(position, ts, now))
@@ -138,14 +146,14 @@ final class RestTradingGateway(
         // 不出声到 warn: 乱序后到的旧推送本就是常态路径, 报出来只会变成噪声。
         // 但适配层读错字段的表现也是它 —— 留一条 debug, 排查时这是唯一线索。
         logger.debug(
-          s"$target $symbol order=$orderId 累计成交量倒退: 这条报 ${cumulative.value}, 已记 ${already.value} —— " +
+          s"$target $instrument order=$orderId 累计成交量倒退: 这条报 ${cumulative.value}, 已记 ${already.value} —— " +
             "不入账。多半是乱序后到的旧推送; 若持续出现, 查适配层是否读错了累计量字段"
         )
         Vector.empty
 
   private def report(alarm: PositionBook.Alarm): Unit = alarm match
-    case PositionBook.Alarm.Disagreement(symbol, verdict) =>
-      logger.error(s"!!! $target $symbol ${verdict.explain}")
+    case PositionBook.Alarm.Disagreement(instrument, verdict) =>
+      logger.error(s"!!! $target $instrument ${verdict.explain}")
     case PositionBook.Alarm.StaleSettlement(orderId, cumulative) =>
       logger.warn(
         s"$target order=$orderId 有成交 ${cumulative.value} 却长期没等到终态回报 —— " +
@@ -162,8 +170,8 @@ final class RestTradingGateway(
     * 两本各自累加的浮点账会以 1e-16 的差异连续几拍报出"这是我们这边的 bug"。
     * 而这个分支本就该不可达 —— [[syncSnapshot]] 在对齐入口挡过了。
     */
-  private def dustOf(symbol: Symbol): Double =
-    val meta = metaOf(symbol)
+  private def dustOf(instrument: Instrument): Double =
+    val meta = metaOf(instrument.symbol)
     meta.toCoin(Contracts(meta.sizeStep)).value / 2
 
   override protected def metaOf(symbol: Symbol): SymbolMeta =
@@ -203,15 +211,15 @@ final class RestTradingGateway(
           throw IllegalStateException(s"下单结果不确定, 终止: $exchange ${order.symbol} ${e.message}")
     }
 
-  override protected def cancelOrder(symbol: Symbol, ref: OrderRef, now: Timestamp): Unit =
+  override protected def cancelOrder(instrument: Instrument, ref: OrderRef, now: Timestamp): Unit =
     fork {
-      client.cancelOrder(symbol, ref) match
-        case Right(())                                 => logger.info(s"撤单已受理: $exchange $symbol ${ref.raw}")
+      client.cancelOrder(instrument, ref) match
+        case Right(())                                 => logger.info(s"撤单已受理: $instrument ${ref.raw}")
         case Left(ExchangeError.OrderNotFound(reason)) =>
           // 订单已成交/已撤销，终态同样由私有流推送，撤单失败非致命
-          logger.info(s"订单已不在: $exchange $symbol ${ref.raw} ($reason)")
+          logger.info(s"订单已不在: $instrument ${ref.raw} ($reason)")
         case Left(e) =>
-          throw IllegalStateException(s"撤单结果不确定, 终止: $exchange $symbol ${ref.raw} ${e.message}")
+          throw IllegalStateException(s"撤单结果不确定, 终止: $instrument ${ref.raw} ${e.message}")
     }
 
   /** 拉一份**互相一致**的仓位/挂单快照并据此对齐账本。
@@ -223,24 +231,24 @@ final class RestTradingGateway(
     * 读一致快照的标准手法：夹着仓位前后各拉一次挂单，两次的已成交量相同即说明这中间
     * 没有成交发生。静默标的一次就收敛。
     */
-  override protected def syncSnapshot(symbols: Set[Symbol]): TradingGateway.AccountSnapshot =
+  override protected def syncSnapshot(instruments: Set[Instrument]): TradingGateway.AccountSnapshot =
     // 先确认这批标的都有合约规格。对齐是它们进入本柜台视野的**唯一入口**，
     // 在这里挡住, 后面的 dustOf / metaOf 就都落在"必然有规格"的前提上 (缺失即抛)。
-    symbols.foreach(metaOf)
-    val (positions, orders) = consistentSnapshot(symbols, attempt = 1)
-    val mine = positions.filter(p => symbols.contains(p.symbol)).map(_.copy(account = account))
-    book.align(symbols, mine, orders, nowMs)
+    instruments.foreach(i => metaOf(i.symbol))
+    val (positions, orders) = consistentSnapshot(instruments, attempt = 1)
+    val mine = positions.filter(p => instruments.contains(p.instrument)).map(_.copy(account = account))
+    book.align(instruments, mine, orders, nowMs)
     orders.filter(_.filledQuantity.nonZero).foreach { order =>
       logger.info(s"接管既有挂单 $target ${order.symbol} order=${order.orderId} 已成交 ${order.filledQuantity.value}")
     }
     TradingGateway.AccountSnapshot(mine, orders)
 
-  private def consistentSnapshot(symbols: Set[Symbol], attempt: Int): (Vector[Position], Vector[OrderUpdate]) =
-    val before = fetchOrders(symbols)
+  private def consistentSnapshot(instruments: Set[Instrument], attempt: Int): (Vector[Position], Vector[OrderUpdate]) =
+    val before = fetchOrders(instruments)
     val positions = client.fetchPositions() match
       case Right(ps) => ps
       case Left(e)   => throw IllegalStateException(s"$exchange 拉取初始持仓失败: ${e.message}")
-    val after = fetchOrders(symbols)
+    val after = fetchOrders(instruments)
     if filledByOrder(before) == filledByOrder(after) then (positions, after)
     else if attempt >= RestTradingGateway.SnapshotAttempts then
       // 拿不到一致快照就**不启动**。
@@ -257,16 +265,16 @@ final class RestTradingGateway(
       )
     else
       logger.info(s"$target 取快照期间有成交进来, 重取 (第 ${attempt + 1} 次)")
-      consistentSnapshot(symbols, attempt + 1)
+      consistentSnapshot(instruments, attempt + 1)
 
   private def filledByOrder(orders: Vector[OrderUpdate]): Map[OrderId, Coin] =
     orders.map(o => o.orderId -> o.filledQuantity).toMap
 
-  private def fetchOrders(symbols: Set[Symbol]): Vector[OrderUpdate] =
-    symbols.toVector.sortBy(_.toString).flatMap { symbol =>
-      client.fetchPendingOrders(symbol) match
+  private def fetchOrders(instruments: Set[Instrument]): Vector[OrderUpdate] =
+    instruments.toVector.sortBy(_.toString).flatMap { instrument =>
+      client.fetchPendingOrders(instrument) match
         case Right(updates) => updates.map(_.copy(account = account))
-        case Left(e)        => throw IllegalStateException(s"$exchange $symbol 拉取既有挂单失败: ${e.message}")
+        case Left(e)        => throw IllegalStateException(s"$instrument 拉取既有挂单失败: ${e.message}")
     }
 
   override protected def currentAccountInfo(): AccountInfo =

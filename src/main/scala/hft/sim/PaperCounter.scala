@@ -93,13 +93,13 @@ final class PaperCounter(
     logger.debug(s"[$paperAccount] order in flight: ${order.symbol} ${order.side} qty=${order.quantity}")
     enqueue(Counter.inbound(config, CounterInput.OrderArrived(order, s"paper-$orderIdSeq")))
 
-  override protected def cancelOrder(symbol: Symbol, ref: OrderRef, now: Timestamp): Unit =
+  override protected def cancelOrder(instrument: Instrument, ref: OrderRef, now: Timestamp): Unit =
     enqueue(Counter.inbound(config, CounterInput.CancelArrived(ref)))
 
   /** 影子账户从零开始, 引擎不会给它发对齐指令 (见 Engine.addStrategies)。
     * 真收到指令时如实报告当下的账本 —— 撤下策略再装回来时它确实可能已经有仓位了。 */
   /** 影子账户的世界全在进程内, 一次读取本就是原子的 —— 挂单登记在别处, 这里不返回 */
-  override protected def syncSnapshot(symbols: Set[Symbol]): TradingGateway.AccountSnapshot =
+  override protected def syncSnapshot(instruments: Set[Instrument]): TradingGateway.AccountSnapshot =
     TradingGateway.AccountSnapshot(state.ledger.openPositions(exchange), Vector.empty)
 
   /** 本账户当前净值 —— 策略的杠杆闸门读它。基类按 [[accountRefreshMs]] 周期发布 */

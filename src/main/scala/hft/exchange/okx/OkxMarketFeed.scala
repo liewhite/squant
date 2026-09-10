@@ -49,11 +49,11 @@ final class OkxMarketFeed(
     outgoing.send(WebSocketFrame.text(s"""{"op":"subscribe","args":[$args]}"""))
 
   private def argJson(kind: SubscriptionKind): String = kind match
-    case SubscriptionKind.BBO(s)         => s"""{"channel":"bbo-tbt","instId":"${toOkx(s, quote)}"}"""
-    case SubscriptionKind.FundingRate(s) => s"""{"channel":"funding-rate","instId":"${toOkx(s, quote)}"}"""
-    case SubscriptionKind.MarkPrice(s)   => s"""{"channel":"mark-price","instId":"${toOkx(s, quote)}"}"""
+    case SubscriptionKind.BBO(s)         => s"""{"channel":"bbo-tbt","instId":"${toOkxPerp(s, quote)}"}"""
+    case SubscriptionKind.FundingRate(s) => s"""{"channel":"funding-rate","instId":"${toOkxPerp(s, quote)}"}"""
+    case SubscriptionKind.MarkPrice(s)   => s"""{"channel":"mark-price","instId":"${toOkxPerp(s, quote)}"}"""
     case SubscriptionKind.IndexPrice(s)  => s"""{"channel":"index-tickers","instId":"${toOkxIndex(s, quote)}"}"""
-    case SubscriptionKind.Trade(s)       => s"""{"channel":"trades","instId":"${toOkx(s, quote)}"}"""
+    case SubscriptionKind.Trade(s)       => s"""{"channel":"trades","instId":"${toOkxPerp(s, quote)}"}"""
 
   // ==================== 公共流解析 (解析失败/错误事件 -> 异常上抛终止) ====================
 

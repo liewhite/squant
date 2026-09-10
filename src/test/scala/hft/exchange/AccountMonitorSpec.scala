@@ -22,8 +22,8 @@ class AccountMonitorSpec extends munit.FunSuite:
     override def exchange: Exchange = ex
     override def fetchAllSymbolMetas() = Right(Vector(meta))
     override def placeOrder(order: ExchangeOrder) = { placed.add("placed"): Unit; Right("should-never-happen") }
-    override def cancelOrder(symbol: Symbol, ref: OrderRef) = Right(())
-    override def fetchPendingOrders(symbol: Symbol) = Right(Vector.empty)
+    override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
+    override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 12_345.0))
     override def fetchWallet() = Right(Map("USDT" -> 12_000.0))
     override def fetchPositions() = Right(positions)

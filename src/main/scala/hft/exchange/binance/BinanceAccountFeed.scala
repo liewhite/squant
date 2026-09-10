@@ -104,7 +104,7 @@ final class BinanceAccountFeed(
     report(AccountReport.OrderStatusChanged(
       orderId = o.i.toString,
       clientOrderId = Some(o.c),
-      symbol = o.s,
+      instrument = Instrument.perp(Exchange.Binance, o.s),
       side = side,
       status = status,
       price = o.p.asPrice,
@@ -115,7 +115,7 @@ final class BinanceAccountFeed(
       timestamp = o.T,
     ))
     if o.l.asDouble > 0 then
-      report(AccountReport.Executed(o.s, side, o.L.asPrice, Coin(o.l.asDouble), o.T))
+      report(AccountReport.Executed(Instrument.perp(Exchange.Binance, o.s), side, o.L.asPrice, Coin(o.l.asDouble), o.T))
 
   private def publishAccountUpdate(msg: AccountUpdateMsg): Unit =
     msg.a.B.foreach(b => report(AccountReport.BalanceChanged(b.a, b.wb.asDouble, msg.E)))
@@ -130,7 +130,7 @@ final class BinanceAccountFeed(
           s"Binance 推来 positionSide=${p.ps} (symbol=${p.s}): 持仓模式在运行期被改成了双向, " +
             "本框架的账本只建模单向持仓"
         )
-      report(AccountReport.PositionReported(p.s, Coin(p.pa.asDouble), msg.E))
+      report(AccountReport.PositionReported(Instrument.perp(Exchange.Binance, p.s), Coin(p.pa.asDouble), msg.E))
     }
 
 object BinanceAccountFeed:

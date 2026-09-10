@@ -143,7 +143,7 @@ class DeltaHedgeStrategySpec extends munit.FunSuite:
       1000, 1000))
     assertEquals(feed(r, bbo(3000.0, 3000)), Vector.empty, "2s < requote 5s -> 不撤")
     feed(r, bbo(3000.0, 7000)) match
-      case Vector(OutcomeEvent.CancelOrder(_, _, ref)) => assertEquals(ref, OrderRef.ByExchangeId("o1"))
+      case Vector(OutcomeEvent.CancelOrder(_, ref)) => assertEquals(ref, OrderRef.ByExchangeId("o1"))
       case other                                       => fail(s"expected CancelOrder, got $other")
 
   test("下单到确认之间不重复下单"):

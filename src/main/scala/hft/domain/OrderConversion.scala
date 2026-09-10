@@ -14,7 +14,10 @@ final case class ExchangeOrder(
     quantity: Contracts,
     reduceOnly: Boolean,
     clientOrderId: String,
-)
+    /** 品种 —— 适配层据它选下单端点 / 拼合约标识 (OKX 的 instId、Bybit 的 category)。
+      * 无默认值: 这是发往交易所的最后一层, 猜错的方向是把单下到另一个合约上。 */
+    override val kind: InstrumentKind,
+) extends HasInstrument
 
 /** 订单在"框架内"与"交易所侧"之间的换算 —— **只在柜台里发生**。
   *
@@ -64,4 +67,7 @@ object OrderConversion:
       quantity = meta.toExchangeContracts(order.quantity),
       reduceOnly = order.reduceOnly,
       clientOrderId = order.clientOrderId,
+      // 品种原样带过去 —— 适配层据它选端点。这一步不做任何推断: 策略下的是哪个合约,
+      // 发出去的就得是哪个合约。
+      kind = order.kind,
     )

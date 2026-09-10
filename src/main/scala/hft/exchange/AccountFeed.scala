@@ -39,7 +39,7 @@ enum AccountReport:
     * [[hft.event.Topics.Fill]]，服务于绩效统计、成交记录、滑点分析这些要看成交本身的人。
     */
   case Executed(
-      symbol: Symbol,
+      instrument: Instrument,
       side: Side,
       price: Price,
       qty: Coin,
@@ -56,7 +56,7 @@ enum AccountReport:
   case OrderStatusChanged(
       orderId: OrderId,
       clientOrderId: Option[String],
-      symbol: Symbol,
+      instrument: Instrument,
       side: Side,
       status: OrderStatus,
       price: Price,
@@ -96,7 +96,7 @@ enum AccountReport:
     * 总线上的仓位只有一个来源：柜台的账本。这一条是拿来跟账本比对的另一份读数
     * (见 [[TradingGateway.reconcile]])。
     */
-  case PositionReported(symbol: Symbol, size: Coin, timestamp: Timestamp)
+  case PositionReported(instrument: Instrument, size: Coin, timestamp: Timestamp)
 
 /** 账户私有推送流 —— 柜台的"汇报"面，**只解析，不发布**。
   *

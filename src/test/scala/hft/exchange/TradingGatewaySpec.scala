@@ -36,8 +36,8 @@ class TradingGatewaySpec extends munit.FunSuite:
     override def exchange: Exchange = Exchange.Binance
     override def placeOrder(order: ExchangeOrder) = Right("ignored")
     override def fetchAllSymbolMetas() = Right(Vector(meta))
-    override def cancelOrder(symbol: Symbol, ref: OrderRef) = Right(())
-    override def fetchPendingOrders(symbol: Symbol) = Right(Vector.empty)
+    override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
+    override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, Exchange.Binance, 10_000.0))
     override def fetchWallet() = Right(Map("USDT" -> 10_000.0))
     override def fetchPositions() = Right(Vector.empty)
@@ -49,9 +49,9 @@ class TradingGatewaySpec extends munit.FunSuite:
 
   /** 让柜台先完成一次对齐 —— **对齐之前它忽略一切报告**：那时它既不知道自己管哪些标的，
     * 账本也还没有初值，处理了只会算错。 */
-  private def align(bus: EventBus, symbols: Set[Symbol] = Set("BTCUSDT"))(using ox.Ox): Unit =
+  private def align(bus: EventBus, instruments: Set[Instrument] = Set(Instrument.perp(Exchange.Binance, "BTCUSDT")))(using ox.Ox): Unit =
     val done = bus.subscribe(Set(Interest.All(AccountSynced)))
-    bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, Exchange.Binance, 1L, symbols)))
+    bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, Exchange.Binance, 1L, instruments)))
     done.events.receive(): Unit
     done.close()
 
@@ -70,7 +70,7 @@ class TradingGatewaySpec extends munit.FunSuite:
 
   /** 一笔成交明细 —— 不参与记账 */
   private def executed(qty: Double) =
-    AccountReport.Executed("BTCUSDT", Side.Long, Price(100.0), Coin(qty), 1L)
+    AccountReport.Executed(Instrument.perp(Exchange.Binance, "BTCUSDT"), Side.Long, Price(100.0), Coin(qty), 1L)
 
   /** `orderPrice` 是委托价, `avgFill` 是成交均价 —— 两者刻意不同, 记账只能用后者 */
   private def statusChanged(
@@ -81,7 +81,7 @@ class TradingGatewaySpec extends munit.FunSuite:
       avgFill: Double = 100.0,
   ) =
     AccountReport.OrderStatusChanged(
-      orderId, Some("c1"), "BTCUSDT", Side.Long, status,
+      orderId, Some("c1"), Instrument.perp(Exchange.Binance, "BTCUSDT"), Side.Long, status,
       Price(orderPrice), Price(avgFill), Coin(1.0), Coin(filled), false, 1L,
     )
 
@@ -216,7 +216,7 @@ class TradingGatewaySpec extends munit.FunSuite:
       class PartialClient extends QuietClient:
         override def fetchPositions() =
           Right(Vector(Position(AccountId.Live, Exchange.Binance, "BTCUSDT", Coin(0.3))))
-        override def fetchPendingOrders(symbol: Symbol) = Right(Vector(
+        override def fetchPendingOrders(instrument: Instrument) = Right(Vector(
           OrderUpdate(AccountId.Live, "o1", Some("c1"), Exchange.Binance, "BTCUSDT", Side.Long,
             OrderStatus.PartiallyFilled(Coin(0.3)), Price(100.0), Coin(1.0), Coin(0.3), false, 1L)
         ))
@@ -248,8 +248,8 @@ class TradingGatewaySpec extends munit.FunSuite:
         ))
       ActorSystem(bus).spawn(RestTradingGateway(TwoSymbolClient(), feed, AccountId.Live, metas + (eth -> ethMeta)))
 
-      align(bus, Set("BTCUSDT"))          // 第一批: BTC, 拉到 0.5
-      align(bus, Set(eth))                // 第二批: ETH, 交易所没返回它 -> 零仓
+      align(bus, Set(Instrument.perp(Exchange.Binance, "BTCUSDT")))          // 第一批: BTC, 拉到 0.5
+      align(bus, Set(Instrument.perp(Exchange.Binance, eth)))                // 第二批: ETH, 交易所没返回它 -> 零仓
 
       val seen = ConcurrentLinkedQueue[AnyEvent]()
       val mailbox = bus.subscribe(Set(Interest.All(Topics.Position)))
@@ -293,7 +293,7 @@ class TradingGatewaySpec extends munit.FunSuite:
 
   test("交易所报的仓位不进总线 —— 总线上的仓位只有账本一个来源"):
     withFeed { (feed, seen) =>
-      feed.emit(AccountReport.PositionReported("BTCUSDT", Coin(9.9), 1L))
+      feed.emit(AccountReport.PositionReported(Instrument.perp(Exchange.Binance, "BTCUSDT"), Coin(9.9), 1L))
       Thread.sleep(100)
       assert(seen.asScala.isEmpty, s"对账用的读数不该外流: ${kinds(seen)}")
     }
@@ -304,8 +304,8 @@ class TradingGatewaySpec extends munit.FunSuite:
     override def exchange: Exchange = Exchange.Binance
     override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] = placeResult
     override def fetchAllSymbolMetas() = fail("unexpected call")
-    override def cancelOrder(symbol: Symbol, ref: OrderRef) = fail("unexpected call")
-    override def fetchPendingOrders(symbol: Symbol) = fail("unexpected call")
+    override def cancelOrder(instrument: Instrument, ref: OrderRef) = fail("unexpected call")
+    override def fetchPendingOrders(instrument: Instrument) = fail("unexpected call")
     // 柜台启动即周期刷净值 —— 给一个固定读数, 免得测试依赖网络
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, Exchange.Binance, 10_000.0))
     override def fetchWallet() = Right(Map("USDT" -> 10_000.0))

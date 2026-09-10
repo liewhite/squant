@@ -70,7 +70,7 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       ))
 
       system.stop(h)
-      assertEquals(firstCancel(bus, intents), OutcomeEvent.CancelOrder(ex, sym, OrderRef.ByExchangeId("EX-1")), "收尾必须撤掉已确认的挂单")
+      assertEquals(firstCancel(bus, intents), OutcomeEvent.CancelOrder(Instrument.perp(ex, sym), OrderRef.ByExchangeId("EX-1")), "收尾必须撤掉已确认的挂单")
 
   test("在途单 (交易所尚未确认) 按 clientOrderId 撤 —— 否则会留下无主挂单"):
     // 策略撤下后没有"下一次收尾"(它已退订), 超时检测也随它停了。
@@ -91,11 +91,11 @@ class ExecutorLifecycleSpec extends munit.FunSuite:
       system.stop(h)
       assertEquals(
         firstCancel(bus, intents),
-        OutcomeEvent.CancelOrder(ex, sym, OrderRef.ByClientId(placed.clientOrderId)),
+        OutcomeEvent.CancelOrder(Instrument.perp(ex, sym), OrderRef.ByClientId(placed.clientOrderId)),
         "在途单必须按 clientOrderId 撤",
       )
 
-  private val sentinel = OutcomeEvent.CancelOrder(ex, "SENTINEL", OrderRef.ByClientId("s"))
+  private val sentinel = OutcomeEvent.CancelOrder(Instrument.perp(ex, "SENTINEL"), OrderRef.ByClientId("s"))
 
   /** 取下一条撤单信号。先发哨兵作栅栏 —— 撤单若没发出，读到的是哨兵而不是永久挂死测试进程 */
   private def firstCancel(bus: EventBus, intents: EventBus.Mailbox): OutcomeEvent.CancelOrder =

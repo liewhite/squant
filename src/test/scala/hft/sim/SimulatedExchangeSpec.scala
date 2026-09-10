@@ -82,7 +82,7 @@ class SimulatedExchangeSpec extends munit.FunSuite:
     )))
 
   private def cancelIntent(ref: OrderRef): AnyEvent =
-    Event.local(OrderIntent, AccountOutcome(AccountId.Live, OutcomeEvent.CancelOrder(ex, sym, ref)))
+    Event.local(OrderIntent, AccountOutcome(AccountId.Live, OutcomeEvent.CancelOrder(Instrument.perp(ex, sym), ref)))
 
   private def eventually(what: String)(cond: => Boolean): Unit =
     val deadline = System.nanoTime() + 3_000_000_000L

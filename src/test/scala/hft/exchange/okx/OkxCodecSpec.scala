@@ -12,7 +12,8 @@ import OkxCodec.given
 class OkxCodecSpec extends munit.FunSuite:
 
   test("symbol <-> instId 转换"):
-    assertEquals(toOkx("BTC", "USDT"), "BTC-USDT-SWAP")
+    assertEquals(toOkx(Instrument.perp(Exchange.Okx, "BTC"), "USDT"), "BTC-USDT-SWAP")
+    assertEquals(toOkxPerp("BTC", "USDT"), "BTC-USDT-SWAP")
     assertEquals(toOkxIndex("BTC", "USDT"), "BTC-USDT")
     assertEquals(fromOkx("BTC-USDT-SWAP", "USDT"), Some("BTC"))
     // 计价币不符一律不认。框架的 Symbol 只有基础币, 认了的话币本位的 ETH-USD-SWAP
@@ -21,6 +22,17 @@ class OkxCodecSpec extends munit.FunSuite:
     assertEquals(fromOkx("ETH-USDC-SWAP", "USDT"), None, "USDC 永续同理")
     assertEquals(fromOkx("ETH-USD-SWAP", "USD"), Some("ETH"), "配了币本位就该认")
     assertEquals(fromOkxIndex("BTC-USDT"), Some("BTC"))
+    // 品种进了标的之后, 从前表达不出来的两种合约都拼得出了 —— toOkx 从前恒拼 "-SWAP"
+    assertEquals(
+      toOkx(Instrument(Exchange.Okx, "ETH", InstrumentKind.InversePerp), "USDT"),
+      "ETH-USD-SWAP",
+      "反向永续的计价币恒为 USD, 与本柜台配置的 quote 无关",
+    )
+    assertEquals(
+      toOkx(Instrument.option(Exchange.Okx, "ETH-USD-250101-3000-C"), "USDT"),
+      "ETH-USD-250101-3000-C",
+      "期权的 symbol 就是原生 instId, 不拼装",
+    )
     // 非永续 / 非指数格式返回 None
     assertEquals(fromOkx("BTC-USDT", "USDT"), None)
     assertEquals(fromOkx("BTC-USDT-FUTURES", "USDT"), None)

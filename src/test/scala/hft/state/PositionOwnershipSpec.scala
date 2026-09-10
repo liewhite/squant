@@ -120,8 +120,8 @@ class PositionOwnershipSpec extends munit.FunSuite:
     override def exchange: Exchange = ex
     override def placeOrder(order: ExchangeOrder) = Right("ex-1")
     override def fetchAllSymbolMetas() = Right(Vector(metas(sym)))
-    override def cancelOrder(symbol: Symbol, ref: OrderRef) = Right(())
-    override def fetchPendingOrders(symbol: Symbol) = Right(Vector.empty)
+    override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
+    override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 10_000.0))
     override def fetchWallet() = Right(Map("USDT" -> 10_000.0))
     override def fetchPositions() = Right(Vector.empty)
@@ -161,7 +161,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
       system.spawn(RestTradingGateway(AcceptingClient(), feed, AccountId.Live, metas))
       // 柜台在对齐之前忽略一切报告 —— 那时它还不知道自己管哪些标的
       val synced = bus.subscribe(Set(Interest.All(AccountSynced)))
-      bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 1L, Set(sym))))
+      bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 1L, Set(Instrument.perp(ex, sym)))))
       synced.events.receive(): Unit
       synced.close()
 
@@ -173,7 +173,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
         case other                               => fail(s"expected PlaceOrders, got $other")
 
       feed.emit(AccountReport.OrderStatusChanged(
-        "ex-1", Some(clientOrderId), sym, Side.Long, OrderStatus.Filled,
+        "ex-1", Some(clientOrderId), Instrument.perp(ex, sym), Side.Long, OrderStatus.Filled,
         Price(100.0), Price(100.0), Coin(0.5), Coin(0.5), false, 2L,
       ))
 
@@ -221,7 +221,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
       // (同批装配、或先后装载)。只按 target 放行的话, A 会话的应答会放行 B —— 那一刻 B
       // 自己那一轮的仓位还在几次 REST 往返之外, 它会按"仓位为零"做第一次决策。
       val otherRound = bus.subscribe(Set(Interest.All(AccountSynced)))
-      bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 999L, Set(sym))))
+      bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 999L, Set(Instrument.perp(ex, sym)))))
       otherRound.events.receive(): Unit
       otherRound.close()
       Thread.sleep(100)
@@ -230,7 +230,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
 
       // 本轮对齐落地 (requestId 与闸门一致)
       val synced = bus.subscribe(Set(Interest.All(AccountSynced)))
-      bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 7L, Set(sym))))
+      bus.publish(Event.local(AccountSync, AccountSyncRequest(AccountId.Live, ex, 7L, Set(Instrument.perp(ex, sym)))))
       synced.events.receive(): Unit
       synced.close()
 

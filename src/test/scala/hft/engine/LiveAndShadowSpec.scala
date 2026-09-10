@@ -40,9 +40,9 @@ class LiveAndShadowSpec extends munit.FunSuite:
     override def exchange: Exchange = ex
     override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
       placed.add(order); Right(s"live-${placed.size}")
-    override def cancelOrder(symbol: Symbol, ref: OrderRef) = Right(())
+    override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
     override def fetchAllSymbolMetas() = Right(Vector(meta))
-    override def fetchPendingOrders(symbol: Symbol) = Right(Vector.empty)
+    override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 10_000.0))
     override def fetchWallet() = Right(Map("USDT" -> 10_000.0))
     override def fetchPositions() = Right(Vector.empty)

@@ -27,7 +27,7 @@ final class DryRunClient(delegate: TradingClient) extends TradingClient:
   // ==================== 只读：透传 ====================
 
   override def fetchAllSymbolMetas(): Either[ExchangeError, Vector[SymbolMeta]] = delegate.fetchAllSymbolMetas()
-  override def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]] = delegate.fetchPendingOrders(symbol)
+  override def fetchPendingOrders(instrument: Instrument): Either[ExchangeError, Vector[OrderUpdate]] = delegate.fetchPendingOrders(instrument)
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] = delegate.fetchAccountInfo()
   override def fetchWallet(): Either[ExchangeError, Map[String, Double]] = delegate.fetchWallet()
   override def fetchPositions(): Either[ExchangeError, Vector[Position]] = delegate.fetchPositions()
@@ -46,7 +46,7 @@ final class DryRunClient(delegate: TradingClient) extends TradingClient:
 
   /** dry-run 下没有真实挂单可撤，回 `OrderNotFound` —— 这既是事实，也正好落在
     * [[TradingGateway]] 既有的容忍分支上（撤一张已不存在的单非致命）。 */
-  override def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit] =
-    logger.warn(s"[DRY-RUN] 未撤单: $exchange $symbol ${ref.raw}")
+  override def cancelOrder(instrument: Instrument, ref: OrderRef): Either[ExchangeError, Unit] =
+    logger.warn(s"[DRY-RUN] 未撤单: $instrument ${ref.raw}")
     Left(ExchangeError.OrderNotFound("dry-run: no live order to cancel"))
 

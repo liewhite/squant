@@ -130,9 +130,9 @@ abstract class TradingGateway extends Actor:
             gatewayLogger.warn(s"下单被交易所精度拒绝: $reason")
             reject(order, reason, now)
       }
-    case OutcomeEvent.CancelOrder(_, symbol, ref) =>
-      gatewayLogger.info(s"撤单: $exchange $symbol ${ref.raw}")
-      cancelOrder(symbol, ref, now)
+    case OutcomeEvent.CancelOrder(instrument, ref) =>
+      gatewayLogger.info(s"撤单: $instrument ${ref.raw}")
+      cancelOrder(instrument, ref, now)
 
   /** 确定性的下单失败以 `OrderUpdate(Error)` 回流，驱动策略侧 pending order 的清理。
     *
@@ -151,8 +151,8 @@ abstract class TradingGateway extends Actor:
     * 任何一步失败都抛异常终止进程 —— 账户状态没对上就开始交易，比不启动危险得多。
     */
   private def runSync(request: AccountSyncRequest): Vector[AnyEvent] =
-    gatewayLogger.info(s"启动对齐 $target: ${request.symbols.mkString(",")} (req=${request.requestId})")
-    val snapshot = syncSnapshot(request.symbols)
+    gatewayLogger.info(s"启动对齐 $target: ${request.instruments.mkString(",")} (req=${request.requestId})")
+    val snapshot = syncSnapshot(request.instruments)
     TradingGateway.syncEvents(
       request,
       exchange,
@@ -186,7 +186,7 @@ abstract class TradingGateway extends Actor:
     */
   protected def placeAligned(order: Order, now: Timestamp): Unit
 
-  protected def cancelOrder(symbol: Symbol, ref: OrderRef, now: Timestamp): Unit
+  protected def cancelOrder(instrument: Instrument, ref: OrderRef, now: Timestamp): Unit
 
   /** 拉一份账户当下的样子：这些标的的持仓与挂单。没返回的标的由基类补零仓，实现方不必凑齐。
     *
@@ -198,7 +198,7 @@ abstract class TradingGateway extends Actor:
     * 而"仓位先查、挂单后查"这条约定就只靠基类调用处的书写顺序维系 —— 那种约定迟早有人漏掉。
     * 一次原子读取是这个接口的形状本身该说清的事。
     */
-  protected def syncSnapshot(symbols: Set[Symbol]): TradingGateway.AccountSnapshot
+  protected def syncSnapshot(instruments: Set[Instrument]): TradingGateway.AccountSnapshot
 
   /** 当前账户净值与名义价值。失败即抛 —— 风控拿它决策，读不到就不该继续跑 */
   protected def currentAccountInfo(): AccountInfo
@@ -267,9 +267,17 @@ object TradingGateway:
       pendingOrders: Vector[OrderUpdate],
   ): Vector[AnyEvent] =
     val account = request.account
-    val bySymbol = positions.map(p => p.symbol -> p).toMap
-    val positionEvents = request.symbols.toVector.sortBy(_.toString).map { symbol =>
-      positionEvent(bySymbol.getOrElse(symbol, Position.empty(account, exchange, symbol)), nowMs)
+    // 交易所返回的持仓按标的归位 —— 品种是键的一部分, 同一个 symbol 底下的永续与期权
+    // 是两条不同的仓位, 不能按 symbol 合并。
+    val byInstrument = positions.map(p => p.instrument -> p).toMap
+    val positionEvents = request.instruments.toVector.sortBy(_.toString).map { instrument =>
+      positionEvent(
+        byInstrument.getOrElse(
+          instrument,
+          Position.empty(account, exchange, instrument.symbol).copy(kind = instrument.kind),
+        ),
+        nowMs,
+      )
     }
     val orderEvents = pendingOrders.map(Event.local(Topics.OrderUpdate, _))
     val report = Event.local(AccountSynced, AccountSyncReport(account, exchange, request.requestId))

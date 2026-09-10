@@ -24,7 +24,7 @@ private[engine] final class StrategySession(
   private val executor = Executor(strategy, account, requestId)
   private val subscription: Subscription = executor.subscription
   private val targets = subscription.alignmentTargets(account)
-  private val symbolsByExchange = subscription.instruments.groupMap(_.exchange)(_.symbol)
+  private val instrumentsByExchange = subscription.instruments.groupMap(_.exchange)(identity)
   private val readiness = AlignmentReadiness(targets, requestId)
   private var ctx: ActorContext = scala.compiletime.uninitialized
 
@@ -51,8 +51,8 @@ private[engine] final class StrategySession(
           readiness.timeout(syncTimeoutMs)(context.reportFailure)
       }
       targets.foreach { target =>
-        val symbols = symbolsByExchange.getOrElse(target.exchange, Set.empty)
-        context.publish(Event.local(AccountSync, AccountSyncRequest(account, target.exchange, requestId, symbols)))
+        val instruments = instrumentsByExchange.getOrElse(target.exchange, Set.empty)
+        context.publish(Event.local(AccountSync, AccountSyncRequest(account, target.exchange, requestId, instruments)))
       }
 
   override def onEvent(event: AnyEvent, now: Timestamp): Vector[AnyEvent] =

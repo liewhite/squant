@@ -11,22 +11,22 @@ import hft.TestUnits.given
   */
 class PositionBookSpec extends munit.FunSuite:
   private val ex = Exchange.Binance
-  private val btc = "BTCUSDT"
-  private val eth = "ETHUSDT"
+  private val btc = Instrument.perp(Exchange.Binance, "BTCUSDT")
+  private val eth = Instrument.perp(Exchange.Binance, "ETHUSDT")
   private val account = AccountId.Live
 
   /** 视作零的量级 —— 币本位。真实柜台由 SymbolMeta 换算, 这里直接给 */
   private def book(dust: Double = 1e-9) = PositionBook(account, ex, _ => dust)
 
-  private def position(symbol: Symbol, size: Double) =
-    Position(account, ex, symbol, Coin(size))
+  private def position(instrument: Instrument, size: Double) =
+    Position(account, ex, instrument.symbol, Coin(size), kind = instrument.kind)
 
-  private def pending(orderId: String, symbol: Symbol, filled: Double) =
-    OrderUpdate(account, orderId, Some("c1"), ex, symbol, Side.Long, OrderStatus.PartiallyFilled(Coin(filled)),
-      Price(100.0), Coin(1.0), Coin(filled), false, 0L)
+  private def pending(orderId: String, instrument: Instrument, filled: Double) =
+    OrderUpdate(account, orderId, Some("c1"), ex, instrument.symbol, Side.Long, OrderStatus.PartiallyFilled(Coin(filled)),
+      Price(100.0), Coin(1.0), Coin(filled), false, 0L, kind = instrument.kind)
 
-  private def settledDelta(b: PositionBook, orderId: String, symbol: Symbol, cumulative: Double, now: Long = 0L) =
-    b.settle(orderId, symbol, Side.Long, Price(100.0), Coin(cumulative), now) match
+  private def settledDelta(b: PositionBook, orderId: String, instrument: Instrument, cumulative: Double, now: Long = 0L) =
+    b.settle(orderId, instrument, Side.Long, Price(100.0), Coin(cumulative), now) match
       case PositionBook.Settled.Recorded(delta, _) => Some(delta.value)
       case PositionBook.Settled.Unchanged          => None
       case PositionBook.Settled.Regressed(_, _)    => None // 同样不入账; 单独一条用例盯着它

@@ -156,7 +156,7 @@ final class SimulatedExchange(
     orderIdSeq += 1
     enqueue(Counter.inbound(config, CounterInput.OrderArrived(order, orderIdSeq.toString)))
 
-  override protected def cancelOrder(symbol: Symbol, ref: OrderRef, now: Timestamp): Unit =
+  override protected def cancelOrder(instrument: Instrument, ref: OrderRef, now: Timestamp): Unit =
     enqueue(Counter.inbound(config, CounterInput.CancelArrived(ref)))
 
   /** 落地一次撮合转移：新状态 + 按各自延迟回传的回报。
@@ -179,8 +179,8 @@ final class SimulatedExchange(
 
   /** 替身账户同样从零开始 —— 没有"历史"可言，如实报告当下的账本 */
   /** 虚拟柜台的账本与挂单簿都在自己手里, 读它们本就是原子的 */
-  override protected def syncSnapshot(symbols: Set[Symbol]): TradingGateway.AccountSnapshot =
-    TradingGateway.AccountSnapshot(positions, restingOrders(symbols))
+  override protected def syncSnapshot(instruments: Set[Instrument]): TradingGateway.AccountSnapshot =
+    TradingGateway.AccountSnapshot(positions, restingOrders(instruments.map(_.symbol)))
 
   /** 本柜台当前的持仓快照 (供测试与绩效统计) */
   def positions: Vector[Position] = state.ledger.openPositions(exchange)

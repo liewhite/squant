@@ -116,9 +116,9 @@ class EngineContractSpec extends munit.FunSuite:
     override protected def connect(): Unit = ()
     override protected def metaOf(symbol: Symbol): SymbolMeta = meta
     override protected def placeAligned(order: Order, now: Timestamp): Unit = log.add(s"place:${order.symbol}"): Unit
-    override protected def cancelOrder(symbol: Symbol, ref: OrderRef, now: Timestamp): Unit = ()
-    override protected def syncSnapshot(symbols: Set[Symbol]): TradingGateway.AccountSnapshot =
-      log.add(s"sync:$exch:${symbols.toVector.sorted.mkString(",")}")
+    override protected def cancelOrder(instrument: Instrument, ref: OrderRef, now: Timestamp): Unit = ()
+    override protected def syncSnapshot(instruments: Set[Instrument]): TradingGateway.AccountSnapshot =
+      log.add(s"sync:$exch:${instruments.toVector.map(_.symbol).sorted.mkString(",")}")
       TradingGateway.AccountSnapshot(Vector.empty, Vector.empty)
     override protected def currentAccountInfo(): AccountInfo = AccountInfo(acct, exch, 10_000.0)
     override protected def currentWallet(): Map[String, Double] = Map("USDT" -> 10_000.0)

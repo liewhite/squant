@@ -46,11 +46,14 @@ trait TradingClient extends ExchangeClient:
   /** 下单，返回交易所订单 ID */
   def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId]
 
-  /** 撤单。[[OrderRef]] 决定按交易所 id 还是按 clientOrderId 指名 —— 在途单只有后者 */
-  def cancelOrder(symbol: Symbol, ref: OrderRef): Either[ExchangeError, Unit]
+  /** 撤单。[[OrderRef]] 决定按交易所 id 还是按 clientOrderId 指名 —— 在途单只有后者。
+    *
+    * 收 [[Instrument]] 而不是 `Symbol`：撤哪一张单要先说清是哪个合约，而同一个 symbol
+    * 底下可能有永续、币本位、几十个期权（见 [[InstrumentKind]]）。 */
+  def cancelOrder(instrument: Instrument, ref: OrderRef): Either[ExchangeError, Unit]
 
   /** 查询当前挂单 (live + partially_filled) */
-  def fetchPendingOrders(symbol: Symbol): Either[ExchangeError, Vector[OrderUpdate]]
+  def fetchPendingOrders(instrument: Instrument): Either[ExchangeError, Vector[OrderUpdate]]
 
   /** 获取账户信息 (净值) */
   def fetchAccountInfo(): Either[ExchangeError, AccountInfo]
