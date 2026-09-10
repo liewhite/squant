@@ -54,7 +54,7 @@ final class PerformanceTracker(feeRate: Double, publishIntervalMs: Long = 1000) 
     Vector.empty
 
   private def applyFill(fill: Fill, now: Timestamp): Unit =
-    val key = AccountInstrument(fill.account, Instrument(fill.exchange, fill.symbol))
+    val key = AccountInstrument(fill.account, fill.instrument)
     val ledger = ledgers.getOrElse(key, Ledger.empty(fill.account, 0.0))
     val before = ledger.positions.get(fill.symbol).map(_.size).getOrElse(Coin.Zero)
     val fee = fill.size.notional(fill.price) * feeRate

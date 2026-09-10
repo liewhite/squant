@@ -20,38 +20,36 @@ import hft.domain.*
   * 用户自定义事件不必也不该加进这里，见 [[Topic]] 的用法示例。
   */
 object Topics:
-  private def instrumentOf(exchange: Exchange, symbol: Symbol): Instrument = Instrument(exchange, symbol)
-
   // ==================== 公共行情 (按标的) ====================
 
   object Bbo extends MarketTopic[BBO]("bbo"):
-    def keyOf(p: BBO): Instrument = instrumentOf(p.exchange, p.symbol)
+    def keyOf(p: BBO): Instrument = p.instrument
     def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.BBO(symbol)
 
   /** 公共成交印记 (市场匿名成交)：策略信号与模拟撮合的价格来源，非本账户成交 */
   object Trade extends MarketTopic[MarketTrade]("trade"):
-    def keyOf(p: MarketTrade): Instrument = instrumentOf(p.exchange, p.symbol)
+    def keyOf(p: MarketTrade): Instrument = p.instrument
     def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.Trade(symbol)
 
   object MarkPrice extends MarketTopic[hft.domain.MarkPrice]("markPrice"):
-    def keyOf(p: hft.domain.MarkPrice): Instrument = instrumentOf(p.exchange, p.symbol)
+    def keyOf(p: hft.domain.MarkPrice): Instrument = p.instrument
     def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.MarkPrice(symbol)
 
   object IndexPrice extends MarketTopic[hft.domain.IndexPrice]("indexPrice"):
-    def keyOf(p: hft.domain.IndexPrice): Instrument = instrumentOf(p.exchange, p.symbol)
+    def keyOf(p: hft.domain.IndexPrice): Instrument = p.instrument
     def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.IndexPrice(symbol)
 
   object FundingRate extends MarketTopic[hft.domain.FundingRate]("fundingRate"):
-    def keyOf(p: hft.domain.FundingRate): Instrument = instrumentOf(p.exchange, p.symbol)
+    def keyOf(p: hft.domain.FundingRate): Instrument = p.instrument
     def streamKind(symbol: Symbol): SubscriptionKind = SubscriptionKind.FundingRate(symbol)
 
   // ==================== 账户私有回报 (按标的) ====================
 
   object Position extends Topic[AccountInstrument, hft.domain.Position]("position"):
-    def keyOf(p: hft.domain.Position): AccountInstrument = AccountInstrument(p.account, instrumentOf(p.exchange, p.symbol))
+    def keyOf(p: hft.domain.Position): AccountInstrument = AccountInstrument(p.account, p.instrument)
 
   object OrderUpdate extends Topic[AccountInstrument, hft.domain.OrderUpdate]("orderUpdate"):
-    def keyOf(p: hft.domain.OrderUpdate): AccountInstrument = AccountInstrument(p.account, instrumentOf(p.exchange, p.symbol))
+    def keyOf(p: hft.domain.OrderUpdate): AccountInstrument = AccountInstrument(p.account, p.instrument)
 
   /** 本账户成交明细。
     *
@@ -59,7 +57,7 @@ object Topics:
     * 这一条是给要看成交本身的人：绩效统计、成交记录、滑点分析。
     * 框架不给策略补齐它，要就自己声明。 */
   object Fill extends Topic[AccountInstrument, hft.domain.Fill]("fill"):
-    def keyOf(p: hft.domain.Fill): AccountInstrument = AccountInstrument(p.account, instrumentOf(p.exchange, p.symbol))
+    def keyOf(p: hft.domain.Fill): AccountInstrument = AccountInstrument(p.account, p.instrument)
 
   // ==================== 账户级读数 (按交易所) ====================
 

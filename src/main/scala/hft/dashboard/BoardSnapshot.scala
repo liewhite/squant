@@ -127,14 +127,13 @@ final case class BoardSnapshot(
   private def summary(account: AccountId, exchange: Exchange): AccountSummary =
     accounts.getOrElse(AccountExchange(account, exchange), AccountSummary.empty)
 
-  private def onSymbol(exchange: Exchange, symbol: Symbol)(f: SymbolBoard => SymbolBoard): BoardSnapshot =
-    val key = Instrument(exchange, symbol)
+  private def onSymbol(key: Instrument)(f: SymbolBoard => SymbolBoard): BoardSnapshot =
     copy(symbols = symbols.updated(key, f(symbols.getOrElse(key, SymbolBoard.empty(key)))))
 
-  private def onAccount(exchange: Exchange, symbol: Symbol, account: AccountId)(
+  private def onAccount(key: Instrument, account: AccountId)(
       f: AccountBoard => AccountBoard
   ): BoardSnapshot =
-    onSymbol(exchange, symbol) { sb =>
+    onSymbol(key) { sb =>
       sb.copy(accounts = sb.accounts.updated(account, f(sb.accounts.getOrElse(account, AccountBoard.empty))))
     }
 
@@ -169,16 +168,16 @@ object BoardSnapshot:
     */
   private val folds: Map[Topic[?, ?], Fold[?]] =
     Vector[Fold[?]](
-      Fold(Topics.Bbo, (s, p, at) => s.onSymbol(p.exchange, p.symbol)(_.copy(bbo = Some(Stamped(p, at))))),
-      Fold(Topics.MarkPrice, (s, p, at) => s.onSymbol(p.exchange, p.symbol)(_.copy(mark = Some(Stamped(p, at))))),
-      Fold(Topics.FundingRate, (s, p, at) => s.onSymbol(p.exchange, p.symbol)(_.copy(funding = Some(Stamped(p, at))))),
-      Fold(Topics.Trade, (s, p, at) => s.onSymbol(p.exchange, p.symbol)(_.copy(lastTrade = Some(Stamped(p, at))))),
-      Fold(Topics.Position, (s, p, at) => s.onAccount(p.exchange, p.symbol, p.account)(_.copy(position = Some(Stamped(p.size, at))))),
-      Fold(Topics.Fill, (s, p, at) => s.onAccount(p.exchange, p.symbol, p.account)(_.copy(lastFill = Some(Stamped(p, at))))),
+      Fold(Topics.Bbo, (s, p, at) => s.onSymbol(p.instrument)(_.copy(bbo = Some(Stamped(p, at))))),
+      Fold(Topics.MarkPrice, (s, p, at) => s.onSymbol(p.instrument)(_.copy(mark = Some(Stamped(p, at))))),
+      Fold(Topics.FundingRate, (s, p, at) => s.onSymbol(p.instrument)(_.copy(funding = Some(Stamped(p, at))))),
+      Fold(Topics.Trade, (s, p, at) => s.onSymbol(p.instrument)(_.copy(lastTrade = Some(Stamped(p, at))))),
+      Fold(Topics.Position, (s, p, at) => s.onAccount(p.instrument, p.account)(_.copy(position = Some(Stamped(p.size, at))))),
+      Fold(Topics.Fill, (s, p, at) => s.onAccount(p.instrument, p.account)(_.copy(lastFill = Some(Stamped(p, at))))),
       Fold(
         Topics.OrderUpdate,
         (s, p, at) =>
-          s.onAccount(p.exchange, p.symbol, p.account) { acc =>
+          s.onAccount(p.instrument, p.account) { acc =>
             // 在不在场只有一条判据 —— 框架的 OrderStatus.isTerminal。这里若自己列一遍终态,
             // 迟早会与它错开一个状态, 而失效形态是看板上挂着一张早就没了的单。
             if p.status.isTerminal then acc.copy(pendingOrders = acc.pendingOrders - p.orderId)

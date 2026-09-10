@@ -111,7 +111,7 @@ final class StrategyRunner private (
     state.allPendingOrders.view
       .map { p =>
         val ref = if p.order.id.nonEmpty then OrderRef.ByExchangeId(p.order.id) else OrderRef.ByClientId(p.order.clientOrderId)
-        ctx.cancel(p.order.exchange, p.order.symbol, ref)
+        ctx.cancel(p.order.instrument, ref)
       }
       .toVector
 

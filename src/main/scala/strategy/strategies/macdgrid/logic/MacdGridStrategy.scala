@@ -179,7 +179,7 @@ final class MacdGridStrategy(
   private def cancelConfirmed(p: PendingOrder, ctx: StrategyContext): Option[AnyEvent] =
     if p.status.isConfirmed && !cancelling.contains(p.order.id) then
       cancelling += p.order.id
-      Some(ctx.cancel(exchange, symbol, OrderRef.ByExchangeId(p.order.id)))
+      Some(ctx.cancel(instrument, OrderRef.ByExchangeId(p.order.id)))
     else None
 
 object MacdGridStrategy:

@@ -46,6 +46,24 @@ enum AccountId:
 final case class Instrument(exchange: Exchange, symbol: Symbol):
   override def toString: String = s"$exchange:$symbol"
 
+/** 带标的归属的载荷 —— 它的 (交易所, 交易对) 就**是**它所属的 [[Instrument]]。
+  *
+  * "这条载荷属于哪个标的"是标的模型的一部分，不是各处随手拼的一个二元组。从前它以
+  * `Instrument(x.exchange, x.symbol)` 的形态散在六处：路由键派生、状态定位、挂单登记、
+  * 撤单、绩效统计、看板。规则本身只有一行，但它会变 —— 给 [[Instrument]] 加品种维度
+  * （期权的行权价/到期/方向、币本位与 U 本位永续）时，六处都得跟着改，而编译器只抓得到
+  * 类型不匹配，抓不到"某处仍按旧规则拼出一个看着合法的键"。那种漏改的症状是事件被投给
+  * 错误的桶、或者查不到自己刚登记的挂单，没有任何报错。
+  *
+  * 所以规则写一次，载体继承它。
+  */
+trait HasInstrument:
+  def exchange: Exchange
+  def symbol: Symbol
+
+  /** 本载荷所属的标的 */
+  final def instrument: Instrument = Instrument(exchange, symbol)
+
 /** 某账户在某标的上的口子 —— **私有回报**的路由键。
   *
   * 行情按 [[Instrument]] 路由 (一份服务所有账户)，私有回报按本类型路由。于是实盘策略与
@@ -143,7 +161,7 @@ final case class Order(
       * "一个标注对应一张单"的策略自己保证，框架不校验 —— 校验会把上面那种用法一并禁掉。
       */
     tag: String = "",
-)
+) extends HasInstrument
 
 /** 订单更新事件 */
 final case class OrderUpdate(
@@ -168,7 +186,7 @@ final case class OrderUpdate(
       * 三家交易所的挂单查询与订单推送都返回这个字段，它不是"填不出来"的事实，是没去读。 */
     reduceOnly: Boolean,
     timestamp: Timestamp,
-)
+) extends HasInstrument
 
 /** 公共成交印记 (市场上的匿名成交，非本账户成交)。
   * isBuyerMaker=true 表示买方是挂单方 -> 本笔为主动卖出 (taker 卖)。仅作策略可见的市场信号，不参与撮合。
@@ -180,7 +198,7 @@ final case class MarketTrade(
     qty: Coin,
     isBuyerMaker: Boolean,
     timestamp: Timestamp,
-)
+) extends HasInstrument
 
 /** 一笔成交的明细。仓位不由它维护 —— 那是柜台账本的事 */
 final case class Fill(
@@ -191,7 +209,7 @@ final case class Fill(
     price: Price,
     size: Coin,
     timestamp: Timestamp,
-)
+) extends HasInstrument
 
 /** 仓位 —— **只有数量**，size 为正表示多头，为负表示空头。
   *
@@ -219,7 +237,7 @@ final case class Position(
     exchange: Exchange,
     symbol: Symbol,
     size: Coin,
-):
+) extends HasInstrument:
   /** 判断是否空仓 (epsilon 比较避免浮点精度问题) */
   def isEmpty: Boolean = size.isZero
 
@@ -290,7 +308,7 @@ final case class BBO(
     askPrice: Price,
     askQty: Coin,
     timestamp: Timestamp,
-):
+) extends HasInstrument:
   def spread: Price = askPrice - bidPrice
   def midPrice: Price = (bidPrice + askPrice) / 2.0
 
@@ -302,7 +320,7 @@ final case class FundingRate(
     nextSettleTime: Timestamp,
     /** 数据时间戳，用于计算基于剩余时间的日化费率 */
     timestamp: Timestamp,
-):
+) extends HasInstrument:
   /** 基于剩余时间的日化费率: rate * 24 / hoursToSettle (最小 1 小时防止结算临近时爆炸) */
   def dailyRate: Rate = dailyRateWithBaseTime(nextSettleTime, timestamp)
 
@@ -324,7 +342,7 @@ final case class MarkPrice(
     symbol: Symbol,
     price: Price,
     timestamp: Timestamp,
-)
+) extends HasInstrument
 
 /** 指数价格 */
 final case class IndexPrice(
@@ -332,7 +350,7 @@ final case class IndexPrice(
     symbol: Symbol,
     price: Price,
     timestamp: Timestamp,
-)
+) extends HasInstrument
 
 /** 账户级期权希腊字母 (按币种 ccy 聚合)。
   *
@@ -394,7 +412,7 @@ final case class SymbolMeta(
     minOrderSize: Double,
     /** 合约乘数: 每张合约对应的币本位数量 (Binance 为 1.0) */
     contractSize: Double,
-):
+) extends HasInstrument:
   def isValid: Boolean = tickSize > 0 && sizeStep > 0 && contractSize > 0
 
   /** 币本位数量 -> 下单数量 (张) */

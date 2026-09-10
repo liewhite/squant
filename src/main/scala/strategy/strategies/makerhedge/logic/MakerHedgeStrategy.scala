@@ -146,7 +146,7 @@ final class MakerHedgeStrategy(
           case QuoteLeg.Requote.Unconfirmed(waited) =>
             warnThrottled(s"撤单确认 ${waited}ms 未到, 重发撤单 $ref (期间不挂新单, 对冲暂停)")
           case _ => ()
-        Vector(ctx.cancel(exchange, symbol, ref))
+        Vector(ctx.cancel(instrument, ref))
       case QuoteLeg.Step.Ready =>
           ctx.state.greeks(exchange, ccy) match
             case None =>

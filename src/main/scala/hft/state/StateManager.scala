@@ -41,9 +41,8 @@ final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long
     * 标的不在订阅范围内时抛异常 (表示策略配置错误，应立即暴露)
     */
   def addPendingOrder(order: Order, now: Timestamp): Unit =
-    val instrument = Instrument(order.exchange, order.symbol)
     states
-      .getOrElse(instrument, sys.error(s"Instrument not found in StateManager: $instrument"))
+      .getOrElse(order.instrument, sys.error(s"Instrument not found in StateManager: ${order.instrument}"))
       .addPendingOrder(order, now)
 
   // ==================== 状态查询 ====================
@@ -105,7 +104,7 @@ final class StateManager(instruments: Iterable[Instrument], orderTimeoutMs: Long
     for
       update <- event.as(Topics.OrderUpdate)
       clientId <- update.clientOrderId
-      state <- states.get(Instrument(update.exchange, update.symbol))
+      state <- states.get(update.instrument)
       tag <- state.tagOf(clientId)
     yield tag
 

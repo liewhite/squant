@@ -87,9 +87,12 @@ final class StrategyContext private[hft] (
 
   def place(order: Order, comment: String): Vector[AnyEvent] = place(Vector(order), comment)
 
-  /** 撤销本策略已登记的挂单。撤单终态以私有流推送为准，框架不合成确认事件。 */
-  def cancel(exchange: Exchange, symbol: Symbol, ref: OrderRef): AnyEvent =
-    val owned = state.instrumentState(Instrument(exchange, symbol)).exists(_.pendingOrders.exists { pending =>
+  /** 撤销本策略已登记的挂单。撤单终态以私有流推送为准，框架不合成确认事件。
+    *
+    * 收 [[Instrument]] 而不是拆开的 `(exchange, symbol)`：策略手里本来就是标的
+    * （行情声明用的同一个值），拆开传等于让调用方与本方法各拼一次同一个键。 */
+  def cancel(instrument: Instrument, ref: OrderRef): AnyEvent =
+    val owned = state.instrumentState(instrument).exists(_.pendingOrders.exists { pending =>
       val order = pending.order
       (ref match
         case OrderRef.ByExchangeId(id) => id.nonEmpty && order.id == id
@@ -98,9 +101,14 @@ final class StrategyContext private[hft] (
     })
     require(
       owned,
-      s"只能撤销本策略已登记的挂单: exchange=$exchange symbol=$symbol ref=$ref",
+      s"只能撤销本策略已登记的挂单: instrument=$instrument ref=$ref",
     )
-    Event.stamped(OrderIntent, AccountOutcome(account, OutcomeEvent.CancelOrder(exchange, symbol, ref)), now, now)
+    Event.stamped(
+      OrderIntent,
+      AccountOutcome(account, OutcomeEvent.CancelOrder(instrument.exchange, instrument.symbol, ref)),
+      now,
+      now,
+    )
 
   /** 发一条自定义事件 —— 策略自己的指标、信号、给别的组件的提示。
     *

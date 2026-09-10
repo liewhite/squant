@@ -36,7 +36,7 @@ import sttp.client4.DefaultSyncBackend
 
       // 全部 USDT 永续 —— 交易所自己才知道当前上市了哪些合约, 不写死清单。
       val instruments: Set[Instrument] = client.fetchAllSymbolMetas() match
-        case Right(metas) => metas.filter(_.symbol.endsWith("USDT")).map(m => Instrument(m.exchange, m.symbol)).toSet
+        case Right(metas) => metas.filter(_.symbol.endsWith("USDT")).map(_.instrument).toSet
         // 抛而不是 sys.exit: 后者直接杀 JVM, 会跳过 Engine.run 的有序停机
         case Left(e) => throw IllegalStateException(s"取合约列表失败: ${e.message}")
 

@@ -25,7 +25,7 @@ class StrategyContextSpec extends munit.FunSuite:
     StrategyContext(state, account, now = 2L, orderTag = None)
 
   test("只能撤销本策略已登记的挂单"):
-    val event = context().cancel(instrument.exchange, instrument.symbol, OrderRef.ByExchangeId(order.id))
+    val event = context().cancel(instrument, OrderRef.ByExchangeId(order.id))
     assertEquals(
       event.as(OrderIntent).map(_.outcome),
       Some(OutcomeEvent.CancelOrder(instrument.exchange, instrument.symbol, OrderRef.ByExchangeId(order.id))),
@@ -33,22 +33,22 @@ class StrategyContextSpec extends munit.FunSuite:
 
   test("未知订单立即拒绝"):
     val error = intercept[IllegalArgumentException] {
-      context().cancel(instrument.exchange, instrument.symbol, OrderRef.ByClientId("not-mine"))
+      context().cancel(instrument, OrderRef.ByClientId("not-mine"))
     }
     assert(error.getMessage.contains("只能撤销本策略已登记的挂单"), error.getMessage)
 
     intercept[IllegalArgumentException] {
-      context().cancel(instrument.exchange, instrument.symbol, OrderRef.ByExchangeId(""))
+      context().cancel(instrument, OrderRef.ByExchangeId(""))
     }
 
   test("交易所不匹配时拒绝撤单"):
     val error = intercept[IllegalArgumentException] {
-      context().cancel(Exchange.Okx, instrument.symbol, OrderRef.ByExchangeId(order.id))
+      context().cancel(Instrument(Exchange.Okx, instrument.symbol), OrderRef.ByExchangeId(order.id))
     }
-    assert(error.getMessage.contains("exchange=Okx symbol=BTCUSDT"), error.getMessage)
+    assert(error.getMessage.contains("instrument=Okx:BTCUSDT"), error.getMessage)
 
   test("标的不匹配时拒绝撤单"):
     val error = intercept[IllegalArgumentException] {
-      context().cancel(instrument.exchange, "ETH", OrderRef.ByExchangeId(order.id))
+      context().cancel(Instrument(instrument.exchange, "ETH"), OrderRef.ByExchangeId(order.id))
     }
-    assert(error.getMessage.contains("exchange=Binance symbol=ETH"), error.getMessage)
+    assert(error.getMessage.contains("instrument=Binance:ETH"), error.getMessage)

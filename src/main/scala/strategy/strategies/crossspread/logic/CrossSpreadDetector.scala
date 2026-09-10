@@ -111,7 +111,7 @@ final class CrossSpreadDetector(
 
   /** 记一条盘口。不在 [[instruments]] 内的直接忽略 —— 驱动层可能订得比这里宽 */
   def onQuote(bbo: BBO): Unit =
-    val instrument = Instrument(bbo.exchange, bbo.symbol)
+    val instrument = bbo.instrument
     if instruments.contains(instrument) then
       quotesSeen += 1
       quotes(instrument) = VenueQuote(bbo.bidPrice, bbo.askPrice, bbo.timestamp)

@@ -199,7 +199,7 @@ final class DeltaHedgeStrategy(
       case QuoteLeg.Step.Blocked => Vector.empty
       case QuoteLeg.Step.Requote(ref, why) =>
         logRequote(why)
-        Vector(ctx.cancel(exchange, symbol, ref))
+        Vector(ctx.cancel(instrument, ref))
       case QuoteLeg.Step.Ready => tryHedge(bbo, localNow, style, ctx)
 
   /** 年化波动率的来源。两个都说得通, 做成可切换以便回测对比：
