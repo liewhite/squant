@@ -62,9 +62,9 @@ final class BacktestEngine(
     account: AccountId = AccountId.Live,
 ):
   // 装配期校验, 不留给运行时静默失效
-  // 回测是**单交易所**的: 撮合只有一个 SimState、accountInfo 只报一个所, 而账本按标的
-  // 记账后 openPositions 只返回本所那部分 —— 装了别所的规格就会拿到半份仓位而 equity 仍按
-  // 全账本算, 两个口径悄悄不一致。把"单所"写成结构保证, 而不是留给调用方记得。
+  // 回测是**单交易所**的: 只有一个 SimState 在撮合, 而它只喂得到本所的行情 —— 别所的标的
+  // 会有仓位却永远没有成交与估值价。accountInfo 也只报一个所。把"单所"写成结构保证,
+  // 而不是留给调用方记得。
   private val foreign = symbolMetas.keys.filterNot(_.exchange == exchange)
   require(
     foreign.isEmpty,
@@ -155,7 +155,7 @@ final class BacktestEngine(
       fills = fillCount,
       marketEvents = marketEvents,
       outOfOrderEvents = outOfOrderEvents,
-      positions = state.ledger.openPositions(exchange),
+      positions = state.ledger.openPositions,
       firstTs = firstTs,
       lastTs = now,
     )

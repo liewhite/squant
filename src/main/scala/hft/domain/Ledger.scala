@@ -28,6 +28,7 @@ final case class Ledger(account: AccountId, positions: Map[Instrument, Ledger.Ho
   def accountInfo(exchange: Exchange, markOf: Instrument => Option[Price]): AccountInfo =
     AccountInfo(account, exchange, equity = equity(markOf))
 
+
   /** 应用一笔成交，返回新账本：
     *   - 新开 / 同向加仓：加权平均成本
     *   - 反向平仓：平掉 min(本次, 持仓) 的已实现盈亏入现金
@@ -36,6 +37,10 @@ final case class Ledger(account: AccountId, positions: Map[Instrument, Ledger.Ho
     * @param fee 本笔手续费 (>=0, 直接从现金扣除)。类型是名义额而非裸 double —— 它是一笔钱。maker/taker 区分与费率换算由调用方 (SimState) 决定。
     */
   def applyFill(instrument: Instrument, side: Side, price: Price, qty: Coin, fee: Notional = Notional.Zero): Ledger =
+    require(
+      Ledger.LinearSettled.contains(instrument.kind),
+      s"账本只算线性结算的品种 (${Ledger.LinearSettled.mkString("/")}), 收到 ${instrument.kind}: $instrument",
+    )
     val signed = side match
       case Side.Long  => qty
       case Side.Short => -qty
@@ -68,15 +73,39 @@ final case class Ledger(account: AccountId, positions: Map[Instrument, Ledger.Ho
 
   /** 非空持仓的**总线形态** —— 只有数量 (见 [[Position]] 关于均价与盈亏的说明)。
     *
+    * **不按交易所过滤**。从前它收一个 `exchange` 参数、只返回那个所的仓位, 而 [[equity]]
+    * 对全账本求和 —— 同一个账本, 两个读数两个口径。更要紧的是那道过滤在替调用方防一件
+    * 由路由保证不会发生的事 (柜台只会收到自己那个 (账户, 所) 的成交), 而防的方式是**静默
+    * 丢弃**: 真出现异所仓位时, 它不报错, 只是不报出来。
+    *
+    * 账本记的就是喂给它的那些成交。谁喂进来的谁负责 —— 单所柜台的账本因此天然只有本所的
+    * 仓位, 这份就是它要报的全部。
+    *
     * `markOf` 不再需要: 从前它用来回填 `unrealizedPnl`, 而那个字段已经不在 Position 上了。
     */
-  def openPositions(exchange: Exchange): Vector[Position] =
+  def openPositions: Vector[Position] =
     positions.iterator
-      .filter((instrument, h) => instrument.exchange == exchange && !h.isEmpty)
-      .map((instrument, h) => Position(account, exchange, instrument.symbol, h.size, kind = instrument.kind))
+      .filterNot((_, h) => h.isEmpty)
+      .map((instrument, h) => Position(account, instrument.exchange, instrument.symbol, h.size, kind = instrument.kind))
       .toVector
 
 object Ledger:
+  /** 本账本建模的是**线性结算**: 盈亏 = 数量 x 价差, 计价币即现金币种。
+    *
+    * 不在这个集合里的品种不是"还没测过", 是**公式不成立**:
+    *   - [[InstrumentKind.InversePerp]] 币本位的盈亏是 `面值_usd x (1/开仓价 - 1/平仓价)`,
+    *     记在基础币上 —— 与这里的 `qty x 价差` 连量纲都不同, 而现金是 USDT
+    *     (`SimConfig.initialBalanceUsdt`)。算出来会是一个看着正常的数。
+    *   - [[InstrumentKind.Spot]] 现货买入当场扣现金、卖出当场收现金, 没有"平仓才实现"
+    *     这回事, 也不能做空。本账本的现金只在平仓时动。
+    *
+    * 期权在里面: USDT 结算的期权, 其权利金盈亏就是 `张数 x 权利金价差`。
+    *
+    * 按第 2 条在入口挡住而不是算出一个数来 —— 今天没有适配层产得出这两个品种的成交
+    * (见 `ExchangeClient.supportedKinds`), 所以这道守卫现在不可能触发; 它是给接入那天的。
+    */
+  val LinearSettled: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp, InstrumentKind.Option)
+
   def empty(account: AccountId, cash: Double): Ledger = Ledger(account, Map.empty, cash)
 
   /** 账本里的一条持仓：数量 + **本地算出来的**均价。

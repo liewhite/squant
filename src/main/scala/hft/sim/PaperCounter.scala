@@ -100,7 +100,7 @@ final class PaperCounter(
     * 真收到指令时如实报告当下的账本 —— 撤下策略再装回来时它确实可能已经有仓位了。 */
   /** 影子账户的世界全在进程内, 一次读取本就是原子的 —— 挂单登记在别处, 这里不返回 */
   override protected def syncSnapshot(instruments: Set[Instrument]): TradingGateway.AccountSnapshot =
-    TradingGateway.AccountSnapshot(state.ledger.openPositions(exchange), Vector.empty)
+    TradingGateway.AccountSnapshot(state.ledger.openPositions, Vector.empty)
 
   /** 本账户当前净值 —— 策略的杠杆闸门读它。基类按 [[accountRefreshMs]] 周期发布 */
   override protected def currentAccountInfo(): AccountInfo = state.accountInfo(exchange)

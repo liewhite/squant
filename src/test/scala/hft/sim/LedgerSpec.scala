@@ -61,7 +61,7 @@ class LedgerSpec extends munit.FunSuite:
     val markOf = (_: Instrument) => Some(Price(150.0))
     assertEquals(l.equity(markOf), 10_000.0 + (150.0 - 100.0) * 2.0) // 10100
     // openPositions 是**总线形态**, 只有数量 —— 未实现盈亏由 equity 表达 (见 Position 的说明)
-    assertEquals(l.openPositions(ex).head.size.value, 2.0)
+    assertEquals(l.openPositions.head.size.value, 2.0)
 
   test("持有仓位却拿不到估值价 -> 抛错, 不把那段盈亏记成 0"):
     // 净值是策略杠杆闸门读的数。记 0 会让它读到一个偏小的净值且没有任何症状。
@@ -107,26 +107,41 @@ class LedgerSpec extends munit.FunSuite:
     assertEquals(Matcher.touchPrice(Side.Short, bbo).value, 100.0)
 
   test("同一 symbol 的不同品种是两条独立仓位 —— 按 symbol 记账会把它们合并"):
-    // OKX 的 U 本位与币本位永续 symbol 相同 (都是 "ETH"), 期权与永续在有些交易所也共享前缀。
-    // 按 symbol 记账的话, 一条期权空头与一条永续多头会合并成一个净额 —— 那个数没有意义,
-    // 两者的保证金、盈亏计价、合约乘数都不同。
+    // 期权与永续在有些交易所共享 symbol 前缀。按 symbol 记账的话, 一条期权空头与一条
+    // 永续多头会合并成一个净额 —— 那个数没有意义, 两者的合约乘数与敞口含义都不同。
     val perp = Instrument.perp(Exchange.Okx, "ETH")
-    val inverse = Instrument(Exchange.Okx, "ETH", InstrumentKind.InversePerp)
+    val option = Instrument.option(Exchange.Okx, "ETH")
     val l = Ledger
       .empty(AccountId.Live, 10_000.0)
       .applyFill(perp, Side.Long, Price(100.0), Coin(2.0))
-      .applyFill(inverse, Side.Short, Price(100.0), Coin(3.0))
+      .applyFill(option, Side.Short, Price(100.0), Coin(3.0))
 
     assertEqualsDouble(l.positions(perp).size.value, 2.0, 1e-12)
-    assertEqualsDouble(l.positions(inverse).size.value, -3.0, 1e-12)
+    assertEqualsDouble(l.positions(option).size.value, -3.0, 1e-12)
     assertEquals(l.positions.size, 2, "两个品种各记一条, 不合并")
 
-  test("openPositions 只给本交易所的仓位"):
-    // 账本按标的记账, 而标的自带交易所 —— 跨所的账本不该把别人的仓位报给本柜台。
+  test("币本位与现货: 账本的公式对它们不成立, 入口即拒 —— 不给一个看着正常的数"):
+    // 币本位的盈亏是 面值_usd x (1/开仓价 - 1/平仓价) 记在基础币上, 与 qty x 价差 量纲都不同;
+    // 现货买入当场扣现金、不能做空, 而本账本的现金只在平仓时动。
+    // 算出来的数看着都合理 —— 这正是它必须在入口失败的理由。
+    val inverse = Instrument(Exchange.Okx, "ETH", InstrumentKind.InversePerp)
+    val spot = Instrument(Exchange.Okx, "ETH", InstrumentKind.Spot)
+    Vector(inverse, spot).foreach { i =>
+      val e = intercept[IllegalArgumentException](
+        Ledger.empty(AccountId.Live, 0.0).applyFill(i, Side.Long, Price(100.0), Coin(1.0))
+      )
+      assert(e.getMessage.contains("线性结算"), e.getMessage)
+    }
+
+  test("openPositions 报账本里的全部仓位 —— 不按交易所过滤"):
+    // 从前它收一个 exchange 参数、只报那个所的仓位, 而 equity 对全账本求和 —— 同一个账本
+    // 两个口径。更要紧的是那道过滤在替调用方防一件由路由保证不会发生的事 (柜台只收得到
+    // 自己那个 (账户, 所) 的成交), 而防的方式是静默丢弃: 真出现异所仓位时它不报错。
     val binance = Instrument.perp(Exchange.Binance, "BTCUSDT")
     val okx = Instrument.perp(Exchange.Okx, "BTC")
     val l = Ledger
       .empty(AccountId.Live, 0.0)
       .applyFill(binance, Side.Long, Price(100.0), Coin(1.0))
       .applyFill(okx, Side.Long, Price(100.0), Coin(2.0))
-    assertEquals(l.openPositions(Exchange.Binance).map(_.instrument), Vector(binance))
+    assertEquals(l.openPositions.map(_.instrument).toSet, Set(binance, okx))
+    assertEquals(l.openPositions.map(_.exchange).toSet, Set(Exchange.Binance, Exchange.Okx), "交易所取自标的本身")
