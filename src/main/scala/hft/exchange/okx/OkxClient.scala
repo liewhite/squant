@@ -17,6 +17,7 @@ import scala.concurrent.duration.*
 
 import OkxCodec.*
 import OkxCodec.given
+import hft.exchange.MetaTable
 
 /** OKX 凭证。OKX 比 Binance 多一个 passphrase (REST 头与 WS 登录都需要)。
   *
@@ -114,6 +115,9 @@ class OkxPublicClient protected[okx] (
     val quote: String,
     protected val restBase: String,
 ) extends ExchangeClient:
+
+  /** 本客户端的规格表。子类 (交易客户端) 继承同一张 —— 它们是同一个连接口的两副面孔。 */
+  override val metaTable: MetaTable = MetaTable()
 
 
   override def exchange: Exchange = Exchange.Okx
@@ -291,6 +295,9 @@ final class OkxClient private[okx] (
     // **并且**下面解析响应的 fromOkx 也要跟着认期权 instId —— 只改一处的话, 查询会返回空,
     // 而"没有挂单"与"问错了地方"在对齐路径上是同一个读数, 分不出来。
     val path = s"/api/v5/trade/orders-pending?instId=${perpInstId(instrument)}&instType=SWAP"
+    // 响应里的 sz/accFillSz 是**张数**, 换回币要查规格 —— 那是本客户端自己的事实,
+    // 所以由本方法保证, 不指望调用方先加载 (见 ExchangeClient.metaOf)。冷路径, 幂等。
+    ensureMetas(InstrumentKind.LinearPerp, "OKX 挂单查询")
     signedRequest[PendingResp](Method.GET, path).flatMap { resp =>
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator.flatMap { d =>
@@ -361,6 +368,12 @@ final class OkxClient private[okx] (
     * 那一行。
     */
   override def fetchPositions(): Either[ExchangeError, Vector[Position]] =
+    // 同 fetchPendingOrders: 响应里的 pos 是张数, 规格由本方法自己保证。
+    //
+    // 少了这一句, 只读看板 (LiveDashboardLauncher) 在 OKX 上启动即崩: 它给行情源和
+    // 账户轮询建的是**两个**客户端实例, 行情源加载的是自己那一张表, 而本方法查的是
+    // 另一张空表 —— 账户上只要有一张持仓, 第一轮轮询就抛"尚未加载"。
+    ensureMetas(InstrumentKind.LinearPerp, "OKX 持仓查询")
     signedRequest[PositionsResp](Method.GET, "/api/v5/account/positions?instType=SWAP").flatMap { resp =>
       ensureOk(resp.code, resp.msg).map { _ =>
         resp.data.iterator.flatMap { d =>

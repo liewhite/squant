@@ -19,6 +19,7 @@ class MetaCacheSpec extends munit.FunSuite:
 
   /** 按品种给不同的规格，并数一数每个品种被拉了几次。 */
   private class FakeClient(byKind: Map[InstrumentKind, Vector[SymbolMeta]]) extends ExchangeClient:
+    override val metaTable: MetaTable = MetaTable()
     val calls: AtomicInteger = AtomicInteger(0)
     override def exchange: Exchange = Exchange.Okx
     override def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
@@ -36,8 +37,8 @@ class MetaCacheSpec extends munit.FunSuite:
         InstrumentKind.InversePerp -> Vector(metaOf(inverse, contractSize = 10.0)),
       )
     )
-    client.loadMetas(InstrumentKind.LinearPerp)
-    client.loadMetas(InstrumentKind.InversePerp)
+    client.ensureMetas(InstrumentKind.LinearPerp, "test")
+    client.ensureMetas(InstrumentKind.InversePerp, "test")
 
     assertEqualsDouble(client.metaOf(perp).contractSize, 0.1, 1e-12)
     assertEqualsDouble(client.metaOf(inverse).contractSize, 10.0, 1e-12)
@@ -51,14 +52,14 @@ class MetaCacheSpec extends munit.FunSuite:
         InstrumentKind.Option -> Vector(metaOf(option)),
       )
     )
-    client.loadMetas(InstrumentKind.LinearPerp)
-    client.loadMetas(InstrumentKind.Option)
+    client.ensureMetas(InstrumentKind.LinearPerp, "test")
+    client.ensureMetas(InstrumentKind.Option, "test")
 
     assertEquals(client.knownMetas.keySet, Set(perp, option), "先加载的永续必须还在")
 
   test("没加载过的标的: 纯查表, 缺失即抛 —— 不在热路径上偷偷发一次网络请求"):
     val client = FakeClient(Map(InstrumentKind.LinearPerp -> Vector(metaOf(perp))))
-    client.loadMetas(InstrumentKind.LinearPerp)
+    client.ensureMetas(InstrumentKind.LinearPerp, "test")
 
     val e = intercept[RuntimeException](client.metaOf(option))
     assert(e.getMessage.contains("尚未加载"), e.getMessage)
@@ -67,10 +68,55 @@ class MetaCacheSpec extends munit.FunSuite:
   test("本所不支持的品种: Left 而不是空集"):
     // "这个所没有期权"与"我没接期权"是两件事, 空集把它们混成同一个读数。
     val client = FakeClient(Map(InstrumentKind.LinearPerp -> Vector(metaOf(perp))))
-    assert(client.loadMetas(InstrumentKind.Option).isLeft)
+    assert(client.reloadMetas(InstrumentKind.Option).isLeft)
 
-  test("重复加载是幂等的"):
+  test("本所不支持的品种: ensureMetas 抛 —— 调用点全在不该带伤继续的地方"):
     val client = FakeClient(Map(InstrumentKind.LinearPerp -> Vector(metaOf(perp))))
-    client.loadMetas(InstrumentKind.LinearPerp)
-    client.loadMetas(InstrumentKind.LinearPerp)
+    val e = intercept[IllegalStateException](client.ensureMetas(InstrumentKind.Option, "某某流"))
+    assert(e.getMessage.contains("某某流"), "错误里要说得出是谁要的这份规格")
+
+  test("已经拉过的品种不再打 REST —— 一个进程启动一度打三次同一个端点"):
+    // 两条 OKX 流 + 柜台对齐各自无条件加载, 而"已有的不再拉"只写在柜台那一处。
+    val client = FakeClient(Map(InstrumentKind.LinearPerp -> Vector(metaOf(perp))))
+    client.ensureMetas(InstrumentKind.LinearPerp, "行情源")
+    client.ensureMetas(InstrumentKind.LinearPerp, "私有流")
+    client.ensureMetas(InstrumentKind.LinearPerp, "柜台")
+    assertEquals(client.calls.get(), 1, "只该拉一次")
     assertEquals(client.knownMetas.size, 1)
+
+  test("拉到空集也算拉过 —— 否则一张合约都没上市的品种会被反复拉"):
+    // "拉过"记的是端点访问过了, 不是"表里有条目"。按后者判断的话, 每个调用点都会为
+    // 一个确实没有合约的品种再打一次 REST, 永远打下去。
+    val client = FakeClient(Map(InstrumentKind.Option -> Vector.empty))
+    client.ensureMetas(InstrumentKind.Option, "第一次")
+    client.ensureMetas(InstrumentKind.Option, "第二次")
+    assertEquals(client.calls.get(), 1)
+
+  test("期权链滚动: reloadMetas 强制再拉, 且不抹掉已在表里的合约"):
+    // ensureMetas 对拉过的品种不会再拉, 而新的到期日每周上市 —— 两个入口对应两种意图。
+    val nextWeek = Instrument.option(Exchange.Okx, "ETH-USD-250108-3000-C")
+    var listed = Vector(metaOf(option))
+    val client = new FakeClient(Map.empty):
+      override def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
+        calls.incrementAndGet()
+        Right(listed)
+    client.ensureMetas(InstrumentKind.Option, "首次")
+    listed = Vector(metaOf(nextWeek))
+    assertEquals(client.reloadMetas(InstrumentKind.Option), Right(1))
+    assertEquals(client.knownMetas.keySet, Set(option, nextWeek), "仍持仓的到期合约不能被抹掉")
+
+  test("装饰器与被装饰者是同一张表 —— 不是各自一张"):
+    // DryRunClient 从前必然自带一张接不上去的空表: 柜台对齐时装进 dry-run 那张,
+    // 而 delegate 的 REST 响应侧读自己那张。
+    val delegate = new FakeClient(Map(InstrumentKind.LinearPerp -> Vector(metaOf(perp)))) with TradingClient:
+      override def placeOrder(order: ExchangeOrder) = Right("x")
+      override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
+      override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
+      override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, Exchange.Okx, 0.0))
+      override def fetchWallet() = Right(Map.empty)
+      override def fetchPositions() = Right(Vector.empty)
+    val dryRun = DryRunClient(delegate)
+
+    dryRun.ensureMetas(InstrumentKind.LinearPerp, "柜台对齐")
+    assertEqualsDouble(delegate.metaOf(perp).contractSize, 1.0, 1e-12, "delegate 也该看得到")
+    assertEquals(delegate.calls.get(), 1, "两张表的话这里会是 0 —— 装进了 dry-run 自己那张")

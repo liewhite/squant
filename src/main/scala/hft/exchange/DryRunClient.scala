@@ -24,6 +24,10 @@ final class DryRunClient(delegate: TradingClient) extends TradingClient:
 
   override def exchange: Exchange = delegate.exchange
 
+  /** **转发, 不是自己一张** —— 规格是 delegate 那个真实交易所的事实, dry-run 只拦写入。
+    * 自带一张的话, 柜台在对齐时装进来的规格与 delegate 的 REST 响应侧读的就是两张表。 */
+  override def metaTable: MetaTable = delegate.metaTable
+
   // ==================== 只读：透传 ====================
 
   override def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] = delegate.fetchMetas(kind)

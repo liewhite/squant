@@ -41,9 +41,7 @@ final class OkxMarketFeed(
     // **本流自己保证规格已加载**: OKX 的盘口数量是张数, 换回币本位是本适配层自己的事实。
     // 无柜台的装配形态 (跨所价差监控、实时看板) 就靠这一步 —— 从前它拷贝 client 的快照,
     // 一度变成"指望柜台先加载", 而那两条链路里根本没有柜台。
-    client.loadMetas(InstrumentKind.LinearPerp) match
-      case Right(n) => logger.info(s"OKX 行情源加载永续合约规格 $n 条")
-      case Left(e)  => throw IllegalStateException(s"OKX 行情源加载合约规格失败: ${e.message}")
+    client.ensureMetas(InstrumentKind.LinearPerp, "OKX 行情源")
     WsLoop.run("okx/public", backend, () => wsUrl, outgoing, onPublicText, body => fork(body))
 
   /** 基类已去重，这里收到的都是尚未订阅过的流 */

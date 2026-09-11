@@ -1,7 +1,7 @@
 package hft.exchange
 
 import hft.domain.*
-
+import org.slf4j.LoggerFactory
 
 /** 交易所客户端统一接口，仅封装 REST 交互。
   *
@@ -22,11 +22,18 @@ trait ExchangeClient:
     */
   def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]]
 
-  /** 按标的索引的合约规格 —— 进程内**共享的一份**，可增量补充。
+  /** 本所的合约规格表 —— 按标的索引，可增量补充。见 [[MetaTable]]。
     *
-    * 一个交易所的接入有三处要它：行情源把盘口数量从张换成币、汇报面把回报换回币、
-    * 柜台把下单意图对齐到交易所精度。三处各拉一次就是同一事实的三份副本，
-    * 启动时还白打两次 REST。所以它在客户端上，三处共用同一个实例。
+    * 一个交易所的接入有四处要它：行情源把盘口数量从张换成币、汇报面把回报换回币、
+    * 柜台把下单意图对齐到交易所精度、**以及客户端自己把 REST 响应里的张数换回币**。
+    * 前三处各拉一次就是同一事实的三份副本，启动时还白打两次 REST。
+    *
+    * **状态在具体客户端上，不在这个 trait 上** —— 它从前是这里的一个 `private val`，
+    * 那让装饰器 ([[DryRunClient]]) 必然自带一张接不上去的空表。理由见 [[MetaTable]]。
+    *
+    * 公开而不是 `protected`：装饰器要把它转发给 delegate（跨实例访问，`protected` 做不到），
+    * 而实现方不限于本包 —— 接入一个新交易所不该要求把客户端写进 `hft.exchange` 里。
+    * 调用方仍然走 [[metaOf]] / [[ensureMetas]]，那两个是 `final` 的。
     *
     * ## 键是标的而不是交易对
     *
@@ -34,52 +41,58 @@ trait ExchangeClient:
     * `contractSize` 完全不同（OKX 的 `ETH-USD-SWAP` 是 10 USD/张，`ETH-USDT-SWAP` 是
     * 0.1 ETH/张）。按 symbol 索引的话后写入的那条会静默覆盖前一条，之后所有张↔币换算
     * 都按错的乘数走 —— 数字看着都合理。
-    *
-    * ## 为什么可以增量补充
-    *
-    * 期权链每周滚动：新的到期日不断上市，旧的到期消失。一次性快照装不下"下周才有的合约"，
-    * 而"一个合约一个策略实例"的用法要求运行中能装上新合约。[[loadMetas]] 因此是可以再调的。
     */
-  private val metaCache: java.util.concurrent.atomic.AtomicReference[Map[Instrument, SymbolMeta]] =
-    java.util.concurrent.atomic.AtomicReference(Map.empty)
+  def metaTable: MetaTable
 
   /** 已知的合约规格快照 (只读) */
-  final def knownMetas: Map[Instrument, SymbolMeta] = metaCache.get()
+  final def knownMetas: Map[Instrument, SymbolMeta] = metaTable.known
 
   /** 这个标的的规格 —— **纯查表，缺失即抛**。
     *
     * 不在这里补拉：它在热路径上（每条订单回报都要拿它把张换回币），而补拉是一次网络往返。
     *
-    * **谁需要规格，谁在自己的冷路径上先 [[loadMetas]]** —— 这条规则按"谁的事实"划分，
+    * **谁需要规格，谁在自己的冷路径上先 [[ensureMetas]]** —— 这条规则按"谁的事实"划分，
     * 不按"谁先跑"：把张数换回币本位是某些交易所自己的协议细节（OKX 的推送与 REST 都是
-    * 张数，Binance/Bybit 则本就是币本位），所以由那个适配层的行情源与账户流在建立连接时
-    * 保证；柜台则在启动对齐入口按交易标的补齐品种（见 `RestTradingGateway.syncSnapshot`）。
+    * 张数，Binance/Bybit 则本就是币本位），所以由那个适配层的行情源、账户流**与客户端
+    * 自己的 REST 响应侧**在各自的冷路径上保证；柜台则在启动对齐入口按交易标的补齐品种
+    * （见 `RestTradingGateway.syncSnapshot`）。
     *
-    * 反过来写会出事：曾经让柜台代所有人加载，于是不经柜台的装配形态（实时看板、跨所价差
-    * 监控都没有柜台）在第一条推送上就崩，或者把持仓静默读成零。
+    * 两种写法都出过事：让柜台代所有人加载，于是不经柜台的装配形态（实时看板、跨所价差
+    * 监控都没有柜台）在第一条推送上就崩；只让两条流负责、漏掉客户端自己的 REST 响应侧，
+    * 于是同一个交易所建了两个客户端实例的看板形态下，账户轮询在第一轮就抛"尚未加载"。
     */
   final def metaOf(instrument: Instrument): SymbolMeta =
-    metaCache
-      .get()
+    metaTable
+      .get(instrument)
       .getOrElse(
-        instrument,
-        sys.error(s"$exchange 没有 $instrument 的合约规格 —— 该品种尚未加载 (见 ExchangeClient.loadMetas)"),
+        sys.error(s"$exchange 没有 $instrument 的合约规格 —— 该品种尚未加载 (见 ExchangeClient.ensureMetas)"),
       )
 
-  /** 拉一个品种的规格并**合并**进表；返回本次拉取到的条目数。
+  /** 这个品种的规格**必须在表里** —— 没拉过就拉一次，拉过就什么都不做；拉不到即抛。
     *
-    * **合并而不是整表替换**：规格是合约的静态事实，到期不会改变它。整表替换会在到期日
-    * 当天把一个仍持有仓位的合约的规格抹掉，于是记账路径上的 `metaOf` 抛错、进程终止。
-    * 表只增不减，进程重启即清空。
+    * 需要规格的每一处在自己的冷路径上调它，幂等且不白打 REST。`requester` 只进日志：
+    * 一次 REST 是谁触发的，出问题时是要查的东西。
     *
-    * 幂等：重复调用只是再合并一次同样的内容。并发调用经 CAS 合并，不会互相丢失。
+    * 拉不到就抛而不是返回错误值：规格拉不到 = 这条链路上所有张↔币换算都做不了，
+    * 而调用点全在"建立连接 / 启动对齐"这类不该带伤继续的地方。
     */
-  final def loadMetas(kind: InstrumentKind): Either[ExchangeError, Int] =
-    fetchMetas(kind).map { fetched =>
-      val added = fetched.map(m => m.instrument -> m).toMap
-      metaCache.updateAndGet(_ ++ added)
-      added.size
-    }
+  final def ensureMetas(kind: InstrumentKind, requester: String): Unit =
+    metaTable.ensure(kind)(fetchMetas(kind)) match
+      case Right(Some(n)) => ExchangeClient.logger.info(s"$requester 加载 $exchange $kind 合约规格 $n 条")
+      case Right(None)    => ()
+      case Left(e)        => throw IllegalStateException(s"$requester 加载 $exchange $kind 合约规格失败: ${e.message}")
+
+  /** **强制**再拉一次并合并进表 —— 期权链每周滚动，新的到期日不断上市，
+    * 而 [[ensureMetas]] 对拉过的品种不会再拉。返回本次拉到的条目数。
+    *
+    * 表只增不减，所以再拉一次不会抹掉仍持有仓位的到期合约 (见 [[MetaTable]])。
+    */
+  final def reloadMetas(kind: InstrumentKind): Either[ExchangeError, Int] =
+    fetchMetas(kind).map(metaTable.merge(kind, _))
+
+object ExchangeClient:
+  /** 规格加载的日志出口。放伴生对象而不是 trait 字段: 后者每个客户端实例一份。 */
+  private val logger = LoggerFactory.getLogger(classOf[ExchangeClient])
 
 /** 私有 REST —— **拿到这个类型本身就意味着凭证已经具备**。
   *

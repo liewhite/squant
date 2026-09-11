@@ -175,17 +175,13 @@ final class RestTradingGateway(
 
   override protected def metaOf(instrument: Instrument): SymbolMeta = client.metaOf(instrument)
 
-  /** 把这批标的缺的品种各拉一次规格。已有的品种不再拉 —— 幂等且不白打 REST。
+  /** 把这批标的涉及的品种各保证一次规格。
     *
-    * 拉不到就抛: 规格拉不到 = 这批标的发不出单, 而对齐的契约本来就是"任何一步失败都终止,
-    * 账户状态没对上就开始交易比不启动危险得多"。 */
+    * "已经拉过的不再拉"与"拉不到就抛"都在 [[ExchangeClient.ensureMetas]] 里 —— 从前这条
+    * 规则只写在这里，于是两条 OKX 流各自无条件 `loadMetas`，同一进程启动打三次同一个端点。
+    */
   private def ensureMetas(instruments: Set[Instrument]): Unit =
-    val known = client.knownMetas
-    instruments.filterNot(known.contains).map(_.kind).foreach { kind =>
-      client.loadMetas(kind) match
-        case Right(n) => logger.info(s"$target 加载 $kind 合约规格 $n 条")
-        case Left(e)  => throw IllegalStateException(s"$target 加载 $kind 合约规格失败: ${e.message}")
-    }
+    instruments.map(_.kind).foreach(client.ensureMetas(_, target.toString))
 
   /** 每个 REST 调用 fork 独立虚拟线程，互不阻塞，也不阻塞柜台的事件循环。
     *

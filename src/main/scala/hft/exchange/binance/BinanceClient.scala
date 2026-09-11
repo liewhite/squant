@@ -12,6 +12,7 @@ import javax.crypto.spec.SecretKeySpec
 
 import BinanceCodec.*
 import BinanceCodec.given
+import hft.exchange.MetaTable
 
 final case class BinanceCredentials(apiKey: String, apiSecret: String)
 
@@ -66,6 +67,9 @@ class BinancePublicClient protected[binance] (
     protected val backend: SyncBackend,
     protected val restBase: String,
 ) extends ExchangeClient:
+
+  /** 本客户端的规格表。子类 (交易客户端) 继承同一张 —— 它们是同一个连接口的两副面孔。 */
+  override val metaTable: MetaTable = MetaTable()
 
   override def exchange: Exchange = Exchange.Binance
 

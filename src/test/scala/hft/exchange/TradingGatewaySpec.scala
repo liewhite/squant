@@ -33,6 +33,7 @@ class TradingGatewaySpec extends munit.FunSuite:
 
   /** 有求必应的桩客户端 —— 驱动汇报面路径时不该被执行面打扰 */
   private class QuietClient extends TradingClient:
+    override val metaTable: MetaTable = MetaTable()
     override def exchange: Exchange = Exchange.Binance
     override def placeOrder(order: ExchangeOrder) = Right("ignored")
     override def fetchMetas(kind: InstrumentKind) = Right(Vector(meta))
@@ -309,6 +310,7 @@ class TradingGatewaySpec extends munit.FunSuite:
     * `fetchMetas` 现在**必须**实现: 柜台在启动对齐入口自己加载规格 (见
     * `RestTradingGateway.syncSnapshot`)，而不再由构造方传入一份快照。 */
   private class StubClient(placeResult: Either[ExchangeError, OrderId]) extends TradingClient:
+    override val metaTable: MetaTable = MetaTable()
     override def exchange: Exchange = Exchange.Binance
     override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] = placeResult
     override def fetchMetas(kind: InstrumentKind) = Right(Vector(meta))

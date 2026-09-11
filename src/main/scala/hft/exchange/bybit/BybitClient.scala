@@ -15,6 +15,7 @@ import scala.concurrent.duration.*
 
 import BybitCodec.*
 import BybitCodec.given
+import hft.exchange.MetaTable
 
 /** Bybit 凭证。签名只需 apiKey + apiSecret (无 OKX 的 passphrase)。 */
 final case class BybitCredentials(apiKey: String, apiSecret: String):
@@ -91,6 +92,9 @@ class BybitPublicClient protected[bybit] (
     protected val accountType: String,
     protected val restBase: String,
 ) extends ExchangeClient:
+
+  /** 本客户端的规格表。子类 (交易客户端) 继承同一张 —— 它们是同一个连接口的两副面孔。 */
+  override val metaTable: MetaTable = MetaTable()
 
 
   override def exchange: Exchange = Exchange.Bybit

@@ -15,6 +15,7 @@ import ox.supervised
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.jdk.CollectionConverters.*
 import hft.TestUnits.given
+import hft.exchange.MetaTable
 
 /** 仓位归柜台之后的两条契约。
   *
@@ -117,6 +118,7 @@ class PositionOwnershipSpec extends munit.FunSuite:
     def emit(report: AccountReport): Unit = sink(report)
 
   private class AcceptingClient extends TradingClient:
+    override val metaTable: MetaTable = MetaTable()
     override def exchange: Exchange = ex
     override def placeOrder(order: ExchangeOrder) = Right("ex-1")
     override def fetchMetas(kind: InstrumentKind) = Right(Vector(metas(Instrument.perp(ex, sym))))

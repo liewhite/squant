@@ -61,8 +61,9 @@ import sttp.client4.DefaultSyncBackend
         val credentials = OkxCredentials(key, secret, passphrase)
         // quote 留空就不传 —— 让客户端用自己的默认值, 不在这里抄第二份
         val client = quote.fold(OkxClient.trading(backend, credentials))(OkxClient.trading(backend, credentials, _))
-        val publicClient = quote.fold(OkxClient.public(backend))(OkxClient.public(backend, _))
-        (v, client, OkxMarketFeed(publicClient, backend))
+        // 行情源与账户轮询共用**同一个**客户端实例: 规格表在实例上 (见 hft.exchange.MetaTable),
+        // 两个实例就是两张表、两次拉取。行情源收的是公共客户端, 而交易客户端是它的子类。
+        (v, client, OkxMarketFeed(client, backend))
       case v @ VenueConfig.Bybit(key, secret, _, _, _, accountType) =>
         val credentials = BybitCredentials(key, secret)
         val client = accountType.fold(BybitClient.trading(backend, credentials))(BybitClient.trading(backend, credentials, _))

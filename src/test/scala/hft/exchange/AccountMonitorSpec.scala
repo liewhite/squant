@@ -17,6 +17,7 @@ class AccountMonitorSpec extends munit.FunSuite:
   /** 只读客户端替身。`symbolMetas` 里**故意只有 BTCUSDT** —— 用来钉住"账上持有一个没有规格的
     * 标的 (如币安的股票永续 AAPLUSDT) 时, 监控照样报得出来"。柜台走不通的正是这条路径。 */
   private class ReadOnlyClient(@volatile var positions: Vector[Position]) extends TradingClient:
+    override val metaTable: MetaTable = MetaTable()
     private val meta = SymbolMeta(ex, "BTCUSDT", tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
     val placed = ConcurrentLinkedQueue[String]()
     override def exchange: Exchange = ex

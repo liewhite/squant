@@ -15,6 +15,7 @@ import ox.supervised
 import java.util.concurrent.ConcurrentLinkedQueue
 import scala.jdk.CollectionConverters.*
 import hft.TestUnits.given
+import hft.exchange.MetaTable
 
 /** 实盘与影子盘**并行**：同一份策略逻辑、同一份行情，两条出口互不知情。
   *
@@ -37,6 +38,7 @@ class LiveAndShadowSpec extends munit.FunSuite:
 
   /** 记录下单的假交易所 —— 代表实盘柜台的那一端 */
   private class RecordingClient(placed: ConcurrentLinkedQueue[ExchangeOrder]) extends TradingClient:
+    override val metaTable: MetaTable = MetaTable()
     override def exchange: Exchange = ex
     override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
       placed.add(order); Right(s"live-${placed.size}")
