@@ -106,19 +106,23 @@ class LedgerSpec extends munit.FunSuite:
     assertEquals(Matcher.touchPrice(Side.Long, bbo).value, 101.0)
     assertEquals(Matcher.touchPrice(Side.Short, bbo).value, 100.0)
 
-  test("同一 symbol 的不同品种是两条独立仓位 —— 按 symbol 记账会把它们合并"):
-    // 期权与永续在有些交易所共享 symbol 前缀。按 symbol 记账的话, 一条期权空头与一条
-    // 永续多头会合并成一个净额 —— 那个数没有意义, 两者的合约乘数与敞口含义都不同。
-    val perp = Instrument.perp(Exchange.Okx, "ETH")
-    val option = Instrument.option(Exchange.Okx, "ETH")
+  test("同一 symbol 在两个交易所是两条独立仓位 —— 按 symbol 记账会把它们合并"):
+    // OKX 与 Hyperliquid 的 symbol 都是基础币 ("ETH"), 按 symbol 记账的话两所的仓位会
+    // 合并成一个净额 —— 那个数没有意义, 而且平任何一边都会拿另一边的均价算盈亏。
+    //
+    // 键的第三维 (品种) 的分桶由 Instrument 的类型保证, 但**目前无法从账本外部观测**:
+    // 账本只建模线性结算 (见 Ledger.LinearSettled), 合法品种只有一个。接期权那天,
+    // 这条用例要补上同 symbol 下的永续 + 期权。
+    val okx = Instrument.perp(Exchange.Okx, "ETH")
+    val hyper = Instrument.perp(Exchange.Hyperliquid, "ETH")
     val l = Ledger
       .empty(AccountId.Live, 10_000.0)
-      .applyFill(perp, Side.Long, Price(100.0), Coin(2.0))
-      .applyFill(option, Side.Short, Price(100.0), Coin(3.0))
+      .applyFill(okx, Side.Long, Price(100.0), Coin(2.0))
+      .applyFill(hyper, Side.Short, Price(100.0), Coin(3.0))
 
-    assertEqualsDouble(l.positions(perp).size.value, 2.0, 1e-12)
-    assertEqualsDouble(l.positions(option).size.value, -3.0, 1e-12)
-    assertEquals(l.positions.size, 2, "两个品种各记一条, 不合并")
+    assertEqualsDouble(l.positions(okx).size.value, 2.0, 1e-12)
+    assertEqualsDouble(l.positions(hyper).size.value, -3.0, 1e-12)
+    assertEquals(l.positions.size, 2, "两所各记一条, 不合并")
 
   test("币本位与现货: 账本的公式对它们不成立, 入口即拒 —— 不给一个看着正常的数"):
     // 币本位的盈亏是 面值_usd x (1/开仓价 - 1/平仓价) 记在基础币上, 与 qty x 价差 量纲都不同;

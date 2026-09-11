@@ -35,17 +35,15 @@ class FillRecorderSpec extends munit.FunSuite:
     val (_, row) = FillRecorder.record(Ledger.empty(AccountId.Live, 0.0), fill(Side.Long, 100.0, 2.0, 1700000000000L))
     assertEquals(row, "1700000000000,Binance,BTCUSDT,LinearPerp,Long,100.0,2.0,0.0,0.0")
 
-  test("record: 同一 symbol 的两个品种各记各的盈亏 —— 流水按品种分得开"):
-    // 少了 kind 列, 这两行在文件里除了价格一模一样, 事后按 (exchange, symbol) 分组
-    // 重建盈亏的人会把两条独立持仓的 realizedPnl 加在一起。
-    val perpFill = fill(Side.Long, 100.0, 1.0, 1)
-    val optionFill = perpFill.copy(kind = InstrumentKind.Option)
-    val (l1, r1) = FillRecorder.record(Ledger.empty(AccountId.Live, 0.0), perpFill)
-    val (l2, r2) = FillRecorder.record(l1, optionFill)
-    // 两笔都是开仓: 若按 symbol 合并, 第二笔会被当成同一条持仓的加仓
-    assertEquals(l2.positions.size, 2, "两个品种各一条持仓")
-    assert(r1.contains(",LinearPerp,"), r1)
-    assert(r2.contains(",Option,"), r2)
+  test("record: 流水带品种列 —— 少了它, 同 symbol 的两条持仓在文件里长得一样"):
+    // 账本按标的记账 (含品种), 而 CSV 从前只有 (exchange, symbol): 事后分组重建盈亏的人
+    // 会把两条独立持仓的 realizedPnl 加在一起, 且无从察觉。
+    //
+    // 这里只能断言列在、值对: 账本目前只建模线性结算 (见 Ledger.LinearSettled), 产不出
+    // 第二个品种的成交。接期权那天补一条两品种的用例。
+    val (_, row) = FillRecorder.record(Ledger.empty(AccountId.Live, 0.0), fill(Side.Long, 100.0, 1.0, 1))
+    assert(row.contains(",LinearPerp,"), row)
+    assertEquals(FillRecorder.Header.split(",").indexOf("kind"), 3, "kind 列紧跟 symbol")
 
   // ==================== 集成: 订阅总线写文件 ====================
 

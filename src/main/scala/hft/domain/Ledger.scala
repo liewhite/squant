@@ -28,7 +28,6 @@ final case class Ledger(account: AccountId, positions: Map[Instrument, Ledger.Ho
   def accountInfo(exchange: Exchange, markOf: Instrument => Option[Price]): AccountInfo =
     AccountInfo(account, exchange, equity = equity(markOf))
 
-
   /** 应用一笔成交，返回新账本：
     *   - 新开 / 同向加仓：加权平均成本
     *   - 反向平仓：平掉 min(本次, 持仓) 的已实现盈亏入现金
@@ -90,21 +89,24 @@ final case class Ledger(account: AccountId, positions: Map[Instrument, Ledger.Ho
       .toVector
 
 object Ledger:
-  /** 本账本建模的是**线性结算**: 盈亏 = 数量 x 价差, 计价币即现金币种。
+  /** 本账本建模的是**线性结算**: 盈亏 = 数量 x 价差, 计价币即现金币种 (现金是 USDT,
+    * 见 `SimConfig.initialBalanceUsdt`)。
     *
     * 不在这个集合里的品种不是"还没测过", 是**公式不成立**:
     *   - [[InstrumentKind.InversePerp]] 币本位的盈亏是 `面值_usd x (1/开仓价 - 1/平仓价)`,
-    *     记在基础币上 —— 与这里的 `qty x 价差` 连量纲都不同, 而现金是 USDT
-    *     (`SimConfig.initialBalanceUsdt`)。算出来会是一个看着正常的数。
+    *     记在基础币上 —— 与这里的 `qty x 价差` 连量纲都不同。算出来会是一个看着正常的数。
     *   - [[InstrumentKind.Spot]] 现货买入当场扣现金、卖出当场收现金, 没有"平仓才实现"
     *     这回事, 也不能做空。本账本的现金只在平仓时动。
+    *   - [[InstrumentKind.Option]] **不在里面, 因为 `kind` 表达不了结算币**。USDT 结算的
+    *     期权 (Bybit `ETH-26SEP25-3000-C-USDT`) 权利金盈亏确实是 `张数 x 价差`; 而 OKX 的
+    *     `ETH-USD-250101-3000-C` 是币本位结算, 权利金计 ETH —— 两者同属 `Option` 这一个
+    *     枚举值。放它进来等于对一半的期权放行, 且症状与币本位一样: 一个看着正常的数。
+    *     要接期权先把结算币做进类型 (`SymbolMeta` 那一侧), 守卫按结算币判, 而不是按 kind。
     *
-    * 期权在里面: USDT 结算的期权, 其权利金盈亏就是 `张数 x 权利金价差`。
-    *
-    * 按第 2 条在入口挡住而不是算出一个数来 —— 今天没有适配层产得出这两个品种的成交
+    * 按第 2 条在入口挡住而不是算出一个数来 —— 今天没有适配层产得出这些品种的成交
     * (见 `ExchangeClient.supportedKinds`), 所以这道守卫现在不可能触发; 它是给接入那天的。
     */
-  val LinearSettled: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp, InstrumentKind.Option)
+  val LinearSettled: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
 
   def empty(account: AccountId, cash: Double): Ledger = Ledger(account, Map.empty, cash)
 

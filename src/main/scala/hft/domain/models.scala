@@ -140,7 +140,8 @@ trait HasInstrument:
     *
     * **有派生入口的一律走它**：[[Order.on]]、[[Position.of]]、[[Position.empty]]，
     * 以及反方向的 [[instrument]]。它们的存在就是为了让"拆成两半再拼回"没有必要 ——
-    * 那种写法漏过三次（`Supervisor.flatten` 与 `ArbPlan` 的两个构造点）。
+    * 那种写法在下单路径上出现过九处，其中三处（`Supervisor.flatten` 与 `ArbPlan` 的两个
+    * 构造点）真的漏了品种，另外六处只是碰巧对：它们下的都是永续，而默认值正好是永续。
     *
     * [[Fill]] 与 [[OrderUpdate]] **没有**派生入口：它们字段多，工厂只是把同样一串字段
     * 再抄一遍，收益抵不上多出来的那个入口。它们的构造点集中在撮合 (`hft.sim.SimState`)

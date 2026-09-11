@@ -159,3 +159,20 @@ class OkxCodecSpec extends munit.FunSuite:
     assert(missing.getMessage.contains("缺字段"), missing.getMessage)
     val bad = intercept[IllegalStateException](OkxCodec.booleanFrom("1", "reduceOnly"))
     assert(bad.getMessage.contains("不是布尔字符串"), bad.getMessage)
+
+  // ==================== instId -> 标的 ====================
+
+  /** 品种在这一处决定 —— 响应侧从前七处各自硬编码 `Instrument.perp`。 */
+  test("instrumentOf: 只认本 quote 的永续, 其余一概 None"):
+    assertEquals(OkxCodec.instrumentOf("ETH-USDT-SWAP", "USDT"), Some(Instrument.perp(Exchange.Okx, "ETH")))
+    // 币本位: symbol 会与 U 本位收敛成同一个 "ETH", 必须在这里挡掉 —— 放过去就是拿 USDT
+    // 的 ctVal 换币本位的张数, 还会在对齐快照 toMap 时静默覆盖真正的那一行
+    assertEquals(OkxCodec.instrumentOf("ETH-USD-SWAP", "USDT"), None)
+    assertEquals(OkxCodec.instrumentOf("ETH-USDC-SWAP", "USDT"), None, "别的计价币")
+    assertEquals(OkxCodec.instrumentOf("ETH-USD-250101-3000-C", "USDT"), None, "期权: 响应侧还没接")
+    assertEquals(OkxCodec.instrumentOf("ETH-USDT", "USDT"), None, "现货")
+    assertEquals(OkxCodec.instrumentOf("garbage", "USDT"), None, "认不出的形状")
+
+  test("instrumentOf 与 toOkx 互为逆 —— 请求侧与响应侧用同一条规则"):
+    val perp = Instrument.perp(Exchange.Okx, "BTC")
+    assertEquals(OkxCodec.instrumentOf(OkxCodec.toOkx(perp, "USDT"), "USDT"), Some(perp))

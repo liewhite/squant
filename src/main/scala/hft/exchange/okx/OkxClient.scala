@@ -162,9 +162,6 @@ class OkxPublicClient protected[okx] (
     }
 
 
-
-
-
   // ==================== 请求基础设施 ====================
 
   protected def publicGet[T: JsonValueCodec](

@@ -181,19 +181,20 @@ final class OkxAccountFeed(
     instrumentOf(d.instId, client.quote) match
       case Some(instrument) => publishOrderOf(instrument, d)
       case None =>
-        // 私有 orders 频道按 instType=SWAP **全量**订阅, 于是账户上一张手工下的币本位单
-        // (ETH-USD-SWAP) 或别的计价币的单, 它的回报也会推到这里。那是账户的合法状态,
-        // 不是契约违约 —— 从前这里直接抛, 一张手工单就能把引擎终止掉。
-        // 与 publishPosition 同一个答案: 不归本柜台管的标的, 跳过。
+        // 私有 orders 频道按 instType=SWAP **全量**订阅: 账户上任何一张 SWAP 单的回报都会
+        // 推到这里 —— 币本位 (ETH-USD-SWAP)、别的计价币, 以及**同账户上别的 API 客户**
+        // (另一个机器人、网格工具) 下的单。都不归本柜台管, 跳过, 与 publishPosition 同一
+        // 个答案。从前这里直接抛, 账户上一张别人的单就能把引擎终止掉。
         //
-        // 但**我们自己下的单都带 clOrdId**: 带着它却解析不出标的, 那就不是"别人的合约",
-        // 是我们认不出自己的单了 (instId 格式变了)。那种回报静默跳过的话, 策略会一直等到
-        // 超时才以"结果不确定"终止, 而真实原因在这里。所以那一支必须立即失败。
-        require(
-          d.clOrdId.isEmpty,
-          s"OKX 订单回报解析不出标的, 而它带着我们自己的 clOrdId: instId='${d.instId}' clOrdId='${d.clOrdId}'",
-        )
-        logger.debug(s"忽略非本柜台标的的订单回报: instId=${d.instId}")
+        // 不要拿"带没带 clOrdId"当归属判据: "我们的单都带 clOrdId"是真的, 但**反过来不
+        // 成立** —— 别人的单也带他们自己的 clOrdId, 而我们的 OKX clOrdId 是无前缀的 32 位
+        // hex (见 Exchange.newClientOrderId), 报文里没有任何东西能证明它是我们的。用非空
+        // 当判据只是把"别人的单杀掉引擎"换了个范围。要让归属真正可判, 得先给 clOrdId 加上
+        // 固定前缀 —— OKX 的上限恰好是 32 字符, 那要连带缩短随机段, 是另一件事。
+        //
+        // "我们认不出自己的单了" (OKX 改了 instId 格式) 不在这里检测: 那时下单侧 toOkx 拼
+        // 出的 instId 同样会被交易所拒, 而策略侧还有 pending 超时兜底。
+        logger.debug(s"忽略不归本柜台管的订单回报: instId=${d.instId}")
 
   private def publishOrderOf(instrument: Instrument, d: OrderPushData): Unit =
     val meta = metaOf(instrument)
