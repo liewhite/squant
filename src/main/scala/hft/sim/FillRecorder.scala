@@ -91,7 +91,10 @@ final class FillRecorder(csvPath: Path):
     catch case NonFatal(e) => logger.warn("failed to close CSV writer", e)
 
 object FillRecorder:
-  val Header = "timestamp,exchange,symbol,side,price,size,realizedPnl,cumulativeRealizedPnl"
+  /** `kind` 在 symbol 之后 —— 账本按标的记账, 而同一个 symbol 底下可能有 U 本位永续、
+    * 币本位永续、几十个期权。少了这一列, 事后按 (exchange, symbol) 分组重建盈亏的人
+    * 会把两条独立持仓的 realizedPnl 混在一起, 且无从察觉。 */
+  val Header = "timestamp,exchange,symbol,kind,side,price,size,realizedPnl,cumulativeRealizedPnl"
 
   /** 纯：把一笔成交计入账本，返回 (新账本, CSV 行)。
     * realizedPnl 为本笔实现盈亏 (平仓时非零)，cumulativeRealizedPnl 为累计 (= 新账本现金)。
@@ -100,5 +103,5 @@ object FillRecorder:
     val before = ledger.cash
     val next = ledger.applyFill(fill.instrument, fill.side, fill.price, fill.size)
     val realized = next.cash - before
-    val row = s"${fill.timestamp},${fill.exchange},${fill.symbol},${fill.side},${fill.price},${fill.size},$realized,${next.cash}"
+    val row = s"${fill.timestamp},${fill.exchange},${fill.symbol},${fill.kind},${fill.side},${fill.price},${fill.size},$realized,${next.cash}"
     (next, row)

@@ -28,7 +28,7 @@ final case class AccountBoard(
 object AccountBoard:
   val empty: AccountBoard = AccountBoard(None, Map.empty, None)
 
-/** 一个标的 (交易所 + 交易对) 的全部情况：公共行情 + 各账户的私有情况。 */
+/** 一个标的 (交易所 + 交易对 + 品种) 的全部情况：公共行情 + 各账户的私有情况。 */
 final case class SymbolBoard(
     instrument: Instrument,
     bbo: Option[Stamped[BBO]],

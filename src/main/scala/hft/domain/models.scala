@@ -74,7 +74,17 @@ enum InstrumentKind:
   * 品种是键的一部分而不是附属信息，见 [[InstrumentKind]]。
   */
 final case class Instrument(exchange: Exchange, symbol: Symbol, kind: InstrumentKind):
-  override def toString: String = s"$exchange:$symbol"
+  /** **三段都在**，因为键有三个维度。
+    *
+    * 它出现在诊断信息的最要害处：`StateManager` 的 "routing bug"、账本的估值价缺失、
+    * 撤单守卫、规格缺失。而那些错误要诊断的情形恰恰是"同一个 symbol 底下的两个品种搞混了"
+    * —— OKX 的 `ETH-USD-SWAP` 与 `ETH-USDT-SWAP` 都 `fromOkx` 成 `ETH`，只差品种。
+    * 少了第三段，报错里注册的键与找不到的键长得一模一样，无从判断。
+    *
+    * 不做"永续省略后缀"的特判：那会让展示规则有两支，且 `sortBy(_.toString)`
+    * （对齐事件、对账清单的确定性顺序）在两个仅品种不同的键上退化成平局。
+    */
+  override def toString: String = s"$exchange:$symbol:$kind"
 
 object Instrument:
   /** U 本位永续 —— 框架里绝大多数标的。

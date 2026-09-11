@@ -45,10 +45,10 @@ class StrategyContextSpec extends munit.FunSuite:
     val error = intercept[IllegalArgumentException] {
       context().cancel(Instrument.perp(Exchange.Okx, instrument.symbol), OrderRef.ByExchangeId(order.id))
     }
-    assert(error.getMessage.contains("instrument=Okx:BTCUSDT"), error.getMessage)
+    assert(error.getMessage.contains("instrument=Okx:BTCUSDT:LinearPerp"), error.getMessage)
 
   test("标的不匹配时拒绝撤单"):
     val error = intercept[IllegalArgumentException] {
       context().cancel(Instrument.perp(instrument.exchange, "ETH"), OrderRef.ByExchangeId(order.id))
     }
-    assert(error.getMessage.contains("instrument=Binance:ETH"), error.getMessage)
+    assert(error.getMessage.contains("instrument=Binance:ETH:LinearPerp"), error.getMessage)
