@@ -30,6 +30,9 @@ final class BinanceMarketFeed(
 
   override def exchange: Exchange = Exchange.Binance
 
+  /** 币安的期权是另一套 API (`eapi`) 与另一条 WS，框架没接。 */
+  override protected val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
+
   /** 公共流路由端点 */
   private enum Route(val path: String):
     case Public extends Route("/public/ws") // 高频公共市场数据
@@ -61,14 +64,7 @@ final class BinanceMarketFeed(
     case _: SubscriptionKind.MarkPrice | _: SubscriptionKind.IndexPrice | _: SubscriptionKind.FundingRate => Route.Market
 
   private def streamName(kind: SubscriptionKind): String =
-    val instrument = kind.subscribedInstrument
-    // 与 BinanceClient 的守卫同一条事实: 本适配层只接 USDⓈ-M 永续。别的品种订下去只会
-    // "订了个空" —— 交易所不认这个流名, 而 WS 订阅失败不一定有回执。
-    require(
-      instrument.kind == InstrumentKind.LinearPerp,
-      s"Binance 行情源只支持 U 本位永续, 收到 ${instrument.kind}: $instrument",
-    )
-    val symbol = instrument.symbol.toLowerCase
+    val symbol = kind.subscribedInstrument.symbol.toLowerCase
     kind match
       case _: SubscriptionKind.BBO   => s"$symbol@bookTicker"
       case _: SubscriptionKind.Trade => s"$symbol@aggTrade"

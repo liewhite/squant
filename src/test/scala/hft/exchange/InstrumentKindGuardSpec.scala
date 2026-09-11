@@ -5,6 +5,7 @@ import hft.exchange.binance.{BinanceClient, BinanceCredentials}
 import hft.exchange.bybit.{BybitClient, BybitCredentials}
 import hft.exchange.okx.{OkxClient, OkxCredentials}
 
+import sttp.client4.DefaultSyncBackend
 import sttp.client4.testing.BackendStub
 
 import java.util.concurrent.atomic.AtomicInteger
@@ -17,6 +18,10 @@ import java.util.concurrent.atomic.AtomicInteger
   * 全量测试照过。
   *
   * 断言"没有发出请求"而不只是"抛了异常"：守卫的意义正是**别打出去**。
+  *
+  * 判据现在只有一处：客户端侧是 [[ExchangeClient.supportedKinds]]，行情侧是
+  * [[MarketFeed.supportedKinds]] 加基类里那一道守卫。各家只声明"我接了什么"，
+  * 不再各写一遍"对不上就报错"——那一遍从前写了六份，且漏过两次。
   */
 class InstrumentKindGuardSpec extends munit.FunSuite:
 
@@ -49,13 +54,13 @@ class InstrumentKindGuardSpec extends munit.FunSuite:
     val instrument = optionOf(client.exchange)
 
     val place = intercept[IllegalArgumentException](client.placeOrder(optionOrder(client.exchange)))
-    assert(place.getMessage.contains("只支持"), s"$name placeOrder: ${place.getMessage}")
+    assert(place.getMessage.contains("未接入 Option"), s"$name placeOrder: ${place.getMessage}")
 
     val cancel = intercept[IllegalArgumentException](client.cancelOrder(instrument, OrderRef.ByClientId("c1")))
-    assert(cancel.getMessage.contains("只支持"), s"$name cancelOrder: ${cancel.getMessage}")
+    assert(cancel.getMessage.contains("未接入 Option"), s"$name cancelOrder: ${cancel.getMessage}")
 
     val pending = intercept[IllegalArgumentException](client.fetchPendingOrders(instrument))
-    assert(pending.getMessage.contains("只支持"), s"$name fetchPendingOrders: ${pending.getMessage}")
+    assert(pending.getMessage.contains("未接入 Option"), s"$name fetchPendingOrders: ${pending.getMessage}")
 
     assertEquals(calls.get(), 0, s"$name: 守卫应在发出请求之前挡下, 实际发出了 ${calls.get()} 次")
 
@@ -79,3 +84,34 @@ class InstrumentKindGuardSpec extends munit.FunSuite:
     // 守卫没有误挡。这里要的不是返回值, 是"请求确实发出去了"这个事实。
     client.fetchPendingOrders(perp)
     assertEquals(calls.get(), 1, "永续应该正常走到发请求")
+
+  // ==================== 行情侧 ====================
+
+  /** 订阅指令走的是基类那道守卫, 所以这里直接把指令投给行情源。 */
+  private def subscribeOption(feed: MarketFeed): Unit =
+    val instrument = optionOf(feed.exchange)
+    val request = hft.event.Commands.MarketSubscriptionRequest(
+      feed.exchange,
+      Set(SubscriptionKind.BBO(instrument)),
+    )
+    feed.onEvent(hft.event.Event.local(hft.event.Commands.MarketSubscription, request), 0L): Unit
+
+  test("四个行情源都挡期权 —— OKX 那处从前根本没有守卫"):
+    // 守卫在基类的订阅入口, 所以连接不必建立 (下面的 backend 一次都不会被用到)。
+    //
+    // OKX 是这条测试的由来: 请求侧的 toOkx 拼得出期权 instId, 而响应侧的 requireSymbol
+    // 只认 base-quote-SWAP —— 于是订阅会成功发出, 然后在第一条推送上抛
+    // "Unknown OKX instId", 错误指向报文, 而真实原因是这个品种没接。
+    val ws = DefaultSyncBackend()
+    try
+      val feeds = Vector(
+        hft.exchange.okx.OkxMarketFeed(OkxClient.public(countingBackend(AtomicInteger(0))), ws),
+        hft.exchange.binance.BinanceMarketFeed(ws),
+        hft.exchange.bybit.BybitMarketFeed(ws),
+        hft.exchange.hyperliquid.HyperliquidMarketFeed(ws),
+      )
+      feeds.foreach { feed =>
+        val e = intercept[IllegalArgumentException](subscribeOption(feed))
+        assert(e.getMessage.contains("未接入 Option"), s"${feed.exchange}: ${e.getMessage}")
+      }
+    finally ws.close()

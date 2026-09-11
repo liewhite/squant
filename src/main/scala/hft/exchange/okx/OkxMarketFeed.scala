@@ -35,6 +35,11 @@ final class OkxMarketFeed(
 
   override def exchange: Exchange = Exchange.Okx
 
+  /** 请求侧的 `toOkx` 早就能为期权/币本位拼出 instId，但响应侧的 `requireSymbol` 只认
+    * `base-quote-SWAP`，`connect` 也只加载永续规格 —— 从前这里**没有守卫**，订一个期权
+    * 盘口会订阅成功、然后在第一条推送上抛 "Unknown OKX instId"。 */
+  override protected val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
+
   private val outgoing = Channel.unlimited[WebSocketFrame]
 
   override protected def connect(): Unit =

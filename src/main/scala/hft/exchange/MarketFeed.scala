@@ -1,7 +1,7 @@
 package hft.exchange
 
 import hft.actor.{Actor, ActorContext}
-import hft.domain.{Exchange, SubscriptionKind, Timestamp}
+import hft.domain.{Exchange, InstrumentKind, SubscriptionKind, Timestamp}
 import hft.event.Commands.MarketSubscription
 import hft.event.{AnyEvent, CommandHandler}
 import org.slf4j.LoggerFactory
@@ -59,6 +59,10 @@ abstract class MarketFeed extends Actor:
     event.as(MarketSubscription).foreach { request =>
       val fresh = request.kinds -- subscribed
       if fresh.nonEmpty then
+        // 品种守卫收在基类, 不是让每个子类各写一句: 四个行情源里有三个写了同一句话,
+        // 而 OKX 那个漏了 —— 订一个期权盘口会订阅成功、然后在第一条推送上抛
+        // "Unknown OKX instId", 错误指向报文而不是"这个品种没接"。
+        fresh.foreach(requireSupported)
         subscribed ++= fresh
         feedLogger.info(s"$exchange 新增行情订阅 ${fresh.size} 条: ${fresh.map(_.subscribedInstrument).mkString(",")}")
         subscribeToExchange(fresh)
@@ -74,8 +78,27 @@ abstract class MarketFeed extends Actor:
     */
   protected def connect(): Unit
 
-  /** 向交易所下发订阅。只会收到**尚未订阅过**的流，实现方不必再去重。 */
+  /** 向交易所下发订阅。只会收到**尚未订阅过**的流，实现方不必再去重，
+    * 也不必再判品种 —— 都是本适配层接了的（见 [[supportedKinds]]）。 */
   protected def subscribeToExchange(kinds: Set[SubscriptionKind]): Unit
+
+  /** 本行情源接了哪些品种。
+    *
+    * 与 [[ExchangeClient.supportedKinds]] 是同一件事的**行情侧**，但两者分开声明而不是
+    * 共用一个：它们是不同的接入面，可以不一致。Bybit 的期权 REST 端点与永续形状相同、
+    * 而公共行情走的是另一条 WS 地址；一个所完全可能先通了行情、还没通下单。
+    *
+    * 订不了的品种在**下发订阅时**失败，而不是等第一条推送 —— 交易所对不认识的流名
+    * 未必给回执，"订了个空"是没有症状的。
+    */
+  protected def supportedKinds: Set[InstrumentKind]
+
+  private def requireSupported(kind: SubscriptionKind): Unit =
+    val instrument = kind.subscribedInstrument
+    require(
+      supportedKinds.contains(instrument.kind),
+      s"$exchange 行情源未接入 ${instrument.kind} (已接: ${supportedKinds.mkString("/")}): $instrument",
+    )
 
   // ==================== 子类可用的能力 ====================
 

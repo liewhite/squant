@@ -46,6 +46,9 @@ final class HyperliquidMarketFeed(
 
   override def exchange: Exchange = Exchange.Hyperliquid
 
+  /** Hyperliquid 只有永续。 */
+  override protected val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
+
   override def name: String = if dex.isEmpty then s"market-feed@$exchange" else s"market-feed@$exchange:$dex"
 
   private val outgoing = Channel.unlimited[WebSocketFrame]
@@ -73,12 +76,7 @@ final class HyperliquidMarketFeed(
 
   /** 订阅报文即流标识：同一条报文就是同一条流，去重与下发因此不可能各说各话 */
   private def streamOf(kind: SubscriptionKind): String =
-    val instrument = kind.subscribedInstrument
-    require(
-      instrument.kind == InstrumentKind.LinearPerp,
-      s"Hyperliquid 行情源只支持永续, 收到 ${instrument.kind}: $instrument",
-    )
-    val coin = toHyperliquid(instrument.symbol, dex)
+    val coin = toHyperliquid(kind.subscribedInstrument.symbol, dex)
     kind match
       case _: SubscriptionKind.BBO   => s"""{"type":"bbo","coin":"$coin"}"""
       case _: SubscriptionKind.Trade => s"""{"type":"trades","coin":"$coin"}"""

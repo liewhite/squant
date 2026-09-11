@@ -75,11 +75,12 @@ class BinancePublicClient protected[binance] (
 
   // ==================== ExchangeClient ====================
 
-  /** 本客户端接的是 USDⓈ-M 永续。币安的期权是另一套 API (eapi), 框架没接。 */
-  override def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
-    if kind != InstrumentKind.LinearPerp then
-      Left(ExchangeError.Rejected("unsupported", s"Binance 适配层只接 USDⓈ-M 永续, 拿不到 $kind 的规格"))
-    else fetchPerpMetas()
+  /** 本客户端接的是 USDⓈ-M 永续 (`fapi`)。币安的期权是另一套 API (`eapi`), 框架没接:
+    * 那意味着另一套端点、另一套报文、另一条私有流, 不是放开一个判断就能跑的。 */
+  override val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
+
+  override protected def fetchSupportedMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
+    fetchPerpMetas()
 
   private def fetchPerpMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
     // exchangeInfo 是三家里最大的响应 (几百个标的), 与下单路径的时限无关
@@ -233,16 +234,8 @@ final class BinanceClient private[binance] (
       .left
       .map(classifyWrite)
 
-  /** 本客户端接的是 USDⓈ-M 永续，别的品种没有对应端点 —— **立即失败**。
-    *
-    * 不静默当永续处理: 那会把一张期权单发到永续端点上, 要么被交易所拒 (白跑一趟),
-    * 要么撞上一个同名的永续合约。品种是调用方明确写下的事实, 对不上就是装配错了。 */
-  private def perpSymbol(instrument: Instrument): Symbol =
-    require(
-      instrument.kind == InstrumentKind.LinearPerp,
-      s"Binance 适配层只支持 U 本位永续, 收到 ${instrument.kind}: $instrument",
-    )
-    instrument.symbol
+  /** 币安的 symbol 就是原生交易对；品种由 [[supportedKinds]] 那一处守。 */
+  private def perpSymbol(instrument: Instrument): Symbol = requireSupported(instrument).symbol
 
   override def cancelOrder(instrument: Instrument, ref: OrderRef): Either[ExchangeError, Unit] =
     val symbol = perpSymbol(instrument)

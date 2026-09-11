@@ -119,9 +119,10 @@ class PositionOwnershipSpec extends munit.FunSuite:
 
   private class AcceptingClient extends TradingClient:
     override val metaTable: MetaTable = MetaTable()
+    override val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
     override def exchange: Exchange = ex
     override def placeOrder(order: ExchangeOrder) = Right("ex-1")
-    override def fetchMetas(kind: InstrumentKind) = Right(Vector(metas(Instrument.perp(ex, sym))))
+    override protected def fetchSupportedMetas(kind: InstrumentKind) = Right(Vector(metas(Instrument.perp(ex, sym))))
     override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
     override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 10_000.0))

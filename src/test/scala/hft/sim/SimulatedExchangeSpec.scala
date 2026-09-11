@@ -37,6 +37,8 @@ class SimulatedExchangeSpec extends munit.FunSuite:
 
   /** 可手动喂行情的假上游行情源。柜台把它装在自己的私有总线上 */
   private class FakeMarketFeed(publishOnConnect: Boolean = false) extends MarketFeed:
+    // 假交易所什么品种都接 —— 这里要测的是订阅流的派生, 不是某个所的接入进度
+    override protected val supportedKinds: Set[InstrumentKind] = InstrumentKind.values.toSet
     override def exchange: Exchange = ex
     override protected def connect(): Unit =
       if publishOnConnect then emitBbo(50000, 50001, 1)

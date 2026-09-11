@@ -39,11 +39,12 @@ class LiveAndShadowSpec extends munit.FunSuite:
   /** 记录下单的假交易所 —— 代表实盘柜台的那一端 */
   private class RecordingClient(placed: ConcurrentLinkedQueue[ExchangeOrder]) extends TradingClient:
     override val metaTable: MetaTable = MetaTable()
+    override val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
     override def exchange: Exchange = ex
     override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
       placed.add(order); Right(s"live-${placed.size}")
     override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
-    override def fetchMetas(kind: InstrumentKind) = Right(Vector(meta))
+    override protected def fetchSupportedMetas(kind: InstrumentKind) = Right(Vector(meta))
     override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, ex, 10_000.0))
     override def fetchWallet() = Right(Map("USDT" -> 10_000.0))

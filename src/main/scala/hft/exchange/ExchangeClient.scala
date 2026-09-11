@@ -10,6 +10,40 @@ import org.slf4j.LoggerFactory
 trait ExchangeClient:
   def exchange: Exchange
 
+  /** 本适配层**接入了哪些品种** —— 一个所支持什么，是这一处说了算。
+    *
+    * ## 为什么要有这个声明
+    *
+    * "本适配层只接 U 本位永续"从前以 `require(instrument.kind == LinearPerp)` 的形态散在
+    * 六处（三家客户端的下单/撤单/挂单查询入口各一句、三家的 `fetchMetas` 各一句），四个
+    * 行情源里还有三句同样的话 —— 同一个事实九份副本，措辞各不相同，而且**漏过一处**：
+    * OKX 的行情源没有这道守卫，订一个期权盘口会订阅成功、然后在第一条推送上抛
+    * "Unknown OKX instId"，错误指向报文而不是"这个品种没接"。
+    *
+    * ## 请求侧与响应侧必须同时通了才算"支持"
+    *
+    * 这不是"能不能拼出那个 instId"。OKX 的 `OkxCodec.toOkx` 早就能为期权和币本位拼出正确的
+    * instId，但响应侧还没跟上（`fetchPositions` 固定 `instType=SWAP`、`fetchPendingOrders`
+    * 与私有流经 `fromOkx` 只认 `base-quote-SWAP`）。只放开请求侧的话，一张期权单能成功发
+    * 出去，然后**全程没有回报、没有挂单、没有仓位** —— 策略以为单没成立，pending 清不掉，
+    * 十几秒后以"结果不确定"终止，而真实原因是我们根本没在听那条频道。
+    *
+    * 所以一个品种进这个集合的条件是：规格端点、下单端点、以及**回报解析**三处都接通了。
+    */
+  def supportedKinds: Set[InstrumentKind]
+
+  /** 这个标的本适配层接不接 —— 接不了就**立即失败**，返回它自己好让调用点串起来。
+    *
+    * 不静默当永续处理：那会把一张期权单发到永续端点上，要么被交易所拒（白跑一趟），
+    * 要么撞上一个同名的永续合约。品种是调用方明确写下的事实，对不上就是装配错了。
+    */
+  final def requireSupported(instrument: Instrument): Instrument =
+    require(
+      supportedKinds.contains(instrument.kind),
+      s"$exchange 适配层未接入 ${instrument.kind} (已接: ${supportedKinds.mkString("/")}): $instrument",
+    )
+    instrument
+
   /** 拉取**某一品种**的全部合约规格。
     *
     * 按品种而不是"全部"：三家的规格端点本来就按品种分口
@@ -17,10 +51,17 @@ trait ExchangeClient:
     * 一个不分品种的 `fetchAll` 只能定死在其中一种上 —— 从前它就定死在永续上，
     * 于是期权的规格根本无处可取。
     *
-    * 本所不支持该品种时返回 `Left` 而不是空 —— "这个所没有期权"与"我没接期权"是两件事，
-    * 空集把它们混成同一个读数。
+    * 没接入的品种返回 `Left` 而不是空 —— "这个所没有期权"与"我没接期权"是两件事，
+    * 空集把它们混成同一个读数。这道判定由 [[supportedKinds]] 派生，实现方只管拉自己接了
+    * 的那些（[[fetchSupportedMetas]]）。
     */
-  def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]]
+  final def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
+    if !supportedKinds.contains(kind) then
+      Left(ExchangeError.Rejected("unsupported", s"$exchange 适配层未接入 $kind (已接: ${supportedKinds.mkString("/")})"))
+    else fetchSupportedMetas(kind)
+
+  /** 拉一个**本适配层确实接了**的品种的规格。没接的品种到不了这里，见 [[fetchMetas]]。 */
+  protected def fetchSupportedMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]]
 
   /** 本所的合约规格表 —— 按标的索引，可增量补充。见 [[MetaTable]]。
     *

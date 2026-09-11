@@ -125,12 +125,16 @@ class OkxPublicClient protected[okx] (
 
   // ==================== ExchangeClient ====================
 
-  /** OKX 的规格端点按 `instType` 分口。目前只接 U 本位永续 —— 本客户端的响应侧
-    * (fetchPositions / 私有流 / 挂单查询) 也只认它, 见 `perpInstId` 的说明。 */
-  override def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
-    if kind != InstrumentKind.LinearPerp then
-      Left(ExchangeError.Rejected("unsupported", s"OKX 适配层尚未接入 $kind 的规格与响应侧"))
-    else fetchPerpMetas()
+  /** OKX 的规格端点按 `instType` 分口, 本适配层只接 U 本位永续。
+    *
+    * `OkxCodec.toOkx` 已经能为期权/币本位拼出正确的 instId, 但响应侧还没跟上:
+    * `fetchPositions` 固定 `instType=SWAP`、`fetchPendingOrders` 与 `OkxAccountFeed` 经
+    * `fromOkx` 只认 `base-quote-SWAP`。接期权时三处同改, 这个集合随之放宽 ——
+    * 放宽它之前先看 [[ExchangeClient.supportedKinds]] 关于"请求侧与响应侧"的说明。 */
+  override val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
+
+  override protected def fetchSupportedMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
+    fetchPerpMetas()
 
   private def fetchPerpMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
     // 合约清单响应大, 与下单路径的时限无关
@@ -235,21 +239,9 @@ final class OkxClient private[okx] (
   // ==================== ExchangeClient ====================
 
 
-  /** 本客户端目前只接 U 本位永续 —— **请求侧与响应侧必须同时支持才算接通**。
-    *
-    * `OkxCodec.toOkx` 已经能为期权/币本位拼出正确的 instId，但响应侧还没跟上：
-    * `fetchPositions` 固定 `instType=SWAP`、`fetchPendingOrders` 与 `OkxAccountFeed`
-    * 经 `fromOkx` 只认 `base-quote-SWAP`。只放开请求侧的话，一张期权单能成功发出去，
-    * 然后**全程没有回报、没有挂单、没有仓位** —— 策略以为单没成立，pending 清不掉，
-    * 十几秒后以"结果不确定"终止，而真实原因是我们根本没在听那条频道。
-    *
-    * 所以在响应侧接通之前，这里一起拒绝。接期权时三处同改，这道守卫随之放宽。 */
-  private def perpInstId(instrument: Instrument): String =
-    require(
-      instrument.kind == InstrumentKind.LinearPerp,
-      s"OKX 适配层目前只支持 U 本位永续 (响应侧尚未接入其它品种), 收到 ${instrument.kind}: $instrument",
-    )
-    toOkx(instrument, quote)
+  /** 标的 -> OKX 的 instId。品种由 [[supportedKinds]] 那一处守 —— `toOkx` 本身早就能为
+    * 期权和币本位拼出正确的 instId，能不能用取决于响应侧接没接。 */
+  private def perpInstId(instrument: Instrument): String = toOkx(requireSupported(instrument), quote)
 
   override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] =
     // order.quantity 已由 StrategyRunner 转为合约张数并取整

@@ -36,6 +36,9 @@ final class BybitMarketFeed(
 
   override def exchange: Exchange = Exchange.Bybit
 
+  /** 只接 `category=linear`。期权有独立的公共流地址，不是换个 topic 名就能订到的。 */
+  override protected val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
+
   private val outgoing = Channel.unlimited[WebSocketFrame]
 
   override protected def connect(): Unit =
@@ -49,14 +52,7 @@ final class BybitMarketFeed(
     outgoing.send(WebSocketFrame.text(s"""{"op":"subscribe","args":[$args]}"""))
 
   private def topicOf(kind: SubscriptionKind): String =
-    // 与 BybitClient 的守卫同一条事实: 本适配层只接 category=linear。期权走的是另一条
-    // WS 端点 (option 有独立的公共流地址), 不是换个 topic 名就能订到的。
-    val instrument = kind.subscribedInstrument
-    require(
-      instrument.kind == InstrumentKind.LinearPerp,
-      s"Bybit 行情源只支持 category=linear, 收到 ${instrument.kind}: $instrument",
-    )
-    val s = instrument.symbol
+    val s = kind.subscribedInstrument.symbol
     kind match
       case _: SubscriptionKind.BBO         => s"orderbook.1.$s"
       case _: SubscriptionKind.MarkPrice   => s"tickers.$s"

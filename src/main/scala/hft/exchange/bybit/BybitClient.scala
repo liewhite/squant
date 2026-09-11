@@ -102,12 +102,13 @@ class BybitPublicClient protected[bybit] (
 
   // ==================== ExchangeClient ====================
 
-  /** Bybit v5 的规格端点按 `category` 分口。目前只接 linear —— 期权 (`category=option`)
-    * 的端点形状相同, 但响应侧 (私有流 category=option) 还没接, 见 `linearSymbol`。 */
-  override def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
-    if kind != InstrumentKind.LinearPerp then
-      Left(ExchangeError.Rejected("unsupported", s"Bybit 适配层尚未接入 $kind 的规格与响应侧"))
-    else fetchLinearMetas()
+  /** Bybit v5 按 `category` 分口, 本适配层只接 `linear`。期权 (`category=option`) 的
+    * REST 端点形状相同, 但响应侧没接: 私有流要单独订 `category=option`, 公共行情更是
+    * 另一条 WS 地址 —— 只放开请求侧就是发得出单、收不到回报。 */
+  override val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
+
+  override protected def fetchSupportedMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
+    fetchLinearMetas()
 
   private def fetchLinearMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
     // instruments-info 为公共端点 (免签)，分页跟进 nextPageCursor
@@ -208,14 +209,8 @@ final class BybitClient private[bybit] (
     }
 
 
-  /** Bybit v5 用 `category` 区分品种。本客户端目前只接 linear（U 本位永续）——
-    * 期权 (`category=option`) 的端点形状相同但尚未接入，收到即失败而不是当永续发出去。 */
-  private def linearSymbol(instrument: Instrument): Symbol =
-    require(
-      instrument.kind == InstrumentKind.LinearPerp,
-      s"Bybit 适配层目前只支持 category=linear (U 本位永续), 收到 ${instrument.kind}: $instrument",
-    )
-    instrument.symbol
+  /** Bybit 的 symbol 就是原生交易对；品种由 [[supportedKinds]] 那一处守。 */
+  private def linearSymbol(instrument: Instrument): Symbol = requireSupported(instrument).symbol
 
   override def cancelOrder(instrument: Instrument, ref: OrderRef): Either[ExchangeError, Unit] =
     val symbol = linearSymbol(instrument)

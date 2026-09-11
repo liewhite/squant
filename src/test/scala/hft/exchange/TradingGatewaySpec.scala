@@ -34,9 +34,10 @@ class TradingGatewaySpec extends munit.FunSuite:
   /** 有求必应的桩客户端 —— 驱动汇报面路径时不该被执行面打扰 */
   private class QuietClient extends TradingClient:
     override val metaTable: MetaTable = MetaTable()
+    override val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
     override def exchange: Exchange = Exchange.Binance
     override def placeOrder(order: ExchangeOrder) = Right("ignored")
-    override def fetchMetas(kind: InstrumentKind) = Right(Vector(meta))
+    override protected def fetchSupportedMetas(kind: InstrumentKind) = Right(Vector(meta))
     override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
     override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)
     override def fetchAccountInfo() = Right(AccountInfo(AccountId.Live, Exchange.Binance, 10_000.0))
@@ -187,7 +188,7 @@ class TradingGatewaySpec extends munit.FunSuite:
       val feed = ManualFeed()
       // 规格由客户端给 —— 柜台在对齐入口自己加载 (见 RestTradingGateway.syncSnapshot)
       class CoarseClient extends QuietClient:
-        override def fetchMetas(kind: InstrumentKind) = Right(Vector(coarse))
+        override protected def fetchSupportedMetas(kind: InstrumentKind) = Right(Vector(coarse))
       ActorSystem(bus).spawn(RestTradingGateway(CoarseClient(), feed, AccountId.Live))
       align(bus)
       val seen = ConcurrentLinkedQueue[AnyEvent]()
@@ -248,7 +249,7 @@ class TradingGatewaySpec extends munit.FunSuite:
       val ethMeta = SymbolMeta(Exchange.Binance, eth, 0.1, 0.001, 0.001, 1.0)
       class TwoSymbolClient extends QuietClient:
         // 规格端点返回本所全部合约, 柜台按需查 —— 两批标的都要在里面
-        override def fetchMetas(kind: InstrumentKind) = Right(Vector(meta, ethMeta))
+        override protected def fetchSupportedMetas(kind: InstrumentKind) = Right(Vector(meta, ethMeta))
         override def fetchPositions() = Right(Vector(
           Position(AccountId.Live, Exchange.Binance, "BTCUSDT", Coin(0.5))
         ))
@@ -311,9 +312,10 @@ class TradingGatewaySpec extends munit.FunSuite:
     * `RestTradingGateway.syncSnapshot`)，而不再由构造方传入一份快照。 */
   private class StubClient(placeResult: Either[ExchangeError, OrderId]) extends TradingClient:
     override val metaTable: MetaTable = MetaTable()
+    override val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
     override def exchange: Exchange = Exchange.Binance
     override def placeOrder(order: ExchangeOrder): Either[ExchangeError, OrderId] = placeResult
-    override def fetchMetas(kind: InstrumentKind) = Right(Vector(meta))
+    override protected def fetchSupportedMetas(kind: InstrumentKind) = Right(Vector(meta))
     override def cancelOrder(instrument: Instrument, ref: OrderRef) = fail("unexpected call")
     // 对齐要读它们 —— 空账户是本组用例的前提 (它们只关心下单回流)
     override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)

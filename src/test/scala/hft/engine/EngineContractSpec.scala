@@ -103,6 +103,8 @@ class EngineContractSpec extends munit.FunSuite:
 
   /** 记录收到哪些订阅指令的假行情插件 */
   private class RecordingFeed(exch: Exchange, log: ConcurrentLinkedQueue[String]) extends MarketFeed:
+    // 假交易所什么品种都接 —— 这里要测的是订阅流的派生, 不是某个所的接入进度
+    override protected val supportedKinds: Set[InstrumentKind] = InstrumentKind.values.toSet
     override def exchange: Exchange = exch
     override protected def connect(): Unit = ()
     override protected def subscribeToExchange(kinds: Set[SubscriptionKind]): Unit =
