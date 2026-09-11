@@ -55,7 +55,7 @@ class MetaCacheSpec extends munit.FunSuite:
     client.ensureMetas(InstrumentKind.LinearPerp, "test")
     client.ensureMetas(InstrumentKind.Option, "test")
 
-    assertEquals(client.knownMetas.keySet, Set(perp, option), "先加载的永续必须还在")
+    assertEquals(client.metaTable.known.keySet, Set(perp, option), "先加载的永续必须还在")
 
   test("没加载过的标的: 纯查表, 缺失即抛 —— 不在热路径上偷偷发一次网络请求"):
     val client = FakeClient(Map(InstrumentKind.LinearPerp -> Vector(metaOf(perp))))
@@ -68,11 +68,12 @@ class MetaCacheSpec extends munit.FunSuite:
   test("本所不支持的品种: Left 而不是空集"):
     // "这个所没有期权"与"我没接期权"是两件事, 空集把它们混成同一个读数。
     val client = FakeClient(Map(InstrumentKind.LinearPerp -> Vector(metaOf(perp))))
-    assert(client.reloadMetas(InstrumentKind.Option).isLeft)
+    assert(client.fetchMetas(InstrumentKind.Option).isLeft)
 
-  test("本所不支持的品种: ensureMetas 抛 —— 调用点全在不该带伤继续的地方"):
+  test("本所不支持的品种: ensureMetas 给 Left, ensureMetasOrThrow 抛"):
     val client = FakeClient(Map(InstrumentKind.LinearPerp -> Vector(metaOf(perp))))
-    val e = intercept[IllegalStateException](client.ensureMetas(InstrumentKind.Option, "某某流"))
+    assert(client.ensureMetas(InstrumentKind.Option, "某某流").isLeft, "Either 形态: 与调用方自己的失败同一条通道")
+    val e = intercept[IllegalStateException](client.ensureMetasOrThrow(InstrumentKind.Option, "某某流"))
     assert(e.getMessage.contains("某某流"), "错误里要说得出是谁要的这份规格")
 
   test("已经拉过的品种不再打 REST —— 一个进程启动一度打三次同一个端点"):
@@ -82,7 +83,7 @@ class MetaCacheSpec extends munit.FunSuite:
     client.ensureMetas(InstrumentKind.LinearPerp, "私有流")
     client.ensureMetas(InstrumentKind.LinearPerp, "柜台")
     assertEquals(client.calls.get(), 1, "只该拉一次")
-    assertEquals(client.knownMetas.size, 1)
+    assertEquals(client.metaTable.known.size, 1)
 
   test("拉到空集也算拉过 —— 否则一张合约都没上市的品种会被反复拉"):
     // "拉过"记的是端点访问过了, 不是"表里有条目"。按后者判断的话, 每个调用点都会为
@@ -91,19 +92,6 @@ class MetaCacheSpec extends munit.FunSuite:
     client.ensureMetas(InstrumentKind.Option, "第一次")
     client.ensureMetas(InstrumentKind.Option, "第二次")
     assertEquals(client.calls.get(), 1)
-
-  test("期权链滚动: reloadMetas 强制再拉, 且不抹掉已在表里的合约"):
-    // ensureMetas 对拉过的品种不会再拉, 而新的到期日每周上市 —— 两个入口对应两种意图。
-    val nextWeek = Instrument.option(Exchange.Okx, "ETH-USD-250108-3000-C")
-    var listed = Vector(metaOf(option))
-    val client = new FakeClient(Map.empty):
-      override def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
-        calls.incrementAndGet()
-        Right(listed)
-    client.ensureMetas(InstrumentKind.Option, "首次")
-    listed = Vector(metaOf(nextWeek))
-    assertEquals(client.reloadMetas(InstrumentKind.Option), Right(1))
-    assertEquals(client.knownMetas.keySet, Set(option, nextWeek), "仍持仓的到期合约不能被抹掉")
 
   test("装饰器与被装饰者是同一张表 —— 不是各自一张"):
     // DryRunClient 从前必然自带一张接不上去的空表: 柜台对齐时装进 dry-run 那张,

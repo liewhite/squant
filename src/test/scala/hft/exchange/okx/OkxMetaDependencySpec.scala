@@ -33,11 +33,11 @@ class OkxMetaDependencySpec extends munit.FunSuite:
   test("行情源自己加载规格 —— 无柜台的装配形态 (跨所监控/看板) 才成立"):
     val calls = mutable.ArrayBuffer.empty[String]
     val client = OkxClient.public(instrumentsBackend(calls))
-    assert(client.knownMetas.isEmpty, "构造时不拉 —— 拉取是连接时的动作")
+    assert(client.metaTable.known.isEmpty, "构造时不拉 —— 拉取是连接时的动作")
 
     // connect() 里的 WsLoop 会去连真实 WS，这里只验证它之前那一步：规格已经进表。
     // 直接调 ensureMetas 与 connect 首行是同一个调用，形态上等价且不需要网络。
-    client.ensureMetas(InstrumentKind.LinearPerp, "OKX 行情源")
+    client.ensureMetasOrThrow(InstrumentKind.LinearPerp, "OKX 行情源")
     assertEquals(
       client.metaOf(Instrument.perp(Exchange.Okx, "ETH")).contractSize,
       0.1,
@@ -54,7 +54,7 @@ class OkxMetaDependencySpec extends munit.FunSuite:
     // 仓位读数是对账的输入: 静默跳过等于让对账永远"一致"。
     val calls = mutable.ArrayBuffer.empty[String]
     val client = OkxClient.public(instrumentsBackend(calls))
-    client.ensureMetas(InstrumentKind.LinearPerp, "OKX 私有流")
+    client.ensureMetasOrThrow(InstrumentKind.LinearPerp, "OKX 私有流")
 
     val meta = client.metaOf(Instrument.perp(Exchange.Okx, "ETH"))
     // 3 张 × ctVal 0.1 = 0.3 币
@@ -83,7 +83,7 @@ class OkxMetaDependencySpec extends munit.FunSuite:
     // 少了自保证这一步, 账户上只要有一张持仓, 第一轮轮询就抛"尚未加载", 看板进程终止。
     val calls = mutable.ArrayBuffer.empty[String]
     val trading = OkxClient.trading(accountBackend(calls), credentials)
-    assert(trading.knownMetas.isEmpty, "没有任何人替它加载过")
+    assert(trading.metaTable.known.isEmpty, "没有任何人替它加载过")
 
     val positions = trading.fetchPositions().fold(e => fail(s"应当报得出持仓: ${e.message}"), identity)
     assertEquals(positions.map(_.symbol), Vector("ETH"))
@@ -103,6 +103,18 @@ class OkxMetaDependencySpec extends munit.FunSuite:
     // (OkxMarketFeed 收的是 OkxPublicClient, 交易客户端是它的子类)。
     val calls = mutable.ArrayBuffer.empty[String]
     val shared = OkxClient.trading(accountBackend(calls), credentials)
-    shared.ensureMetas(InstrumentKind.LinearPerp, "行情源")
+    shared.ensureMetasOrThrow(InstrumentKind.LinearPerp, "行情源")
     shared.fetchPositions()
     assertEquals(calls.count(_.contains("instruments")), 1)
+
+  test("规格端点失败时 fetchPositions 返回 Left, 不半路抛"):
+    // 规格端点的超时/限频与本次查询自己的失败是同一类事 (契约内的 REST 失败),
+    // 必须走同一条通道。半路抛的话, 调用方按 Either 写的错误处理形同虚设 ——
+    // 而 AccountMonitor 每秒调一次它。
+    val backend = BackendStub.synchronous.whenAnyRequest.thenRespondF { req =>
+      if req.uri.path.mkString("/").contains("instruments") then
+        sttp.client4.testing.ResponseStub.adjust("boom", sttp.model.StatusCode.TooManyRequests)
+      else sttp.client4.testing.ResponseStub.adjust("""{"code":"0","msg":"","data":[]}""")
+    }
+    val trading = OkxClient.trading(backend, credentials)
+    assert(trading.fetchPositions().isLeft, "该是 Left, 不是异常")

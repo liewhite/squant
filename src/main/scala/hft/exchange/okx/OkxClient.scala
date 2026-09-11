@@ -297,37 +297,35 @@ final class OkxClient private[okx] (
     val path = s"/api/v5/trade/orders-pending?instId=${perpInstId(instrument)}&instType=SWAP"
     // 响应里的 sz/accFillSz 是**张数**, 换回币要查规格 —— 那是本客户端自己的事实,
     // 所以由本方法保证, 不指望调用方先加载 (见 ExchangeClient.metaOf)。冷路径, 幂等。
-    ensureMetas(InstrumentKind.LinearPerp, "OKX 挂单查询")
-    signedRequest[PendingResp](Method.GET, path).flatMap { resp =>
-      ensureOk(resp.code, resp.msg).map { _ =>
-        resp.data.iterator.flatMap { d =>
-          fromOkx(d.instId, quote).map { sym =>
-            val filled = metaOf(sym).toCoin(Contracts(d.accFillSz.asDouble))
-            OrderUpdate(
-              account = AccountId.Live,
-              orderId = d.ordId,
-              // 没有 clOrdId 的单 (手工下的) 就是没有 —— 拿 ordId 冒充会在策略的 pending
-              // 索引里凭空造出一个不存在的键, 而 WS 路径给的是 None (同一事实两个答案)。
-              clientOrderId = Option.when(d.clOrdId.nonEmpty)(d.clOrdId),
-              exchange = Exchange.Okx,
-              symbol = sym,
-              side = sideFromOkx(d.side),
-              status = mapOrderState(d.state, filled),
-              price = Price(d.px.asDoubleOrZero),
-              quantity = metaOf(sym).toCoin(Contracts(d.sz.asDouble)),
-              filledQuantity = filled,
-              reduceOnly = OkxCodec.booleanFrom(d.reduceOnly, "reduceOnly"),
-              // 交易所侧的更新时刻。用本地钟会让延迟基准恒为零 (柜台把它当 exchangeTs 用)。
-              timestamp = d.uTime.toLongOption.getOrElse(
-                throw IllegalStateException(s"OKX orders-pending 缺 uTime: ordId=${d.ordId} 原始值='${d.uTime}'")
-              ),
-            )
-          }
-        }.toVector
+    // 串进 Either 链而不是半路抛: 规格端点的失败和本次查询的失败是同一类事。
+    for
+      _ <- ensureMetas(InstrumentKind.LinearPerp, "OKX 挂单查询")
+      resp <- signedRequest[PendingResp](Method.GET, path)
+      _ <- ensureOk(resp.code, resp.msg)
+    yield resp.data.iterator.flatMap { d =>
+      fromOkx(d.instId, quote).map { sym =>
+        val filled = metaOf(sym).toCoin(Contracts(d.accFillSz.asDouble))
+        OrderUpdate(
+          account = AccountId.Live,
+          orderId = d.ordId,
+          // 没有 clOrdId 的单 (手工下的) 就是没有 —— 拿 ordId 冒充会在策略的 pending
+          // 索引里凭空造出一个不存在的键, 而 WS 路径给的是 None (同一事实两个答案)。
+          clientOrderId = Option.when(d.clOrdId.nonEmpty)(d.clOrdId),
+          exchange = Exchange.Okx,
+          symbol = sym,
+          side = sideFromOkx(d.side),
+          status = mapOrderState(d.state, filled),
+          price = Price(d.px.asDoubleOrZero),
+          quantity = metaOf(sym).toCoin(Contracts(d.sz.asDouble)),
+          filledQuantity = filled,
+          reduceOnly = OkxCodec.booleanFrom(d.reduceOnly, "reduceOnly"),
+          // 交易所侧的更新时刻。用本地钟会让延迟基准恒为零 (柜台把它当 exchangeTs 用)。
+          timestamp = d.uTime.toLongOption.getOrElse(
+            throw IllegalStateException(s"OKX orders-pending 缺 uTime: ordId=${d.ordId} 原始值='${d.uTime}'")
+          ),
+        )
       }
-    }
-
-
+    }.toVector
 
   /** OKX 净值走 REST (totalEq)；名义价值由私有 WS account 频道推送，此处置 0 */
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] =
@@ -373,25 +371,24 @@ final class OkxClient private[okx] (
     // 少了这一句, 只读看板 (LiveDashboardLauncher) 在 OKX 上启动即崩: 它给行情源和
     // 账户轮询建的是**两个**客户端实例, 行情源加载的是自己那一张表, 而本方法查的是
     // 另一张空表 —— 账户上只要有一张持仓, 第一轮轮询就抛"尚未加载"。
-    ensureMetas(InstrumentKind.LinearPerp, "OKX 持仓查询")
-    signedRequest[PositionsResp](Method.GET, "/api/v5/account/positions?instType=SWAP").flatMap { resp =>
-      ensureOk(resp.code, resp.msg).map { _ =>
-        resp.data.iterator.flatMap { d =>
-          // 规格缺失**不再静默跳过**: 从前 symbolMetas 是 lazy val, 首次访问必然拉全表,
-          // 所以"查不到"只可能是"交易所清单里没有"; 规格改成可增量加载之后, "查不到"多了
-          // 一种含义"还没人加载", 而两者的表现完全一样 —— 返回空列表。看板那条链路
-          // (AccountMonitor, 无柜台) 会因此把 OKX 全部持仓显示成零, 没有任何症状。
-          for sym <- fromOkx(d.instId, quote)
-          yield Position(
-            account = AccountId.Live,
-            exchange = Exchange.Okx,
-            symbol = sym,
-            // 张 -> 币; OKX 的 pos 正多负空。规格缺失即抛 (见上)
-            size = metaOf(sym).toCoin(Contracts(d.pos.asDouble)),
-          )
-        }.toVector
-      }
-    }
+    for
+      _ <- ensureMetas(InstrumentKind.LinearPerp, "OKX 持仓查询")
+      resp <- signedRequest[PositionsResp](Method.GET, "/api/v5/account/positions?instType=SWAP")
+      _ <- ensureOk(resp.code, resp.msg)
+    yield resp.data.iterator.flatMap { d =>
+      // 规格缺失**不再静默跳过**: 从前 symbolMetas 是 lazy val, 首次访问必然拉全表,
+      // 所以"查不到"只可能是"交易所清单里没有"; 规格改成可增量加载之后, "查不到"多了
+      // 一种含义"还没人加载", 而两者的表现完全一样 —— 返回空列表。看板那条链路
+      // (AccountMonitor, 无柜台) 会因此把 OKX 全部持仓显示成零, 没有任何症状。
+      for sym <- fromOkx(d.instId, quote)
+      yield Position(
+        account = AccountId.Live,
+        exchange = Exchange.Okx,
+        symbol = sym,
+        // 张 -> 币; OKX 的 pos 正多负空。规格缺失即抛 (见上)
+        size = metaOf(sym).toCoin(Contracts(d.pos.asDouble)),
+      )
+    }.toVector
 
   // ==================== 账户级希腊字母 (供 Greeks 轮询使用) ====================
 

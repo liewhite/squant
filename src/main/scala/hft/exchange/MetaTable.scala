@@ -44,8 +44,11 @@ final class MetaTable:
   /** 合并一个品种的规格并记下它已加载，返回本次拉到的条目数。
     *
     * 合并而不是整表替换 (见类文档)。并发调用经 CAS 合并，不会互相丢失。
+    *
+    * `private[exchange]`：写入只有 [[ExchangeClient.ensureMetas]] 一条路径。表是公开的
+    * (装饰器要转发它)，但公开的是"读得到"，不是"谁都能往里塞一份没经过 `fetchMetas` 的规格"。
     */
-  def merge(kind: InstrumentKind, fetched: Vector[SymbolMeta]): Int =
+  private[exchange] def merge(kind: InstrumentKind, fetched: Vector[SymbolMeta]): Int =
     val added = fetched.map(m => m.instrument -> m).toMap
     state.updateAndGet(s => MetaTable.State(s.metas ++ added, s.loaded + kind))
     added.size
@@ -56,13 +59,17 @@ final class MetaTable:
     * 建立连接) 只会打一次 REST，后到的那条等它拉完、看到已加载、直接返回。持锁期间在等一次
     * 网络往返，而这是连接建立时的冷路径 —— 让第二条线程白打一次 REST 才是更差的选择。
     */
-  def ensure(kind: InstrumentKind)(
+  private[exchange] def ensure(kind: InstrumentKind)(
       fetch: => Either[ExchangeError, Vector[SymbolMeta]]
   ): Either[ExchangeError, Option[Int]] =
-    synchronized {
-      if isLoaded(kind) then Right(None)
-      else fetch.map(fetched => Some(merge(kind, fetched)))
-    }
+    // 快路径不进锁: 已加载是绝大多数情况 (每次 REST 响应侧调用都会问一遍), 而锁里可能
+    // 正有另一个品种在做网络往返 —— 拿已经加载好的品种去等它没有道理。
+    if isLoaded(kind) then Right(None)
+    else
+      synchronized {
+        if isLoaded(kind) then Right(None)
+        else fetch.map(fetched => Some(merge(kind, fetched)))
+      }
 
 object MetaTable:
   /** 表与"拉过哪些品种"必须一起变 —— 分成两个原子引用就有了一个"已合并、尚未记为已加载"

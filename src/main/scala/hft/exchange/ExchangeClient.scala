@@ -44,9 +44,6 @@ trait ExchangeClient:
     */
   def metaTable: MetaTable
 
-  /** 已知的合约规格快照 (只读) */
-  final def knownMetas: Map[Instrument, SymbolMeta] = metaTable.known
-
   /** 这个标的的规格 —— **纯查表，缺失即抛**。
     *
     * 不在这里补拉：它在热路径上（每条订单回报都要拿它把张换回币），而补拉是一次网络往返。
@@ -68,27 +65,32 @@ trait ExchangeClient:
         sys.error(s"$exchange 没有 $instrument 的合约规格 —— 该品种尚未加载 (见 ExchangeClient.ensureMetas)"),
       )
 
-  /** 这个品种的规格**必须在表里** —— 没拉过就拉一次，拉过就什么都不做；拉不到即抛。
+  /** 这个品种的规格**必须在表里** —— 没拉过就拉一次，拉过就什么都不做。
     *
     * 需要规格的每一处在自己的冷路径上调它，幂等且不白打 REST。`requester` 只进日志：
     * 一次 REST 是谁触发的，出问题时是要查的东西。
     *
-    * 拉不到就抛而不是返回错误值：规格拉不到 = 这条链路上所有张↔币换算都做不了，
-    * 而调用点全在"建立连接 / 启动对齐"这类不该带伤继续的地方。
-    */
-  final def ensureMetas(kind: InstrumentKind, requester: String): Unit =
-    metaTable.ensure(kind)(fetchMetas(kind)) match
-      case Right(Some(n)) => ExchangeClient.logger.info(s"$requester 加载 $exchange $kind 合约规格 $n 条")
-      case Right(None)    => ()
-      case Left(e)        => throw IllegalStateException(s"$requester 加载 $exchange $kind 合约规格失败: ${e.message}")
-
-  /** **强制**再拉一次并合并进表 —— 期权链每周滚动，新的到期日不断上市，
-    * 而 [[ensureMetas]] 对拉过的品种不会再拉。返回本次拉到的条目数。
+    * **返回 `Either` 而不是抛**：规格端点的超时、限频、错误码都是本接口契约里明说会发生的
+    * 失败 (见类文档"错误以 Either 显式返回")，它们必须和调用方自己那次请求的失败走同一条
+    * 通道。客户端的 REST 响应侧就在 `Either` 契约里 (`fetchPositions` 每秒被账户轮询调一次)，
+    * 让它半路抛出去，等于同一个方法对同一类失败有两个出口。
     *
-    * 表只增不减，所以再拉一次不会抹掉仍持有仓位的到期合约 (见 [[MetaTable]])。
+    * 建立连接那种"失败即不该继续"的调用点用 [[ensureMetasOrThrow]]。
     */
-  final def reloadMetas(kind: InstrumentKind): Either[ExchangeError, Int] =
-    fetchMetas(kind).map(metaTable.merge(kind, _))
+  final def ensureMetas(kind: InstrumentKind, requester: String): Either[ExchangeError, Unit] =
+    metaTable.ensure(kind)(fetchMetas(kind)).map {
+      case Some(n) => ExchangeClient.logger.info(s"$requester 加载 $exchange $kind 合约规格 $n 条")
+      case None    => ()
+    }
+
+  /** [[ensureMetas]] 的抛出形态 —— 给建立连接、启动对齐这类**带伤继续毫无意义**的调用点。
+    *
+    * 收在这里而不是让三个调用点各自 `fold`：错误文案是同一句话，各写一遍迟早各不相同。
+    */
+  final def ensureMetasOrThrow(kind: InstrumentKind, requester: String): Unit =
+    ensureMetas(kind, requester) match
+      case Right(())=> ()
+      case Left(e)  => throw IllegalStateException(s"$requester 加载 $exchange $kind 合约规格失败: ${e.message}")
 
 object ExchangeClient:
   /** 规格加载的日志出口。放伴生对象而不是 trait 字段: 后者每个客户端实例一份。 */

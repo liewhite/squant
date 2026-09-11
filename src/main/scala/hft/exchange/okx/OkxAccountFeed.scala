@@ -95,7 +95,7 @@ final class OkxAccountFeed(
     // 从前这里拷贝一份 client 的快照; 快照改成可增量加载之后, 一度变成"指望柜台先加载" ——
     // 而账户流并不总是和柜台配对: 看板 (AccountMonitor) 那条链路就没有柜台。前提由谁需要
     // 谁保证, 才不会因为装配形态换了一种就断掉。
-    client.ensureMetas(InstrumentKind.LinearPerp, "OKX 私有流")
+    client.ensureMetasOrThrow(InstrumentKind.LinearPerp, "OKX 私有流")
 
     WsLoop.run("okx/private", backend, () => wsUrl, outgoing, onPrivateText, spawn)
     // login 帧入队，连接建立后立即发送 (timestamp 在此刻生成；连接通常亚秒级，OKX 允许 ~30s 偏差)

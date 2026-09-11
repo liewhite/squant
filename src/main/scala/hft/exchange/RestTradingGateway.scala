@@ -181,7 +181,7 @@ final class RestTradingGateway(
     * 规则只写在这里，于是两条 OKX 流各自无条件 `loadMetas`，同一进程启动打三次同一个端点。
     */
   private def ensureMetas(instruments: Set[Instrument]): Unit =
-    instruments.map(_.kind).foreach(client.ensureMetas(_, target.toString))
+    instruments.map(_.kind).foreach(client.ensureMetasOrThrow(_, target.toString))
 
   /** 每个 REST 调用 fork 独立虚拟线程，互不阻塞，也不阻塞柜台的事件循环。
     *
