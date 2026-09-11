@@ -207,10 +207,8 @@ final class Supervisor(
     if size.nonZero then
       val side = if size > Coin.Zero then Side.Short else Side.Long
       val clientOrderId = instrument.exchange.newClientOrderId
-      val raw = Order(
-        id = "",
-        exchange = instrument.exchange,
-        symbol = instrument.symbol,
+      val raw = Order.on(
+        instrument = instrument,
         side = side,
         orderType = OrderType.Market,
         quantity = size.abs,

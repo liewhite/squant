@@ -138,6 +138,9 @@ class SupervisorSpec extends munit.FunSuite:
       assertEqualsDouble(flatten.quantity.value, 2.0, 1e-9)
       assert(flatten.reduceOnly, "平仓单必须 reduce-only —— 撮合层据此保证只减不增")
       assert(flatten.clientOrderId.nonEmpty, "平仓单也要有 clientOrderId, 否则回报无从关联")
+      // 平的是哪条仓位, 单就属于哪条 —— 品种不能落回默认值 (见 Order.on)。
+      // 这条在永续标的上看不出差别, 非永续的形态由 ArbPlanSpec 钉住, 两者走的是同一个入口。
+      assertEquals(flatten.instrument, inst)
 
   test("无敞口时降级不发平仓单"):
     supervised:

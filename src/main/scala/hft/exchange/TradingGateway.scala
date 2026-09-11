@@ -274,7 +274,7 @@ object TradingGateway:
       positionEvent(
         byInstrument.getOrElse(
           instrument,
-          Position.empty(account, exchange, instrument.symbol).copy(kind = instrument.kind),
+          Position.empty(account, instrument),
         ),
         nowMs,
       )

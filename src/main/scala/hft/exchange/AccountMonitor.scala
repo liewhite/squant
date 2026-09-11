@@ -92,7 +92,7 @@ final class AccountMonitor(
     val held = positions.map(_.symbol).toSet
     // 账上持有的 + 点名要看的。点名而空仓的显式推零仓: "空仓"与"这条读数还没来"必须分得开。
     val reported = positions.map(p => p.copy(account = account)) ++
-      (symbols -- held).toVector.sorted.map(Position.empty(account, exchange, _))
+      (symbols -- held).toVector.sorted.map(s => Position.empty(account, Instrument.perp(exchange, s)))
     reported.foreach(p => ctx.publish(Event.local(Topics.Position, p)))
 
     ctx.publish(Event.local(Topics.AccountInfo, info.copy(account = account)))

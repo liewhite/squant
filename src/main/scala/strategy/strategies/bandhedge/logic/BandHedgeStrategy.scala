@@ -86,7 +86,7 @@ final class BandHedgeStrategy(
           val side = if netDelta > 0 then Side.Short else Side.Long // 净多 -> 卖, 净空 -> 买
           center = px // 成交后中心移到成交价 (market@touch、delay=0)，并防止本笔重复触发
           ctx.place(
-            Order("", exchange, symbol, side, OrderType.Market, qty, reduceOnly = false, clientOrderId = ""),
+            Order.on(instrument, side, OrderType.Market, qty, reduceOnly = false),
             f"band_hedge | $side netDelta=$netDelta%.4f qty=${qty.value}%.4f px=$px%.2f atr=$atr%.2f up=$upBand%.2f down=$downBand%.2f macdBias=${hc.macdBias} maBias=${hc.maBias} volR=${hc.volRatio}%.2f",
           )
     ).getOrElse(Vector.empty)

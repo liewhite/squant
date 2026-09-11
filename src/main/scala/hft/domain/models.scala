@@ -119,8 +119,26 @@ trait HasInstrument:
     *   - 载荷是**交易所告诉我的东西**，由适配层构造，而框架当下的适配层几乎全是 U 本位永续
     *     （三百多处构造点）。让它们逐个写出品种，收益是零、改错的面是三百多处。
     *
-    * 漏传的症状也不同：载荷的品种填错会让路由键与策略声明的键对不上，策略**完全收不到**
-    * 那条事件 —— 可见的失效，不是静默算错一个数。期权适配层落地时由测试钉住这一点。
+    * ## 漏传的症状：它**不是**可见的失效，别指望它自己报出来
+    *
+    * 这里曾写着"填错品种会让键对不上、策略完全收不到那条事件 —— 可见的失效"。两处都不对：
+    *
+    *   - 数据面的投递对无人订阅的键是**静默返回**的 (`EventBus.publish` 几次哈希查找后就
+    *     结束，只有命令面才有基数校验)；
+    *   - 而且更常见的方向不是"收不到"：默认值 `LinearPerp` 恰恰是**最可能已经被注册**的
+    *     那个键。OKX 的 `ETH-USD-SWAP` 与 `ETH-USDT-SWAP` 都 `fromOkx` 成 `"ETH"`，只差品种
+    *     —— 币本位的仓位漏填品种后会落进 U 本位那个桶，被当成自己的数据消费。
+    *     `StateManager` 的 routing-bug fail-fast 只在键匹配不上**任何**已注册标的时才触发，
+    *     在这个方向上恰好不触发。
+    *
+    * 所以默认值买到的是"三百多处适配层构造点不用逐个改"，代价是**这一维的正确性没有任何
+    * 结构性保证**，只能靠适配层的品种守卫 (三家客户端与四个行情源的 `require`) 在入口挡住
+    * 非永续的标的。守卫漏一个入口就是一次静默的错桶投递 —— 这已经发生过 (下单路径与拒单
+    * 回报各漏过一次)。
+    *
+    * 因此：**键的构造一律走派生入口** ([[Order.on]]、[[Position.empty]]、[[instrument]])，
+    * 不要把标的拆成两半再拼回来。期权适配层落地时，这一维要么补上编译期强制 (去掉本默认值)，
+    * 要么由测试逐个入口钉住。
     */
   def kind: InstrumentKind = InstrumentKind.LinearPerp
 
@@ -228,6 +246,47 @@ final case class Order(
     override val kind: InstrumentKind = InstrumentKind.LinearPerp,
 ) extends HasInstrument
 
+object Order:
+  /** 从**标的**造一张单 —— 品种不可能在这里丢。
+    *
+    * 下单方手里几乎总有一个 [[Instrument]] (策略的交易标的、监督者要平的那条仓位、
+    * 状态层接管的那张挂单)，而主构造器要它拆成 `exchange` + `symbol` 两个参数填进去，
+    * 第三维 `kind` 就只能靠人记得补一句 `kind = instrument.kind`。
+    *
+    * 那不是假设的风险：`Supervisor.flatten` 与 `ArbPlan` 的两个构造点都漏了它，而漏掉的
+    * 症状是**下出去的单不属于自己声明的标的** —— `StateManager.addPendingOrder` 以
+    * "Instrument not found" 抛出 (幸而是抛, 见 [[HasInstrument.kind]] 关于默认值的说明)。
+    *
+    * 所以规则写一次：把标的整个交给它，`exchange`/`symbol`/`kind` 一起来自同一处。
+    * 这与 [[HasInstrument]] 收束"载荷 -> 标的"是同一件事的反方向。
+    *
+    * `id` 与 `clientOrderId` 有默认空串: 策略下单时两者都还不存在 —— 交易所 id 要等回报，
+    * clientOrderId 由 [[hft.engine.StrategyRunner]] 在处理器返回之后统一分配 (见 [[Order.tag]])。
+    * 只有状态层接管既有挂单时它们才是已知的。
+    */
+  def on(
+      instrument: Instrument,
+      side: Side,
+      orderType: OrderType,
+      quantity: Coin,
+      reduceOnly: Boolean,
+      clientOrderId: String = "",
+      tag: String = "",
+      id: OrderId = "",
+  ): Order =
+    Order(
+      id = id,
+      exchange = instrument.exchange,
+      symbol = instrument.symbol,
+      side = side,
+      orderType = orderType,
+      quantity = quantity,
+      reduceOnly = reduceOnly,
+      clientOrderId = clientOrderId,
+      tag = tag,
+      kind = instrument.kind,
+    )
+
 /** 订单更新事件 */
 final case class OrderUpdate(
     account: AccountId,
@@ -323,8 +382,11 @@ final case class Position(
 object Position:
   val Epsilon: Double = 1e-10
 
-  def empty(account: AccountId, exchange: Exchange, symbol: Symbol): Position =
-    Position(account, exchange, symbol, Coin.Zero)
+  /** 某标的上的空仓。**收整个标的**而不是 (exchange, symbol): 从前调用方拿着一个
+    * `Instrument` 却只能把它拆两半传进来, 再 `.copy(kind = instrument.kind)` 把第三维
+    * 补回去 —— 那句 copy 漏掉就是一条 LinearPerp 的零仓覆盖掉真正的那一行。 */
+  def empty(account: AccountId, instrument: Instrument): Position =
+    Position(account, instrument.exchange, instrument.symbol, Coin.Zero, kind = instrument.kind)
 
 /** 资产余额 */
 final case class Balance(

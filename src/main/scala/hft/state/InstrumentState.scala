@@ -171,19 +171,18 @@ final class InstrumentState(val instrument: Instrument) extends InstrumentView:
             // `tag` 留空是**事实**而不是缺省: 策略的标注只活在下单那个进程的内存里, 不发给
             // 交易所 (见 Order.tag), 所以接管一张上个进程留下的单时它确实无从知道。策略若按
             // 标注分派, 必须能处理"没有标注"这一支 —— 接管单一直是这样, 与本字段无关。
-            val order = Order(
-              id = update.orderId,
-              exchange = update.exchange,
-              symbol = update.symbol,
+            // 标的取本状态所属的那个 —— 这张单就挂在它上面。经 Order.on 派生而不是把
+            // update 的 exchange/symbol 拆着填: 后者会把品种丢在默认值上, 于是非永续标的
+            // 上接管的单带着 LinearPerp 进登记, 停机撤单时 ctx.cancel 按 order.instrument
+            // 找不到状态, 直接 require 崩在"只能撤销本策略已登记的挂单"上。
+            val order = Order.on(
+              instrument = instrument,
               side = update.side,
               orderType = OrderType.Limit(update.price, TimeInForce.GTC),
               quantity = update.quantity,
               reduceOnly = update.reduceOnly,
               clientOrderId = clientId,
-              // 品种取本状态所属标的 —— 这张单就挂在它上面。漏了它, 非永续标的上接管的单
-              // 会带着 LinearPerp 进登记, 停机撤单时 ctx.cancel 按 order.instrument 找不到
-              // 状态, 直接 require 崩在"只能撤销本策略已登记的挂单"上。
-              kind = instrument.kind,
+              id = update.orderId,
             )
             _pendingOrders(clientId) = PendingOrder(order, update.status, update.timestamp)
     }

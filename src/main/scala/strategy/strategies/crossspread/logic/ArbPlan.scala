@@ -195,20 +195,19 @@ object ArbPlan:
     )
 
   private def ioc(instrument: Instrument, side: Side, price: Price, qty: Coin, tag: String): Order =
-    Order(
-      id = "",
-      exchange = instrument.exchange,
-      symbol = instrument.symbol,
+    // 走 Order.on 而不是主构造器: 这里手里就是那条腿的标的, 拆成 exchange + symbol 填进去
+    // 会把品种丢在默认值上 —— 非永续的腿下出的单不属于自己声明的标的 (见 Order.on)。
+    // clientOrderId 不填: 由 `StrategyRunner.prepareIntent` 统一分配, 策略这里填什么都会被
+    // 覆写。曾经在这里自己生成并拿它关联回报, 后果是一条回报都匹配不上: 策略永久卡在
+    // "上一轮还在途", 而腿不平的检测与平腿代码一次都跑不到。
+    Order.on(
+      instrument = instrument,
       side = side,
       // IOC 而不是市价: 限价把**最差成交价**钉死在决策时看到的那个价上。市价单在薄盘上会吃穿
       // 多档, 而这笔交易的全部利润只有几个 bp —— 一次穿档就把它连本带利吃掉。
       orderType = OrderType.Limit(price, TimeInForce.IOC),
       quantity = qty,
       reduceOnly = false,
-      // **空串** —— clientOrderId 由 `StrategyRunner.prepareIntent` 统一分配, 策略这里填什么都会被
-      // 覆写。曾经在这里自己生成并拿它关联回报, 后果是一条回报都匹配不上: 策略永久卡在
-      // "上一轮还在途", 而腿不平的检测与平腿代码一次都跑不到。
-      clientOrderId = "",
       // 认单靠它: 回报到达时框架经 `ctx.orderTag` 把它交还 (见 hft.domain.Order.tag)。
       tag = tag,
     )
@@ -222,15 +221,12 @@ object ArbPlan:
     * 相反 (见 [[ioc]]), 因为要害不同。
     */
   def unwindOrder(naked: Naked): Order =
-    Order(
-      id = "",
-      exchange = naked.leg.exchange,
-      symbol = naked.leg.symbol,
+    Order.on(
+      instrument = naked.leg,
       side = naked.closeSide,
       orderType = OrderType.Market,
       quantity = naked.excess,
       reduceOnly = true,
-      clientOrderId = "",
       tag = Tag.Unwind,
     )
 

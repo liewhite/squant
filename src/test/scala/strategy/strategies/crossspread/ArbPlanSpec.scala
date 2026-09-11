@@ -161,3 +161,24 @@ class ArbPlanSpec extends munit.FunSuite:
 
   test("最小可发量非正即抛 —— 那不是一次可用的判据"):
     intercept[IllegalArgumentException](ArbPlan.netExposure(rich, Coin(1.0), cheap, Coin.Zero, _ => Coin.Zero))
+
+  // ==================== 下出去的单必须属于自己声明的标的 ====================
+
+  test("非永续的腿: 单带着腿的品种, 不是默认的 LinearPerp"):
+    // 从前两个构造点把 Instrument 拆成 exchange + symbol 填进 Order, 第三维落在默认值上。
+    // 症状不是"下错端点"这么直白: order.instrument 与声明的标的对不上, 挂单登记时
+    // StateManager 以 "Instrument not found" 抛出 —— 而策略明明只交易自己声明的两条腿。
+    val inverseRich = Instrument(Exchange.Binance, "AAPLUSDT", InstrumentKind.InversePerp)
+    val optionCheap = Instrument.option(Exchange.Okx, "AAPL-250101-100-C")
+    val sig = signal().copy(rich = inverseRich, cheap = optionCheap)
+    val rq = Some(ArbPlan.LegQuote(inverseRich, 100.5, 100.51))
+    val cq = Some(ArbPlan.LegQuote(optionCheap, 99.99, 100.0))
+    val pos: Instrument => Coin = _ => Coin.Zero
+    val Right(legs) = ArbPlan.plan(cfg, sig, Set(inverseRich, optionCheap), rq, cq, pos, false, minOrder): @unchecked
+
+    assertEquals(legs.orders.map(_.instrument).toSet, Set(inverseRich, optionCheap))
+
+  test("平腿单同样带着那条腿的品种"):
+    val optionLeg = Instrument.option(Exchange.Okx, "AAPL-250101-100-C")
+    val naked = ArbPlan.Naked(leg = optionLeg, closeSide = Side.Short, excess = Coin(1.0))
+    assertEquals(ArbPlan.unwindOrder(naked).instrument, optionLeg)
