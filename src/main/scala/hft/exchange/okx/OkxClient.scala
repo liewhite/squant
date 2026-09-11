@@ -129,12 +129,10 @@ class OkxPublicClient protected[okx] (
     *
     * `OkxCodec.toOkx` 已经能为期权/币本位拼出正确的 instId, 但响应侧还没跟上:
     * `fetchPositions` 固定 `instType=SWAP`、`fetchPendingOrders` 与 `OkxAccountFeed` 经
-    * `fromOkx` 只认 `base-quote-SWAP`。接期权时三处同改, 这个集合随之放宽 ——
-    * 放宽它之前先看 [[ExchangeClient.supportedKinds]] 关于"请求侧与响应侧"的说明。 */
-  override val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
-
-  override protected def fetchSupportedMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
-    fetchPerpMetas()
+    * `OkxCodec.instrumentOf` 只认 `base-quote-SWAP`。接期权时三处同改, 这个 Map 随之多
+    * 一项 —— 加项之前先看 [[ExchangeClient.metaFetchers]] 关于"请求侧与响应侧"的说明。 */
+  override protected val metaFetchers: Map[InstrumentKind, () => Either[ExchangeError, Vector[SymbolMeta]]] =
+    Map(InstrumentKind.LinearPerp -> (() => fetchPerpMetas()))
 
   private def fetchPerpMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
     // 合约清单响应大, 与下单路径的时限无关

@@ -132,13 +132,20 @@ trait HasInstrument:
     *     在这个方向上恰好不触发。
     *
     * 所以默认值买到的是"三百多处适配层构造点不用逐个改"，代价是**这一维的正确性没有任何
-    * 结构性保证**，只能靠适配层的品种守卫 (三家客户端与四个行情源的 `require`) 在入口挡住
-    * 非永续的标的。守卫漏一个入口就是一次静默的错桶投递 —— 这已经发生过 (下单路径与拒单
-    * 回报各漏过一次)。
+    * 结构性保证**，只能靠适配层在入口挡住没接的品种
+    * （[[hft.exchange.ExchangeClient.supportedKinds]] 与 [[hft.exchange.MarketFeed.supportedKinds]]，
+    * 各一处声明、一处判定）。那道守卫从前是九份各写各的 `require`，漏过两次。
     *
-    * 因此：**键的构造一律走派生入口** ([[Order.on]]、[[Position.empty]]、[[instrument]])，
-    * 不要把标的拆成两半再拼回来。期权适配层落地时，这一维要么补上编译期强制 (去掉本默认值)，
-    * 要么由测试逐个入口钉住。
+    * ## 手里有标的时怎么造载荷
+    *
+    * **有派生入口的一律走它**：[[Order.on]]、[[Position.of]]、[[Position.empty]]，
+    * 以及反方向的 [[instrument]]。它们的存在就是为了让"拆成两半再拼回"没有必要 ——
+    * 那种写法漏过三次（`Supervisor.flatten` 与 `ArbPlan` 的两个构造点）。
+    *
+    * [[Fill]] 与 [[OrderUpdate]] **没有**派生入口：它们字段多，工厂只是把同样一串字段
+    * 再抄一遍，收益抵不上多出来的那个入口。它们的构造点集中在撮合 (`hft.sim.SimState`)
+    * 与回报翻译 (`hft.exchange.RestTradingGateway`)，手里都有标的，**必须显式写
+    * `kind = instrument.kind`**。这条靠测试钉住，不靠记性。
     */
   def kind: InstrumentKind = InstrumentKind.LinearPerp
 
@@ -382,11 +389,14 @@ final case class Position(
 object Position:
   val Epsilon: Double = 1e-10
 
-  /** 某标的上的空仓。**收整个标的**而不是 (exchange, symbol): 从前调用方拿着一个
-    * `Instrument` 却只能把它拆两半传进来, 再 `.copy(kind = instrument.kind)` 把第三维
-    * 补回去 —— 那句 copy 漏掉就是一条 LinearPerp 的零仓覆盖掉真正的那一行。 */
-  def empty(account: AccountId, instrument: Instrument): Position =
-    Position(account, instrument.exchange, instrument.symbol, Coin.Zero, kind = instrument.kind)
+  /** 某标的上的仓位。**收整个标的**而不是 (exchange, symbol)：从前调用方拿着一个
+    * `Instrument` 却只能把它拆两半传进来，再补一句 `kind = instrument.kind` 把第三维
+    * 接回去 —— 漏掉就是一条 LinearPerp 的仓位覆盖掉真正的那一行。 */
+  def of(account: AccountId, instrument: Instrument, size: Coin): Position =
+    Position(account, instrument.exchange, instrument.symbol, size, kind = instrument.kind)
+
+  /** 某标的上的空仓 */
+  def empty(account: AccountId, instrument: Instrument): Position = of(account, instrument, Coin.Zero)
 
 /** 资产余额 */
 final case class Balance(

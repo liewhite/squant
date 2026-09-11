@@ -251,8 +251,7 @@ final class DeltaHedgeStrategy(
               val side = if net > Coin.Zero then Side.Short else Side.Long // 净多->卖, 净空->买
               val (limitPx, tif) = leg.place(style, side, bbo)
               ctx.place(
-                Order("", exchange, symbol, side, OrderType.Limit(limitPx, tif), qty,
-                  reduceOnly = false, clientOrderId = ""),
+                Order.on(instrument, side, OrderType.Limit(limitPx, tif), qty, reduceOnly = false),
                 f"delta_hedge | $side qty=${qty.value}%.4f ${style.label} limit=${limitPx.value}%.2f " +
                   f"净敞口=${net.value}%.4f 带=(+${upTh.value}%.4f,-${downTh.value}%.4f) " +
                   f"方向=$driftDir σ=${sigma.map(v => f"$v%.3f").getOrElse("预热中")} " +

@@ -86,7 +86,7 @@ final case class Ledger(account: AccountId, positions: Map[Instrument, Ledger.Ho
   def openPositions: Vector[Position] =
     positions.iterator
       .filterNot((_, h) => h.isEmpty)
-      .map((instrument, h) => Position(account, instrument.exchange, instrument.symbol, h.size, kind = instrument.kind))
+      .map((instrument, h) => Position.of(account, instrument, h.size))
       .toVector
 
 object Ledger:

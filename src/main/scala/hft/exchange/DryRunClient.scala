@@ -31,9 +31,8 @@ final class DryRunClient(delegate: TradingClient) extends TradingClient:
   // ==================== 只读：透传 ====================
 
   /** 接的品种与 delegate 一致 —— dry-run 拦的是写入, 不是某个品种。 */
-  override def supportedKinds: Set[InstrumentKind] = delegate.supportedKinds
-  override protected def fetchSupportedMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
-    delegate.fetchMetas(kind)
+  override protected def metaFetchers: Map[InstrumentKind, () => Either[ExchangeError, Vector[SymbolMeta]]] =
+    delegate.supportedKinds.map(kind => kind -> (() => delegate.fetchMetas(kind))).toMap
   override def fetchPendingOrders(instrument: Instrument): Either[ExchangeError, Vector[OrderUpdate]] = delegate.fetchPendingOrders(instrument)
   override def fetchAccountInfo(): Either[ExchangeError, AccountInfo] = delegate.fetchAccountInfo()
   override def fetchWallet(): Either[ExchangeError, Map[String, Double]] = delegate.fetchWallet()

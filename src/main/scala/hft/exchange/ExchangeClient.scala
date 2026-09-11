@@ -10,7 +10,13 @@ import org.slf4j.LoggerFactory
 trait ExchangeClient:
   def exchange: Exchange
 
-  /** 本适配层**接入了哪些品种** —— 一个所支持什么，是这一处说了算。
+  /** 本适配层**接了哪些品种，以及各自的规格从哪拉** —— 一个所支持什么，是这一处说了算。
+    *
+    * ## 为什么是一个 Map，而不是"一个集合 + 一个按品种取的方法"
+    *
+    * 后者能写出"集合里加了期权、而取法忘了加那一支"的状态。那时 `ensureMetas(Option)`
+    * 会拿一批**永续**规格去顶期权、还被 [[MetaTable]] 记成"已加载"，随后 `metaOf(期权)`
+    * 报"尚未加载" —— 失败可见，但归因指向错误的地方。一个 Map 让这两件事不可能不一致。
     *
     * ## 为什么要有这个声明
     *
@@ -20,17 +26,24 @@ trait ExchangeClient:
     * OKX 的行情源没有这道守卫，订一个期权盘口会订阅成功、然后在第一条推送上抛
     * "Unknown OKX instId"，错误指向报文而不是"这个品种没接"。
     *
-    * ## 请求侧与响应侧必须同时通了才算"支持"
+    * ## 请求侧与响应侧必须同时通了才算"接了"
     *
     * 这不是"能不能拼出那个 instId"。OKX 的 `OkxCodec.toOkx` 早就能为期权和币本位拼出正确的
     * instId，但响应侧还没跟上（`fetchPositions` 固定 `instType=SWAP`、`fetchPendingOrders`
-    * 与私有流经 `fromOkx` 只认 `base-quote-SWAP`）。只放开请求侧的话，一张期权单能成功发
-    * 出去，然后**全程没有回报、没有挂单、没有仓位** —— 策略以为单没成立，pending 清不掉，
-    * 十几秒后以"结果不确定"终止，而真实原因是我们根本没在听那条频道。
+    * 与私有流经 `OkxCodec.instrumentOf` 只认 `base-quote-SWAP`）。只放开请求侧的话，一张
+    * 期权单能成功发出去，然后**全程没有回报、没有挂单、没有仓位** —— 策略以为单没成立，
+    * pending 清不掉，十几秒后以"结果不确定"终止，而真实原因是我们根本没在听那条频道。
     *
-    * 所以一个品种进这个集合的条件是：规格端点、下单端点、以及**回报解析**三处都接通了。
+    * 所以一个品种进这个 Map 的条件是：规格端点、下单端点、以及**回报解析**三处都接通了。
+    *
+    * 按品种分口而不是一个"拉全部"：三家的规格端点本来就按品种分（Bybit 的 `category`、
+    * OKX 的 `instType`、Binance 的 USDⓈ-M 与期权是两套 API），一个 `fetchAll` 只能定死在
+    * 其中一种上 —— 从前它就定死在永续上，于是期权的规格根本无处可取。
     */
-  def supportedKinds: Set[InstrumentKind]
+  protected def metaFetchers: Map[InstrumentKind, () => Either[ExchangeError, Vector[SymbolMeta]]]
+
+  /** 本适配层接了哪些品种。由 [[metaFetchers]] 派生 —— 不是第二处声明。 */
+  final def supportedKinds: Set[InstrumentKind] = metaFetchers.keySet
 
   /** 这个标的本适配层接不接 —— 接不了就**立即失败**，返回它自己好让调用点串起来。
     *
@@ -46,22 +59,15 @@ trait ExchangeClient:
 
   /** 拉取**某一品种**的全部合约规格。
     *
-    * 按品种而不是"全部"：三家的规格端点本来就按品种分口
-    * （Bybit 的 `category`、OKX 的 `instType`、Binance 的 USDⓈ-M 与期权是两套 API），
-    * 一个不分品种的 `fetchAll` 只能定死在其中一种上 —— 从前它就定死在永续上，
-    * 于是期权的规格根本无处可取。
-    *
-    * 没接入的品种返回 `Left` 而不是空 —— "这个所没有期权"与"我没接期权"是两件事，
-    * 空集把它们混成同一个读数。这道判定由 [[supportedKinds]] 派生，实现方只管拉自己接了
-    * 的那些（[[fetchSupportedMetas]]）。
+    * 没接的品种返回 `Left` 而不是空 —— "这个所没有期权"与"我没接期权"是两件事，
+    * 空集把它们混成同一个读数。
     */
   final def fetchMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
-    if !supportedKinds.contains(kind) then
-      Left(ExchangeError.Rejected("unsupported", s"$exchange 适配层未接入 $kind (已接: ${supportedKinds.mkString("/")})"))
-    else fetchSupportedMetas(kind)
+    metaFetchers.get(kind) match
+      case Some(fetch) => fetch()
+      case None =>
+        Left(ExchangeError.Rejected("unsupported", s"$exchange 适配层未接入 $kind (已接: ${supportedKinds.mkString("/")})"))
 
-  /** 拉一个**本适配层确实接了**的品种的规格。没接的品种到不了这里，见 [[fetchMetas]]。 */
-  protected def fetchSupportedMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]]
 
   /** 本所的合约规格表 —— 按标的索引，可增量补充。见 [[MetaTable]]。
     *

@@ -18,11 +18,10 @@ class AccountMonitorSpec extends munit.FunSuite:
     * 标的 (如币安的股票永续 AAPLUSDT) 时, 监控照样报得出来"。柜台走不通的正是这条路径。 */
   private class ReadOnlyClient(@volatile var positions: Vector[Position]) extends TradingClient:
     override val metaTable: MetaTable = MetaTable()
-    override val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
     private val meta = SymbolMeta(ex, "BTCUSDT", tickSize = 0.1, sizeStep = 0.001, minOrderSize = 0.001, contractSize = 1.0)
     val placed = ConcurrentLinkedQueue[String]()
     override def exchange: Exchange = ex
-    override protected def fetchSupportedMetas(kind: InstrumentKind) = Right(Vector(meta))
+    override protected val metaFetchers = Map(InstrumentKind.LinearPerp -> (() => Right(Vector(meta))))
     override def placeOrder(order: ExchangeOrder) = { placed.add("placed"): Unit; Right("should-never-happen") }
     override def cancelOrder(instrument: Instrument, ref: OrderRef) = Right(())
     override def fetchPendingOrders(instrument: Instrument) = Right(Vector.empty)

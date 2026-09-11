@@ -55,7 +55,7 @@ final class PositionBook(account: AccountId, exchange: Exchange, dustOf: Instrum
   def managedInstruments: Set[Instrument] = managed
 
   def positionOf(instrument: Instrument): Position =
-    Position(account, exchange, instrument.symbol, sizes.getOrElse(instrument, Coin.Zero), kind = instrument.kind)
+    Position.of(account, instrument, sizes.getOrElse(instrument, Coin.Zero))
 
   /** 按标的**增量**重置 —— 只动这批，别把上一批的账抹掉。
     *

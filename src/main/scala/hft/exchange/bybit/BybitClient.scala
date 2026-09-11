@@ -105,10 +105,8 @@ class BybitPublicClient protected[bybit] (
   /** Bybit v5 按 `category` 分口, 本适配层只接 `linear`。期权 (`category=option`) 的
     * REST 端点形状相同, 但响应侧没接: 私有流要单独订 `category=option`, 公共行情更是
     * 另一条 WS 地址 —— 只放开请求侧就是发得出单、收不到回报。 */
-  override val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
-
-  override protected def fetchSupportedMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
-    fetchLinearMetas()
+  override protected val metaFetchers: Map[InstrumentKind, () => Either[ExchangeError, Vector[SymbolMeta]]] =
+    Map(InstrumentKind.LinearPerp -> (() => fetchLinearMetas()))
 
   private def fetchLinearMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
     // instruments-info 为公共端点 (免签)，分页跟进 nextPageCursor

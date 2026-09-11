@@ -77,10 +77,8 @@ class BinancePublicClient protected[binance] (
 
   /** 本客户端接的是 USDⓈ-M 永续 (`fapi`)。币安的期权是另一套 API (`eapi`), 框架没接:
     * 那意味着另一套端点、另一套报文、另一条私有流, 不是放开一个判断就能跑的。 */
-  override val supportedKinds: Set[InstrumentKind] = Set(InstrumentKind.LinearPerp)
-
-  override protected def fetchSupportedMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
-    fetchPerpMetas()
+  override protected val metaFetchers: Map[InstrumentKind, () => Either[ExchangeError, Vector[SymbolMeta]]] =
+    Map(InstrumentKind.LinearPerp -> (() => fetchPerpMetas()))
 
   private def fetchPerpMetas(): Either[ExchangeError, Vector[SymbolMeta]] =
     // exchangeInfo 是三家里最大的响应 (几百个标的), 与下单路径的时限无关

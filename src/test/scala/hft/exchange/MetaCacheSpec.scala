@@ -22,10 +22,12 @@ class MetaCacheSpec extends munit.FunSuite:
     override val metaTable: MetaTable = MetaTable()
     val calls: AtomicInteger = AtomicInteger(0)
     override def exchange: Exchange = Exchange.Okx
-    override def supportedKinds: Set[InstrumentKind] = byKind.keySet
-    override protected def fetchSupportedMetas(kind: InstrumentKind): Either[ExchangeError, Vector[SymbolMeta]] =
-      calls.incrementAndGet()
-      Right(byKind(kind))
+    override protected val metaFetchers = byKind.map((kind, metas) =>
+      kind -> { () =>
+        calls.incrementAndGet()
+        Right(metas)
+      }
+    )
 
   private val perp = Instrument.perp(Exchange.Okx, "ETH")
   private val inverse = Instrument(Exchange.Okx, "ETH", InstrumentKind.InversePerp)
