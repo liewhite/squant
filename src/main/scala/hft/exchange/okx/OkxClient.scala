@@ -145,14 +145,16 @@ class OkxPublicClient protected[okx] (
           // "尚未上市"的判据收在 InstrumentData 里 (见它的说明)
           .filterNot(_.notYetListed)
           .flatMap { d =>
-            fromOkx(d.instId, quote).map { sym =>
+            instrumentOf(d.instId, quote).map { instrument =>
               SymbolMeta(
                 exchange = Exchange.Okx,
-                symbol = sym,
+                symbol = instrument.symbol,
                 tickSize = d.tickSz.asDouble,
                 sizeStep = d.lotSz.asDouble,
                 minOrderSize = d.minSz.asDouble,
                 contractSize = d.ctVal.asDouble, // 每张合约对应的币本位数量
+                // 规格按标的索引 (见 ExchangeClient.metaTable), 品种就是 instId 说的那个
+                kind = instrument.kind,
               )
             }
           }
@@ -162,10 +164,7 @@ class OkxPublicClient protected[okx] (
     }
 
 
-  /** 把交易所回报里的**张数**换回框架统一的币本位。
-    * 规格取自 [[ExchangeClient.metaOf]] —— 与行情源、汇报面、柜台读的是同一份。
-    * 本客户端只认 U 本位永续 (见 `perpInstId`), 故按 perp 查表。 */
-  protected def metaOf(symbol: Symbol): SymbolMeta = metaOf(Instrument.perp(Exchange.Okx, symbol))
+
 
 
   // ==================== 请求基础设施 ====================
@@ -295,8 +294,8 @@ final class OkxClient private[okx] (
       resp <- signedRequest[PendingResp](Method.GET, path)
       _ <- ensureOk(resp.code, resp.msg)
     yield resp.data.iterator.flatMap { d =>
-      fromOkx(d.instId, quote).map { sym =>
-        val filled = metaOf(sym).toCoin(Contracts(d.accFillSz.asDouble))
+      instrumentOf(d.instId, quote).map { i =>
+        val filled = metaOf(i).toCoin(Contracts(d.accFillSz.asDouble))
         OrderUpdate(
           account = AccountId.Live,
           orderId = d.ordId,
@@ -304,17 +303,18 @@ final class OkxClient private[okx] (
           // 索引里凭空造出一个不存在的键, 而 WS 路径给的是 None (同一事实两个答案)。
           clientOrderId = Option.when(d.clOrdId.nonEmpty)(d.clOrdId),
           exchange = Exchange.Okx,
-          symbol = sym,
+          symbol = i.symbol,
           side = sideFromOkx(d.side),
           status = mapOrderState(d.state, filled),
           price = Price(d.px.asDoubleOrZero),
-          quantity = metaOf(sym).toCoin(Contracts(d.sz.asDouble)),
+          quantity = metaOf(i).toCoin(Contracts(d.sz.asDouble)),
           filledQuantity = filled,
           reduceOnly = OkxCodec.booleanFrom(d.reduceOnly, "reduceOnly"),
           // 交易所侧的更新时刻。用本地钟会让延迟基准恒为零 (柜台把它当 exchangeTs 用)。
           timestamp = d.uTime.toLongOption.getOrElse(
             throw IllegalStateException(s"OKX orders-pending 缺 uTime: ordId=${d.ordId} 原始值='${d.uTime}'")
           ),
+          kind = i.kind,
         )
       }
     }.toVector
@@ -372,13 +372,14 @@ final class OkxClient private[okx] (
       // 所以"查不到"只可能是"交易所清单里没有"; 规格改成可增量加载之后, "查不到"多了
       // 一种含义"还没人加载", 而两者的表现完全一样 —— 返回空列表。看板那条链路
       // (AccountMonitor, 无柜台) 会因此把 OKX 全部持仓显示成零, 没有任何症状。
-      for sym <- fromOkx(d.instId, quote)
+      for i <- instrumentOf(d.instId, quote)
       yield Position(
         account = AccountId.Live,
         exchange = Exchange.Okx,
-        symbol = sym,
+        symbol = i.symbol,
         // 张 -> 币; OKX 的 pos 正多负空。规格缺失即抛 (见上)
-        size = metaOf(sym).toCoin(Contracts(d.pos.asDouble)),
+        size = metaOf(i).toCoin(Contracts(d.pos.asDouble)),
+        kind = i.kind,
       )
     }.toVector
 

@@ -85,13 +85,17 @@ final class OkxMarketFeed(
     case "error" => throw IllegalStateException(s"OKX public WS error: code=${env.code} msg=${env.msg}")
     case other   => logger.warn(s"ignoring OKX public event '$other': $text")
 
-  private def requireSymbol(instId: String): Symbol =
-    fromOkx(instId, quote).getOrElse(throw IllegalStateException(s"Unknown OKX instId: '$instId'"))
+  private def requireSymbol(instId: String): Symbol = requireInstrument(instId).symbol
+
+  /** 推送里的 instId -> 标的。品种由 `OkxCodec.instrumentOf` 那一处认, 不在这里补。 */
+  private def requireInstrument(instId: String): Instrument =
+    instrumentOf(instId, quote).getOrElse(throw IllegalStateException(s"Unknown OKX instId: '$instId'"))
 
   // OKX bbo-tbt 盘口数量单位为合约张数，统一换算为币本位 (策略层永远看币本位，与 Binance BBO 一致)
   private def publishBbo(instId: String, d: BboData): Unit =
-    val sym = requireSymbol(instId)
-    val meta = client.metaOf(Instrument.perp(Exchange.Okx, sym))
+    val instrument = requireInstrument(instId)
+    val sym = instrument.symbol
+    val meta = client.metaOf(instrument)
     val ask = d.asks.headOption.getOrElse(throw IllegalStateException(s"OKX bbo empty asks: $instId"))
     val bid = d.bids.headOption.getOrElse(throw IllegalStateException(s"OKX bbo empty bids: $instId"))
     val ts = d.ts.toLong
@@ -118,8 +122,9 @@ final class OkxMarketFeed(
   private def publishTrade(d: TradeData): Unit =
     val ts = d.ts.toLong
     // OKX side = taker 方向: side=sell -> 买方是挂单方 (isBuyerMaker=true)
-    val sym = requireSymbol(d.instId)
-    val trade = MarketTrade(Exchange.Okx, sym, d.px.asPrice, client.metaOf(Instrument.perp(Exchange.Okx, sym)).toCoin(Contracts(d.sz.asDouble)), d.side == "sell", ts)
+    val instrument = requireInstrument(d.instId)
+    val qty = client.metaOf(instrument).toCoin(Contracts(d.sz.asDouble))
+    val trade = MarketTrade(Exchange.Okx, instrument.symbol, d.px.asPrice, qty, d.side == "sell", ts, kind = instrument.kind)
     publish(Event.at(Topics.Trade, trade, ts))
 
   private def publishFunding(d: FundingRateData): Unit =

@@ -44,6 +44,22 @@ private[okx] object OkxCodec:
       case Array(base, q, "SWAP") if q == quote => Some(base)
       case _                                    => None
 
+  /** OKX instId -> **框架标的**，[[fromOkx]] 的带品种版本。响应侧一律走它。
+    *
+    * 存在的理由是 [[toOkx]] 的对偶原本缺席：响应侧只能拿到一个 `Symbol`，然后各自补一句
+    * `Instrument.perp(Exchange.Okx, sym)` —— 同一条"instId 是什么品种"的规则在行情源、
+    * 私有流、挂单查询、持仓查询里抄了七遍，而这正是 [[hft.domain.HasInstrument]] 那段
+    * 文档说要消灭的形态：规则会变（接期权时它要按 instId 认出行权价/到期），七处都得跟着改，
+    * 漏一处的症状是事件被投给错误的桶，没有任何报错。
+    *
+    * 现在品种只在这里决定：接期权时改这一个函数，响应侧全部跟着通。
+    *
+    * 返回 `None` 的是**本适配层接不住**的 instId —— 币本位、别的计价币、期权。
+    * 判据与 [[fromOkx]] 同一条，见它关于 quote 的说明。
+    */
+  def instrumentOf(instId: String, quote: String): Option[Instrument] =
+    fromOkx(instId, quote).map(Instrument.perp(Exchange.Okx, _))
+
   /** "BTC-USDT" -> Some("BTC") */
   def fromOkxIndex(instId: String): Option[Symbol] =
     instId.split('-') match

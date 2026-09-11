@@ -161,15 +161,15 @@ final class OkxAccountFeed(
     *
     * 从前同一个条件在本文件里有两种处理: 仓位路径用 for-comprehension 静默跳过、
     * 订单路径直接抛。同一事实必须只有一个答案。 */
-  private def metaOf(symbol: Symbol): SymbolMeta = client.metaOf(Instrument.perp(Exchange.Okx, symbol))
+  private def metaOf(instrument: Instrument): SymbolMeta = client.metaOf(instrument)
 
   /** 交易所报的仓位 —— 交给柜台对账, 不进总线 */
   private def publishPosition(d: PositionData): Unit =
-    // 非本 quote 的品种 (币本位等) 不属于本柜台, fromOkx 返回 None 即跳过 —— 这条有依据。
-    fromOkx(d.instId, client.quote).foreach { sym =>
+    // 非本适配层接的品种 (币本位、别的计价币) 不属于本柜台, instrumentOf 返回 None 即跳过。
+    instrumentOf(d.instId, client.quote).foreach { instrument =>
       report(AccountReport.PositionReported(
-        Instrument.perp(Exchange.Okx, sym),
-        metaOf(sym).toCoin(Contracts(d.pos.asDouble)),
+        instrument,
+        metaOf(instrument).toCoin(Contracts(d.pos.asDouble)),
         nowMs,
       ))
     }
@@ -178,8 +178,25 @@ final class OkxAccountFeed(
     OkxAccountFeed.accountReports(d).foreach(report)
 
   private def publishOrder(d: OrderPushData): Unit =
-    val sym = fromOkx(d.instId, client.quote).getOrElse(throw IllegalStateException(s"Unknown OKX instId in order: '${d.instId}'"))
-    val meta = metaOf(sym)
+    instrumentOf(d.instId, client.quote) match
+      case Some(instrument) => publishOrderOf(instrument, d)
+      case None =>
+        // 私有 orders 频道按 instType=SWAP **全量**订阅, 于是账户上一张手工下的币本位单
+        // (ETH-USD-SWAP) 或别的计价币的单, 它的回报也会推到这里。那是账户的合法状态,
+        // 不是契约违约 —— 从前这里直接抛, 一张手工单就能把引擎终止掉。
+        // 与 publishPosition 同一个答案: 不归本柜台管的标的, 跳过。
+        //
+        // 但**我们自己下的单都带 clOrdId**: 带着它却解析不出标的, 那就不是"别人的合约",
+        // 是我们认不出自己的单了 (instId 格式变了)。那种回报静默跳过的话, 策略会一直等到
+        // 超时才以"结果不确定"终止, 而真实原因在这里。所以那一支必须立即失败。
+        require(
+          d.clOrdId.isEmpty,
+          s"OKX 订单回报解析不出标的, 而它带着我们自己的 clOrdId: instId='${d.instId}' clOrdId='${d.clOrdId}'",
+        )
+        logger.debug(s"忽略非本柜台标的的订单回报: instId=${d.instId}")
+
+  private def publishOrderOf(instrument: Instrument, d: OrderPushData): Unit =
+    val meta = metaOf(instrument)
     val side = d.side match
       case "buy"  => Side.Long
       case "sell" => Side.Short
@@ -193,9 +210,7 @@ final class OkxAccountFeed(
     report(AccountReport.OrderStatusChanged(
       orderId = d.ordId,
       clientOrderId = if d.clOrdId.nonEmpty then Some(d.clOrdId) else None,
-      // fromOkx 只认本 quote 的永续 (见它的说明), 所以到这里的必然是 U 本位永续。
-      // 接期权时这里要按 instId 解析出品种。
-      instrument = Instrument.perp(Exchange.Okx, sym),
+      instrument = instrument,
       side = side,
       status = mapOrderState(d.state, filledQty),
       price = Price(d.px.asDoubleOrZero),
@@ -206,4 +221,4 @@ final class OkxAccountFeed(
       timestamp = ts,
     ))
     if fillSz.nonZero then
-      report(AccountReport.Executed(Instrument.perp(Exchange.Okx, sym), side, d.fillPx.asPrice, fillSz, ts))
+      report(AccountReport.Executed(instrument, side, d.fillPx.asPrice, fillSz, ts))
